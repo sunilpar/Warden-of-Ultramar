@@ -12,15 +12,11 @@ export class MyRoomState extends Schema {
   @type({ map: Player }) players = new MapSchema<Player>();
 }
 
-export class Part2Room extends Room<MyRoomState> {
+export class Part2Room extends Room {
   state = new MyRoomState();
 
-  onCreate (options: any) {
-    // set map dimensions
-    this.state.mapWidth = 800;
-    this.state.mapHeight = 600;
-
-    this.onMessage(0, (client, input) => {
+  messages = {
+    0: (client: Client, input: { left: boolean; right: boolean; up: boolean; down: boolean }) => {
       // handle player input
       const player = this.state.players.get(client.sessionId);
       const velocity = 2;
@@ -39,11 +35,17 @@ export class Part2Room extends Room<MyRoomState> {
         player.y += velocity;
       }
 
-    });
+    }
+  }
+
+  onCreate (options: any) {
+    // set map dimensions
+    this.state.mapWidth = 800;
+    this.state.mapHeight = 600;
   }
 
   onJoin (client: Client, options: any) {
-    console.log(client.sessionId, "joined!");
+    console.log("Joined!", { roomId: this.roomId, sessionId: client.sessionId });
 
     // create player at random position.
     const player = new Player();
@@ -53,13 +55,13 @@ export class Part2Room extends Room<MyRoomState> {
     this.state.players.set(client.sessionId, player);
   }
 
-  onLeave (client: Client, consented: boolean) {
-    console.log(client.sessionId, "left!");
+  onLeave (client: Client, code: number) {
+    console.log("Left!", { roomId: this.roomId, sessionId: client.sessionId });
     this.state.players.delete(client.sessionId);
   }
 
   onDispose() {
-    console.log("room", this.roomId, "disposing...");
+    console.log("Disposing room", this.roomId, "...");
   }
 
 }
