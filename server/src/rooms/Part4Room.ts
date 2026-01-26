@@ -2,11 +2,11 @@ import { Room, Client } from "colyseus";
 import { Schema, type, MapSchema } from "@colyseus/schema";
 
 export interface InputData {
-  left: false;
-  right: false;
-  up: false;
-  down: false;
-  tick: number;
+  left: boolean;
+  right: boolean;
+  up: boolean;
+  down: boolean;
+  tick?: number;
 }
 
 export class Player extends Schema {
@@ -22,22 +22,24 @@ export class MyRoomState extends Schema {
   @type({ map: Player }) players = new MapSchema<Player>();
 }
 
-export class Part4Room extends Room<MyRoomState> {
+export class Part4Room extends Room {
   state = new MyRoomState();
   fixedTimeStep = 1000 / 60;
 
-  onCreate (options: any) {
-    // set map dimensions
-    this.state.mapWidth = 800;
-    this.state.mapHeight = 600;
-
-    this.onMessage(0, (client, input) => {
+  messages = {
+    0: (client: Client, input: InputData) => {
       // handle player input
       const player = this.state.players.get(client.sessionId);
 
       // enqueue input to user input buffer.
       player.inputQueue.push(input);
-    });
+    }
+  }
+
+  onCreate (options: any) {
+    // set map dimensions
+    this.state.mapWidth = 800;
+    this.state.mapHeight = 600;
 
     let elapsedTime = 0;
     this.setSimulationInterval((deltaTime) => {
@@ -78,7 +80,7 @@ export class Part4Room extends Room<MyRoomState> {
   }
 
   onJoin (client: Client, options: any) {
-    console.log(client.sessionId, "joined!");
+    console.log("Joined!", { roomId: this.roomId, sessionId: client.sessionId });
 
     const player = new Player();
     player.x = Math.random() * this.state.mapWidth;
@@ -87,13 +89,13 @@ export class Part4Room extends Room<MyRoomState> {
     this.state.players.set(client.sessionId, player);
   }
 
-  onLeave (client: Client, consented: boolean) {
-    console.log(client.sessionId, "left!");
+  onLeave (client: Client, code: number) {
+    console.log("Left!", { roomId: this.roomId, sessionId: client.sessionId });
     this.state.players.delete(client.sessionId);
   }
 
   onDispose() {
-    console.log("room", this.roomId, "disposing...");
+    console.log("Disposing room", this.roomId, "...");
   }
 
 }

@@ -10,14 +10,18 @@
  */
 
 import Phaser from "phaser";
-import { Room, Client, getStateCallbacks } from "colyseus.js";
+
+import { Room, Client, Callbacks } from "@colyseus/sdk";
+
 import { BACKEND_URL } from "../backend";
 
-// Import the state type from server-side code
-import type { MyRoomState } from "../../../server/src/rooms/Part4Room";
+// Import server types for strong-typing Colyseus SDK
+import type server from "../../../server/src/app.config";
+import type { InputData, Part4Room } from "../../../server/src/rooms/Part4Room";
 
 export class Part4Scene extends Phaser.Scene {
-    room: Room<MyRoomState>;
+    client = new Client<typeof server>(BACKEND_URL);
+    room: Room<Part4Room>;
 
     currentPlayer: Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
     playerEntities: { [sessionId: string]: Phaser.Types.Physics.Arcade.ImageWithDynamicBody } = {};
@@ -29,7 +33,7 @@ export class Part4Scene extends Phaser.Scene {
 
     cursorKeys: Phaser.Types.Input.Keyboard.CursorKeys;
 
-    inputPayload = {
+    inputPayload: InputData = {
         left: false,
         right: false,
         up: false,
@@ -53,9 +57,9 @@ export class Part4Scene extends Phaser.Scene {
         // connect with the room
         await this.connect();
 
-        const $ = getStateCallbacks(this.room);
+        const callbacks = Callbacks.get(this.room);
 
-        $(this.room.state).players.onAdd((player, sessionId) => {
+        callbacks.onAdd("players", (player, sessionId) => {
             const entity = this.physics.add.image(player.x, player.y, 'ship_0001');
             this.playerEntities[sessionId] = entity;
 
@@ -69,14 +73,14 @@ export class Part4Scene extends Phaser.Scene {
                 this.remoteRef = this.add.rectangle(0, 0, entity.width, entity.height);
                 this.remoteRef.setStrokeStyle(1, 0xff0000);
 
-                $(player).onChange(() => {
+                callbacks.onChange(player, () => {
                     this.remoteRef.x = player.x;
                     this.remoteRef.y = player.y;
                 });
 
             } else {
                 // listening for server updates
-                $(player).onChange(() => {
+                callbacks.onChange(player, () => {
                     //
                     // we're going to LERP the positions during the render loop.
                     //
@@ -89,7 +93,7 @@ export class Part4Scene extends Phaser.Scene {
         });
 
         // remove local reference when entity is removed from the server
-        $(this.room.state).players.onRemove((player, sessionId) => {
+        callbacks.onRemove("players", (player, sessionId) => {
             const entity = this.playerEntities[sessionId];
             if (entity) {
                 entity.destroy();
@@ -109,10 +113,8 @@ export class Part4Scene extends Phaser.Scene {
             .setStyle({ color: "#ff0000" })
             .setPadding(4)
 
-        const client = new Client(BACKEND_URL);
-
         try {
-            this.room = await client.joinOrCreate("part4_room", {});
+            this.room = await this.client.joinOrCreate("part4_room", {});
 
             // connection successful!
             connectionStatusText.destroy();

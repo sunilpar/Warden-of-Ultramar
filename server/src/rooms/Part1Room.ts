@@ -1,4 +1,4 @@
-import { Room, Client } from "colyseus";
+import { Room, Client, Messages } from "colyseus";
 import { Schema, type, MapSchema } from "@colyseus/schema";
 
 export class Player extends Schema {
@@ -15,13 +15,9 @@ export class MyRoomState extends Schema {
 export class Part1Room extends Room {
   state = new MyRoomState();
 
-  onCreate (options: any) {
-    // set map dimensions
-    this.state.mapWidth = 800;
-    this.state.mapHeight = 600;
-
+  messages = {
     // handle player input
-    this.onMessage(0, (client, input) => {
+    0: (client: Client, input: { left: boolean; right: boolean; up: boolean; down: boolean }) => {
       const player = this.state.players.get(client.sessionId);
       const velocity = 2;
 
@@ -39,11 +35,17 @@ export class Part1Room extends Room {
         player.y += velocity;
       }
 
-    });
+    },
+  }
+
+  onCreate (options: any) {
+    // set map dimensions
+    this.state.mapWidth = 800;
+    this.state.mapHeight = 600;
   }
 
   onJoin (client: Client, options: any) {
-    console.log(client.sessionId, "joined!");
+    console.log("Joined!", { roomId: this.roomId, sessionId: client.sessionId });
 
     // create player at random position.
     const player = new Player();
@@ -53,13 +55,13 @@ export class Part1Room extends Room {
     this.state.players.set(client.sessionId, player);
   }
 
-  onLeave (client: Client, consented: boolean) {
-    console.log(client.sessionId, "left!");
+  onLeave (client: Client, code: number) {
+    console.log("Left!", { roomId: this.roomId, sessionId: client.sessionId });
     this.state.players.delete(client.sessionId);
   }
 
   onDispose() {
-    console.log("room", this.roomId, "disposing...");
+    console.log("Disposing room", this.roomId, "...");
   }
 
 }

@@ -1,5 +1,6 @@
 node_modules
 .parcel-cache
-client/dist/*.js
-client/dist/*.map
+dist
 .DS_Store
+package-lock.json
+.devmode.json

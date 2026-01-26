@@ -8,14 +8,16 @@
  */
 
 import Phaser from "phaser";
-import { Room, Client, getStateCallbacks } from "colyseus.js";
+import { Room, Client, getStateCallbacks, Callbacks } from "@colyseus/sdk";
 import { BACKEND_URL } from "../backend";
 
-// Import the state type from server-side code
-import type { MyRoomState } from "../../../server/src/rooms/Part2Room";
+// Import server types for strong-typing Colyseus SDK
+import type server from "../../../server/src/app.config";
+import type { Part2Room } from "../../../server/src/rooms/Part2Room";
 
 export class Part2Scene extends Phaser.Scene {
-    room: Room<MyRoomState>;
+    client = new Client<typeof server>(BACKEND_URL);
+    room: Room<Part2Room>;
 
     currentPlayer: Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
     playerEntities: { [sessionId: string]: Phaser.Types.Physics.Arcade.ImageWithDynamicBody } = {};
@@ -42,14 +44,14 @@ export class Part2Scene extends Phaser.Scene {
         // connect with the room
         await this.connect();
 
-        const $ = getStateCallbacks(this.room);
+        const callbacks = Callbacks.get(this.room);
 
-        $(this.room.state).players.onAdd((player, sessionId) => {
+        callbacks.onAdd("players", (player, sessionId) => {
             const entity = this.physics.add.image(player.x, player.y, 'ship_0001');
             this.playerEntities[sessionId] = entity;
 
             // listening for server updates
-            $(player).onChange(() => {
+            callbacks.onChange(player, () => {
                 //
                 // do not update local position immediately
                 // we're going to LERP them during the render loop.
@@ -60,7 +62,7 @@ export class Part2Scene extends Phaser.Scene {
         });
 
         // remove local reference when entity is removed from the server
-        $(this.room.state).players.onRemove((player, sessionId) => {
+        callbacks.onRemove("players", (player, sessionId) => {
             const entity = this.playerEntities[sessionId];
             if (entity) {
                 entity.destroy();
@@ -80,10 +82,8 @@ export class Part2Scene extends Phaser.Scene {
             .setStyle({ color: "#ff0000" })
             .setPadding(4)
 
-        const client = new Client(BACKEND_URL);
-
         try {
-            this.room = await client.joinOrCreate("part2_room", {});
+            this.room = await this.client.joinOrCreate("part2_room", {});
 
             // connection successful!
             connectionStatusText.destroy();
