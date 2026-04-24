@@ -26,7 +26,12 @@ export class Part2Scene extends Phaser.Scene {
 
   debugFPS: Phaser.GameObjects.Text;
 
-  cursorKeys: Phaser.Types.Input.Keyboard.CursorKeys;
+  wasdKeys: {
+    left: Phaser.Input.Keyboard.Key;
+    right: Phaser.Input.Keyboard.Key;
+    up: Phaser.Input.Keyboard.Key;
+    down: Phaser.Input.Keyboard.Key;
+  };
 
   inputPayload = {
     left: false,
@@ -40,8 +45,17 @@ export class Part2Scene extends Phaser.Scene {
   }
 
   async create() {
-    this.cursorKeys = this.input.keyboard.createCursorKeys();
+    this.wasdKeys = this.input.keyboard.addKeys({
+      left: Phaser.Input.Keyboard.KeyCodes.A,
+      right: Phaser.Input.Keyboard.KeyCodes.D,
+      up: Phaser.Input.Keyboard.KeyCodes.W,
+      down: Phaser.Input.Keyboard.KeyCodes.S,
+    }) as any;
     this.debugFPS = this.add.text(4, 4, "", { color: "#ff0000" });
+
+    this.add
+      .image(this.cameras.main.centerX, this.cameras.main.centerY, "map1")
+      .setDisplaySize(this.cameras.main.width, this.cameras.main.height);
 
     // connect with the room
     await this.connect();
@@ -49,9 +63,7 @@ export class Part2Scene extends Phaser.Scene {
     const callbacks = Callbacks.get(this.room);
 
     callbacks.onAdd("players", (player, sessionId) => {
-      const entity = this.physics.add
-        .image(player.x, player.y, "ship_0001")
-        .setScale(0.1);
+      const entity = this.physics.add.image(player.x, player.y, "ship_0001");
       this.playerEntities[sessionId] = entity;
 
       // listening for server updates
@@ -103,11 +115,11 @@ export class Part2Scene extends Phaser.Scene {
       return;
     }
 
-    // send input to the server
-    this.inputPayload.left = this.cursorKeys.left.isDown;
-    this.inputPayload.right = this.cursorKeys.right.isDown;
-    this.inputPayload.up = this.cursorKeys.up.isDown;
-    this.inputPayload.down = this.cursorKeys.down.isDown;
+    // send input to the server (WASD)
+    this.inputPayload.left = this.wasdKeys.left.isDown;
+    this.inputPayload.right = this.wasdKeys.right.isDown;
+    this.inputPayload.up = this.wasdKeys.up.isDown;
+    this.inputPayload.down = this.wasdKeys.down.isDown;
     this.room.send(0, this.inputPayload);
 
     for (let sessionId in this.playerEntities) {
@@ -127,4 +139,3 @@ export class Part2Scene extends Phaser.Scene {
 
   fixedTick(time, delta) {}
 }
-

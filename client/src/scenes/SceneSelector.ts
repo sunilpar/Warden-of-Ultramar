@@ -17,7 +17,7 @@ export class SceneSelector extends Phaser.Scene {
     this.cameras.main.setBackgroundColor(0x000000);
 
     // preload demo assets
-    this.load.image("ship_0001", "assets/Dark_Angel.png");
+    this.load.image("ship_0001", "assets/Dark_Angel_low_res.png");
     this.load.image("map1", "assets/map1.jpg");
     this.load.image("game_menu", "assets/game_menu.gif");
   }
@@ -30,7 +30,8 @@ export class SceneSelector extends Phaser.Scene {
     }
 
     // show animated game menu GIF as background, filling the whole screen
-    this.add.image(this.cameras.main.centerX, this.cameras.main.centerY, "game_menu")
+    this.add
+      .image(this.cameras.main.centerX, this.cameras.main.centerY, "game_menu")
       .setDisplaySize(this.cameras.main.width, this.cameras.main.height);
 
     const textStyle: Phaser.Types.GameObjects.Text.TextStyle = {
