@@ -18,8 +18,8 @@ export class SceneSelector extends Phaser.Scene {
 
     // preload demo assets
     this.load.image("ship_0001", "assets/Dark_Angel_low_res.png");
-    this.load.image("map1", "assets/map1.jpg");
-    this.load.image("game_menu", "assets/game_menu.gif");
+    this.load.image("map1", "assets/map1up.png");
+    this.load.image("game_menu", "assets/menu_final.png");
   }
 
   create() {
@@ -29,15 +29,15 @@ export class SceneSelector extends Phaser.Scene {
       return;
     }
 
-    // show animated game menu GIF as background, filling the whole screen
-    this.add
+    // show looping video as background, filling the whole screen
+    const bgVideo = this.add
       .image(this.cameras.main.centerX, this.cameras.main.centerY, "game_menu")
       .setDisplaySize(this.cameras.main.width, this.cameras.main.height);
 
     const textStyle: Phaser.Types.GameObjects.Text.TextStyle = {
       color: "#B8860B",
-      fontSize: "32px",
-      fontFamily: "Arial",
+      fontSize: "23px",
+      fontFamily: "Georgia",
       stroke: "#000000",
       strokeThickness: 2,
     };
@@ -47,7 +47,7 @@ export class SceneSelector extends Phaser.Scene {
       const label = this.parts[partNum];
 
       this.add
-        .text(130, 150 + 70 * index, `Part ${partNum}: ${label}`, textStyle)
+        .text(85, 285 + 48 * index, `${label}`, textStyle)
         .setInteractive()
         .setPadding(6)
         .setShadow(3, 3, "#000000", 4, true, true)
