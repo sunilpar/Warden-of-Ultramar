@@ -69,7 +69,7 @@ export class Part4Scene extends Phaser.Scene {
       .image(this.cameras.main.centerX, this.cameras.main.centerY, "map1")
       .setDisplaySize(this.cameras.main.width, this.cameras.main.height);
 
-    this.debugFPS = this.add.text(4, 4, "", { color: "#ff0000" });
+    this.debugFPS = this.add.text(4, 4, "", { color: "#efbf68" });
 
     // connect with the room
     await this.connect();

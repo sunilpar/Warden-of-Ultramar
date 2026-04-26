@@ -29,13 +29,12 @@ export class SceneSelector extends Phaser.Scene {
       return;
     }
 
-    // show looping video as background, filling the whole screen
     const bgVideo = this.add
       .image(this.cameras.main.centerX, this.cameras.main.centerY, "game_menu")
       .setDisplaySize(this.cameras.main.width, this.cameras.main.height);
 
     const textStyle: Phaser.Types.GameObjects.Text.TextStyle = {
-      color: "#B8860B",
+      color: "#efbf68",
       fontSize: "23px",
       fontFamily: "Georgia",
       stroke: "#000000",
