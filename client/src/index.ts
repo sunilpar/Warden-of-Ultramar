@@ -5,18 +5,15 @@ import { Part4Scene } from "./scenes/Part4Scene";
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
-  scale: {
-    mode: Phaser.Scale.RESIZE,
-    parent: "phaser-example",
-    width: "100%",
-    height: "100%",
-  },
   fps: {
     target: 60,
     forceSetTimeOut: true,
     smoothStep: false,
   },
+  width: 1080,
+  height: 720,
   backgroundColor: "#117c13",
+  parent: "phaser-example",
   physics: {
     default: "arcade",
   },

@@ -150,7 +150,8 @@ export class Part4Scene extends Phaser.Scene {
       this.fixedTick(time, this.fixedTimeStep);
     }
 
-    this.debugFPS.text = `Frame rate: ${this.game.loop.actualFps}`;
+    //framerate count
+    this.debugFPS.text = `${Math.floor(this.game.loop.actualFps)}`;
   }
 
   fixedTick(time, delta) {

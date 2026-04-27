@@ -33,7 +33,7 @@ export class SceneSelector extends Phaser.Scene {
 
     const textStyle: Phaser.Types.GameObjects.Text.TextStyle = {
       color: "#efbf68",
-      fontSize: "26px",
+      fontSize: "23px",
       fontFamily: "Georgia",
       stroke: "#000000",
       strokeThickness: 3,
@@ -44,7 +44,7 @@ export class SceneSelector extends Phaser.Scene {
       const label = this.parts[partNum];
 
       this.add
-        .text(240, 412 + 390 * index, `${label}`, textStyle)
+        .text(100, 286 + 278 * index, `${label}`, textStyle)
         .setInteractive()
         .setPadding(6)
         .setShadow(3, 3, "#000000", 4, true, true)
