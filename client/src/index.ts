@@ -1,14 +1,10 @@
 import Phaser from "phaser";
 
 import { SceneSelector } from "./scenes/SceneSelector";
-import { Part1Scene } from "./scenes/Part1Scene";
-import { Part2Scene } from "./scenes/Part2Scene";
-import { Part3Scene } from "./scenes/Part3Scene";
 import { Part4Scene } from "./scenes/Part4Scene";
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
-  // 1. Add the Scale property
   scale: {
     mode: Phaser.Scale.RESIZE,
     parent: "phaser-example",
@@ -25,7 +21,7 @@ const config: Phaser.Types.Core.GameConfig = {
     default: "arcade",
   },
   pixelArt: true,
-  scene: [SceneSelector, Part1Scene, Part2Scene, Part3Scene, Part4Scene],
+  scene: [SceneSelector, Part4Scene],
 };
 
 const game = new Phaser.Game(config);
