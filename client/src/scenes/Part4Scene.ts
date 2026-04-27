@@ -54,7 +54,7 @@ export class Part4Scene extends Phaser.Scene {
   currentTick: number = 0;
 
   constructor() {
-    super({ key: "part4" });
+    super({ key: "part1" });
   }
 
   async create() {

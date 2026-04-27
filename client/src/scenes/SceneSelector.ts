@@ -2,10 +2,8 @@ import Phaser from "phaser";
 
 export class SceneSelector extends Phaser.Scene {
   parts = {
-    "1": "Basic Player Movement",
-    "2": "Interpolation",
-    "3": "Client-predicted Input",
-    "4": "Fixed Tickrate",
+    "1": "Start Game",
+    "2": "Quit Game",
   };
 
   constructor() {

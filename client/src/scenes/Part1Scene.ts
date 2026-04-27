@@ -40,7 +40,7 @@ export class Part1Scene extends Phaser.Scene {
   };
 
   constructor() {
-    super({ key: "part1" });
+    super({ key: "part4" });
   }
 
   async create() {
