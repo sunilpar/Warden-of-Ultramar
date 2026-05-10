@@ -18,6 +18,8 @@ export class SceneSelector extends Phaser.Scene {
     this.load.image("ship_0001", "assets/Dark_Angel_low_res.png");
     this.load.image("map1", "assets/map1up.png");
     this.load.image("game_menu", "assets/menu_final.png");
+    this.load.image("elder", "assets/eldar.png");
+    this.load.image("deathbox", "assets/deathbox_lowres.png");
   }
 
   create() {
