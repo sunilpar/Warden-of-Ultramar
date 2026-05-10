@@ -26,6 +26,15 @@ export class Enemy extends Schema {
   @type("number") hp: number = 100;
   @type("number") maxHp: number = 100;
   @type("number") attack: number = 1;
+  @type("string") enemyType: string = "elder"; // "elder" or "ork"
+}
+
+export class Bullet extends Schema {
+  @type("number") x: number;
+  @type("number") y: number;
+  @type("number") dx: number;
+  @type("number") dy: number;
+  @type("number") damage: number = 1;
 }
 
 export class MyRoomState extends Schema {
@@ -33,6 +42,15 @@ export class MyRoomState extends Schema {
   @type("number") mapHeight: number;
   @type({ map: Player }) players = new MapSchema<Player>();
   @type({ map: Enemy }) enemies = new MapSchema<Enemy>();
+  @type({ map: Bullet }) bullets = new MapSchema<Bullet>();
+}
+
+// Track per-enemy state (not synced)
+interface OrkState {
+  phase: "moving" | "shooting" | "dodging";
+  shootCooldown: number;
+  dodgeCooldown: number;
+  dodgeDirection: number; // -1 or 1
 }
 
 export class Part4Room extends Room {
@@ -40,18 +58,34 @@ export class Part4Room extends Room {
   fixedTimeStep = 1000 / 60;
 
   enemyIdCounter = 0;
+  bulletIdCounter = 0;
   enemySpawnCounter = 0;
-  enemySpawnInterval = 180; // spawn every 3 seconds (180 ticks at 60fps)
-  maxEnemies = 20;
-  enemySpeed = 1.0;
-  collisionDistance = 24; // pixels for hitbox overlap
+  orkSpawnCounter = 0;
+
+  // Elder settings
+  maxElders = 5;
+  elderSpawnInterval = 180; // every 3 seconds
+  elderSpeed = 1.0;
+  elderMoveThreshold = 0.85; // 85% chance to move per tick (chaotic movement)
+  collisionDistance = 24;
+
+  // Ork settings
+  maxOrks = 3;
+  orkSpawnInterval = 300; // every 5 seconds
+  orkSpeed = 0.8;
+  orkMoveThreshold = 0.9; // 90% chance to move per tick
+  orkShootInterval = 4; // shoot every 4 ticks
+  orkDodgeDuration = 3; // dodge for 3 ticks
+  orkRange = 100; // stop and shoot at this distance
+  bulletSpeed = 4.0;
+  bulletCollisionDistance = 12;
+
+  // Per-enemy runtime state
+  orkStates: { [enemyId: string]: OrkState } = {};
 
   messages = {
     0: (client: Client, input: InputData) => {
-      // handle player input
       const player = this.state.players.get(client.sessionId);
-
-      // enqueue input to user input buffer.
       player.inputQueue.push(input);
     },
     1: (client: Client) => {
@@ -68,7 +102,6 @@ export class Part4Room extends Room {
   };
 
   onCreate(options: any) {
-    // set map dimensions
     this.state.mapWidth = 800;
     this.state.mapHeight = 600;
 
@@ -92,7 +125,6 @@ export class Part4Room extends Room {
 
       let input: InputData;
 
-      // dequeue player inputs
       while ((input = player.inputQueue.shift())) {
         if (input.left) {
           player.x -= velocity;
@@ -106,7 +138,6 @@ export class Part4Room extends Room {
           player.y += velocity;
         }
 
-        // Clamp to map bounds
         player.x = Math.max(0, Math.min(this.state.mapWidth, player.x));
         player.y = Math.max(0, Math.min(this.state.mapHeight, player.y));
 
@@ -114,45 +145,55 @@ export class Part4Room extends Room {
       }
     });
 
-    // Spawn enemies periodically
+    // Count current enemies by type
+    let elderCount = 0;
+    let orkCount = 0;
+    this.state.enemies.forEach((enemy) => {
+      if (enemy.enemyType === "ork") orkCount++;
+      else elderCount++;
+    });
+
+    // Spawn elders periodically
     this.enemySpawnCounter++;
-    if (
-      this.enemySpawnCounter >= this.enemySpawnInterval &&
-      this.state.enemies.size < this.maxEnemies
-    ) {
+    if (this.enemySpawnCounter >= this.elderSpawnInterval) {
       this.enemySpawnCounter = 0;
-      this.spawnEnemy();
+      if (elderCount < this.maxElders) {
+        this.spawnEnemy("elder");
+      }
+    }
+
+    // Spawn orks periodically
+    this.orkSpawnCounter++;
+    if (this.orkSpawnCounter >= this.orkSpawnInterval) {
+      this.orkSpawnCounter = 0;
+      if (orkCount < this.maxOrks) {
+        this.spawnEnemy("ork");
+      }
     }
 
     // Move enemies toward nearest alive player
-    this.state.enemies.forEach((enemy) => {
-      let nearestPlayer: Player = null;
-      let nearestDist = Infinity;
+    this.state.enemies.forEach((enemy, enemyId) => {
+      const nearest = this.findNearestAlivePlayer(enemy.x, enemy.y);
+      if (!nearest) return;
 
-      this.state.players.forEach((player) => {
-        if (player.isDead) return;
-        const dx = player.x - enemy.x;
-        const dy = player.y - enemy.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < nearestDist) {
-          nearestDist = dist;
-          nearestPlayer = player;
-        }
-      });
+      const { player: nearestPlayer, dist: nearestDist } = nearest;
+      const dx = nearestPlayer.x - enemy.x;
+      const dy = nearestPlayer.y - enemy.y;
 
-      if (nearestPlayer) {
-        const dx = nearestPlayer.x - enemy.x;
-        const dy = nearestPlayer.y - enemy.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist > 0) {
-          enemy.x += (dx / dist) * this.enemySpeed;
-          enemy.y += (dy / dist) * this.enemySpeed;
+      if (enemy.enemyType === "ork") {
+        this.updateOrk(enemy, enemyId, nearestPlayer, nearestDist, dx, dy);
+      } else {
+        // Elder: standard chase with chaotic movement
+        if (Math.random() < this.elderMoveThreshold) {
+          this.moveEnemyToward(enemy, dx, dy, nearestDist, this.elderSpeed);
         }
       }
     });
 
-    // Check collision between enemies and players - deal damage every tick
+    // Check collision between melee enemies (elders) and players
     this.state.enemies.forEach((enemy) => {
+      if (enemy.enemyType !== "elder") return;
+
       this.state.players.forEach((player) => {
         if (player.isDead) return;
 
@@ -169,26 +210,184 @@ export class Part4Room extends Room {
         }
       });
     });
+
+    // Move bullets and check collision with players
+    const bulletsToRemove: string[] = [];
+    this.state.bullets.forEach((bullet, bulletId) => {
+      bullet.x += bullet.dx * this.bulletSpeed;
+      bullet.y += bullet.dy * this.bulletSpeed;
+
+      // Remove if out of bounds
+      if (
+        bullet.x < -10 || bullet.x > this.state.mapWidth + 10 ||
+        bullet.y < -10 || bullet.y > this.state.mapHeight + 10
+      ) {
+        bulletsToRemove.push(bulletId);
+        return;
+      }
+
+      // Check collision with players
+      this.state.players.forEach((player) => {
+        if (player.isDead) return;
+
+        const pdx = player.x - bullet.x;
+        const pdy = player.y - bullet.y;
+        const dist = Math.sqrt(pdx * pdx + pdy * pdy);
+
+        if (dist < this.bulletCollisionDistance) {
+          player.hp -= bullet.damage;
+          if (player.hp <= 0) {
+            player.hp = 0;
+            player.isDead = true;
+          }
+          bulletsToRemove.push(bulletId);
+        }
+      });
+    });
+
+    // Remove hit/out-of-bounds bullets
+    for (const bulletId of bulletsToRemove) {
+      this.state.bullets.delete(bulletId);
+    }
   }
 
-  spawnEnemy() {
+  findNearestAlivePlayer(x: number, y: number): { player: Player; dist: number } | null {
+    let nearestPlayer: Player = null;
+    let nearestDist = Infinity;
+
+    this.state.players.forEach((player) => {
+      if (player.isDead) return;
+      const dx = player.x - x;
+      const dy = player.y - y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestPlayer = player;
+      }
+    });
+
+    return nearestPlayer ? { player: nearestPlayer, dist: nearestDist } : null;
+  }
+
+  moveEnemyToward(enemy: Enemy, dx: number, dy: number, dist: number, speed: number) {
+    if (dist > 0) {
+      enemy.x += (dx / dist) * speed;
+      enemy.y += (dy / dist) * speed;
+    }
+  }
+
+  updateOrk(
+    enemy: Enemy,
+    enemyId: string,
+    target: Player,
+    dist: number,
+    dx: number,
+    dy: number
+  ) {
+    // Initialize ork state if not exists
+    if (!this.orkStates[enemyId]) {
+      this.orkStates[enemyId] = {
+        phase: "moving",
+        shootCooldown: 0,
+        dodgeCooldown: 0,
+        dodgeDirection: Math.random() > 0.5 ? 1 : -1,
+      };
+    }
+
+    const orkState = this.orkStates[enemyId];
+
+    switch (orkState.phase) {
+      case "moving":
+        if (dist <= this.orkRange) {
+          // In range - stop and start shooting
+          orkState.phase = "shooting";
+          orkState.shootCooldown = this.orkShootInterval;
+        } else {
+          // Not in range - follow player with chaotic movement
+          if (Math.random() < this.orkMoveThreshold) {
+            this.moveEnemyToward(enemy, dx, dy, dist, this.orkSpeed);
+          }
+        }
+        break;
+
+      case "shooting":
+        orkState.shootCooldown--;
+
+        if (orkState.shootCooldown <= 0) {
+          // Fire bullet toward player
+          if (dist > 0) {
+            const bullet = new Bullet();
+            bullet.x = enemy.x;
+            bullet.y = enemy.y;
+            bullet.dx = dx / dist;
+            bullet.dy = dy / dist;
+            bullet.damage = 1;
+
+            const bulletId = `bullet_${this.bulletIdCounter++}`;
+            this.state.bullets.set(bulletId, bullet);
+          }
+
+          // Transition to dodging
+          orkState.phase = "dodging";
+          orkState.dodgeCooldown = this.orkDodgeDuration;
+          orkState.dodgeDirection = Math.random() > 0.5 ? 1 : -1;
+        }
+        break;
+
+      case "dodging":
+        orkState.dodgeCooldown--;
+
+        // Dodge perpendicular to the direction toward player
+        // dx, dy is toward player, so perpendicular is (-dy, dx)
+        const perpX = -dy / (dist > 0 ? dist : 1);
+        const perpY = dx / (dist > 0 ? dist : 1);
+
+        if (Math.random() < this.orkMoveThreshold) {
+          enemy.x += perpX * this.orkSpeed * orkState.dodgeDirection;
+          enemy.y += perpY * this.orkSpeed * orkState.dodgeDirection;
+        }
+
+        if (orkState.dodgeCooldown <= 0) {
+          // Check if still in range
+          if (dist <= this.orkRange) {
+            // Still in range - shoot again
+            orkState.phase = "shooting";
+            orkState.shootCooldown = this.orkShootInterval;
+          } else {
+            // Not in range anymore - go back to moving
+            orkState.phase = "moving";
+          }
+        }
+        break;
+    }
+  }
+
+  spawnEnemy(type: "elder" | "ork") {
     const enemy = new Enemy();
+    enemy.enemyType = type;
+
+    if (type === "ork") {
+      enemy.hp = 80;
+      enemy.maxHp = 80;
+      enemy.attack = 0; // ork uses bullets, not melee
+    }
+
     // Spawn at random position along the edges of the map
     const edge = Math.floor(Math.random() * 4);
     switch (edge) {
-      case 0: // top
+      case 0:
         enemy.x = Math.random() * this.state.mapWidth;
         enemy.y = 0;
         break;
-      case 1: // bottom
+      case 1:
         enemy.x = Math.random() * this.state.mapWidth;
         enemy.y = this.state.mapHeight;
         break;
-      case 2: // left
+      case 2:
         enemy.x = 0;
         enemy.y = Math.random() * this.state.mapHeight;
         break;
-      case 3: // right
+      case 3:
         enemy.x = this.state.mapWidth;
         enemy.y = Math.random() * this.state.mapHeight;
         break;
@@ -196,6 +395,15 @@ export class Part4Room extends Room {
 
     const enemyId = `enemy_${this.enemyIdCounter++}`;
     this.state.enemies.set(enemyId, enemy);
+
+    if (type === "ork") {
+      this.orkStates[enemyId] = {
+        phase: "moving",
+        shootCooldown: 0,
+        dodgeCooldown: 0,
+        dodgeDirection: Math.random() > 0.5 ? 1 : -1,
+      };
+    }
   }
 
   onJoin(client: Client, options: any) {

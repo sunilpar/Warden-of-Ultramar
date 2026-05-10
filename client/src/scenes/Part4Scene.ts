@@ -7,7 +7,7 @@
  * - Update other player's positions WITH interpolation (for other players)
  * - Client-predicted input for local (current) player
  * - Fixed tickrate on both client and server
- * - Enemy system with HP, HP bars, and game over
+ * - Enemy system with HP, HP bars, bullets, and game over
  */
 
 import Phaser from "phaser";
@@ -28,6 +28,12 @@ interface EnemyEntity {
   serverY: number;
 }
 
+interface BulletEntity {
+  sprite: Phaser.GameObjects.Arc;
+  serverX: number;
+  serverY: number;
+}
+
 interface PlayerEntity {
   sprite: Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
   hpBarBg: Phaser.GameObjects.Graphics;
@@ -37,9 +43,9 @@ interface PlayerEntity {
 
 export class Part4Scene extends Phaser.Scene {
   client = new Client<typeof server>(BACKEND_URL);
-  room: Room<Part4Room>;
+  room!: Room<Part4Room>;
 
-  currentPlayer: Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
+  currentPlayer!: Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
   playerEntities: {
     [sessionId: string]: PlayerEntity;
   } = {};
@@ -48,17 +54,21 @@ export class Part4Scene extends Phaser.Scene {
     [enemyId: string]: EnemyEntity;
   } = {};
 
-  debugFPS: Phaser.GameObjects.Text;
+  bulletEntities: {
+    [bulletId: string]: BulletEntity;
+  } = {};
 
-  localRef: Phaser.GameObjects.Rectangle;
-  remoteRef: Phaser.GameObjects.Rectangle;
+  debugFPS!: Phaser.GameObjects.Text;
+
+  localRef!: Phaser.GameObjects.Rectangle;
+  remoteRef!: Phaser.GameObjects.Rectangle;
 
   // Game over overlay
-  gameOverOverlay: Phaser.GameObjects.Container;
+  gameOverOverlay: Phaser.GameObjects.Container | null = null;
   isGameOver: boolean = false;
-  deathBoxSprite: Phaser.GameObjects.Image = null;
+  deathBoxSprite: Phaser.GameObjects.Image | null = null;
 
-  wasdKeys: {
+  wasdKeys!: {
     left: Phaser.Input.Keyboard.Key;
     right: Phaser.Input.Keyboard.Key;
     up: Phaser.Input.Keyboard.Key;
@@ -141,9 +151,6 @@ export class Part4Scene extends Phaser.Scene {
       } else {
         // listening for server updates
         callbacks.onChange(player, () => {
-          //
-          // we're going to LERP the positions during the render loop.
-          //
           entity.setData("serverX", player.x);
           entity.setData("serverY", player.y);
         });
@@ -164,7 +171,9 @@ export class Part4Scene extends Phaser.Scene {
 
     // Handle enemies
     callbacks.onAdd("enemies", (enemy, enemyId) => {
-      const sprite = this.add.image(enemy.x, enemy.y, "elder").setDisplaySize(32, 32);
+      // Choose sprite based on enemy type
+      const spriteKey = enemy.enemyType === "ork" ? "orck" : "elder";
+      const sprite = this.add.image(enemy.x, enemy.y, spriteKey).setDisplaySize(32, 32);
 
       const hpBarBg = this.add.graphics();
       const hpBarFill = this.add.graphics();
@@ -178,8 +187,10 @@ export class Part4Scene extends Phaser.Scene {
       };
 
       callbacks.onChange(enemy, () => {
-        this.enemyEntities[enemyId].serverX = enemy.x;
-        this.enemyEntities[enemyId].serverY = enemy.y;
+        if (this.enemyEntities[enemyId]) {
+          this.enemyEntities[enemyId].serverX = enemy.x;
+          this.enemyEntities[enemyId].serverY = enemy.y;
+        }
       });
     });
 
@@ -193,8 +204,33 @@ export class Part4Scene extends Phaser.Scene {
       }
     });
 
-    // this.cameras.main.startFollow(this.ship, true, 0.2, 0.2);
-    // this.cameras.main.setZoom(1);
+    // Handle bullets
+    callbacks.onAdd("bullets", (bullet, bulletId) => {
+      // Purple circle for bullets
+      const sprite = this.add.circle(bullet.x, bullet.y, 4, 0x9933ff).setDepth(5);
+
+      this.bulletEntities[bulletId] = {
+        sprite,
+        serverX: bullet.x,
+        serverY: bullet.y,
+      };
+
+      callbacks.onChange(bullet, () => {
+        if (this.bulletEntities[bulletId]) {
+          this.bulletEntities[bulletId].serverX = bullet.x;
+          this.bulletEntities[bulletId].serverY = bullet.y;
+        }
+      });
+    });
+
+    callbacks.onRemove("bullets", (bullet, bulletId) => {
+      const bulletEntity = this.bulletEntities[bulletId];
+      if (bulletEntity) {
+        bulletEntity.sprite.destroy();
+        delete this.bulletEntities[bulletId];
+      }
+    });
+
     this.cameras.main.setBounds(0, 0, 800, 600);
   }
 
@@ -395,6 +431,15 @@ export class Part4Scene extends Phaser.Scene {
       }
     });
 
+    // Update bullet sprites to follow server position
+    this.room.state.bullets.forEach((bullet, bulletId) => {
+      const bulletEntity = this.bulletEntities[bulletId];
+      if (bulletEntity) {
+        bulletEntity.serverX = bullet.x;
+        bulletEntity.serverY = bullet.y;
+      }
+    });
+
     this.elapsedTime += delta;
     while (this.elapsedTime >= this.fixedTimeStep) {
       this.elapsedTime -= this.fixedTimeStep;
@@ -416,10 +461,6 @@ export class Part4Scene extends Phaser.Scene {
     if (currentPlayerState && currentPlayerState.isDead) {
       return;
     }
-
-    // const currentPlayerRemote = this.room.state.players.get(this.room.sessionId);
-    // const ticksBehind = this.currentTick - currentPlayerRemote.tick;
-    // console.log({ ticksBehind });
 
     const velocity = 2;
     this.inputPayload.left = this.wasdKeys.left.isDown;
@@ -471,6 +512,13 @@ export class Part4Scene extends Phaser.Scene {
         enemyEntity.serverY,
         0.2
       );
+    }
+
+    // Snap bullet positions (bullets move fast, direct snap for accuracy)
+    for (let bulletId in this.bulletEntities) {
+      const bulletEntity = this.bulletEntities[bulletId];
+      bulletEntity.sprite.x = bulletEntity.serverX;
+      bulletEntity.sprite.y = bulletEntity.serverY;
     }
   }
 }
