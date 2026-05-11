@@ -1,9 +1,10 @@
 import Phaser from "phaser";
 
 export class SceneSelector extends Phaser.Scene {
-  parts = {
-    "1": "Start Game",
-    "2": "Quit Game",
+  // Maps button number → scene key
+  parts: { [key: string]: { label: string; sceneKey: string } } = {
+    "1": { label: "Start Game", sceneKey: "part1" },
+    "2": { label: "Refactored Game", sceneKey: "game" },
   };
 
   constructor() {
@@ -44,15 +45,15 @@ export class SceneSelector extends Phaser.Scene {
 
     for (let partNum in this.parts) {
       const index = parseInt(partNum) - 1;
-      const label = this.parts[partNum];
+      const entry = this.parts[partNum];
 
       this.add
-        .text(100, 286 + 278 * index, `${label}`, textStyle)
+        .text(100, 286 + 278 * index, entry.label, textStyle)
         .setInteractive()
         .setPadding(6)
         .setShadow(3, 3, "#000000", 4, true, true)
         .on("pointerdown", () => {
-          this.runScene(`part${partNum}`);
+          this.runScene(entry.sceneKey);
         });
     }
   }

@@ -64,9 +64,9 @@ export class Part4Room extends Room {
 
   // Elder settings
   maxElders = 5;
-  elderSpawnInterval = 180; // every 3 seconds
+  elderSpawnInterval = 300; // every 5 seconds
   elderSpeed = 1.0;
-  elderMoveThreshold = 0.85; // 85% chance to move per tick (chaotic movement)
+  elderMoveThreshold = 0.9; // 85% chance to move per tick (chaotic movement)
   collisionDistance = 24;
 
   // Ork settings
@@ -74,10 +74,10 @@ export class Part4Room extends Room {
   orkSpawnInterval = 300; // every 5 seconds
   orkSpeed = 0.8;
   orkMoveThreshold = 0.9; // 90% chance to move per tick
-  orkShootInterval = 4; // shoot every 4 ticks
+  orkShootInterval = 6; // shoot every 4 ticks
   orkDodgeDuration = 3; // dodge for 3 ticks
-  orkRange = 100; // stop and shoot at this distance
-  bulletSpeed = 4.0;
+  orkRange = 400; // stop and shoot at this distance
+  bulletSpeed = 2.0;
   bulletCollisionDistance = 12;
 
   // Per-enemy runtime state
@@ -219,8 +219,10 @@ export class Part4Room extends Room {
 
       // Remove if out of bounds
       if (
-        bullet.x < -10 || bullet.x > this.state.mapWidth + 10 ||
-        bullet.y < -10 || bullet.y > this.state.mapHeight + 10
+        bullet.x < -10 ||
+        bullet.x > this.state.mapWidth + 10 ||
+        bullet.y < -10 ||
+        bullet.y > this.state.mapHeight + 10
       ) {
         bulletsToRemove.push(bulletId);
         return;
@@ -251,7 +253,10 @@ export class Part4Room extends Room {
     }
   }
 
-  findNearestAlivePlayer(x: number, y: number): { player: Player; dist: number } | null {
+  findNearestAlivePlayer(
+    x: number,
+    y: number,
+  ): { player: Player; dist: number } | null {
     let nearestPlayer: Player = null;
     let nearestDist = Infinity;
 
@@ -269,7 +274,13 @@ export class Part4Room extends Room {
     return nearestPlayer ? { player: nearestPlayer, dist: nearestDist } : null;
   }
 
-  moveEnemyToward(enemy: Enemy, dx: number, dy: number, dist: number, speed: number) {
+  moveEnemyToward(
+    enemy: Enemy,
+    dx: number,
+    dy: number,
+    dist: number,
+    speed: number,
+  ) {
     if (dist > 0) {
       enemy.x += (dx / dist) * speed;
       enemy.y += (dy / dist) * speed;
@@ -282,7 +293,7 @@ export class Part4Room extends Room {
     target: Player,
     dist: number,
     dx: number,
-    dy: number
+    dy: number,
   ) {
     // Initialize ork state if not exists
     if (!this.orkStates[enemyId]) {
@@ -428,3 +439,4 @@ export class Part4Room extends Room {
     console.log("Disposing room", this.roomId, "...");
   }
 }
+
