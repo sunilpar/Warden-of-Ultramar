@@ -3,8 +3,9 @@ import Phaser from "phaser";
 export class SceneSelector extends Phaser.Scene {
   // Maps button number → scene key
   parts: { [key: string]: { label: string; sceneKey: string } } = {
-    "1": { label: "Start Game", sceneKey: "part1" },
-    "2": { label: "Refactored Game", sceneKey: "game" },
+    // "1": { label: "Start Game", sceneKey: "part1" },
+    "1": { label: "Start Game", sceneKey: "game" },
+    "2": { label: "Quit Game", sceneKey: "game" },
   };
 
   constructor() {

@@ -10,6 +10,25 @@
  * Then reference it from whatever entity fires it.
  */
 
+/**
+ * Player Bolter Configuration
+ * ============================
+ * The player's ranged weapon. High damage, moderate cooldown.
+ */
+export const PLAYER_BOLTER_WEAPON = {
+  /** Bullet travel speed in pixels per second */
+  bulletSpeed: 1000,
+
+  /** Milliseconds between shots (0.5 second cooldown) */
+  cooldown: 500,
+
+  /** Damage per bullet hit */
+  damage: 80,
+
+  /** How long a bullet lives before auto-removal (milliseconds) */
+  lifetime: 3000,
+};
+
 export const ORK_RIFLE_WEAPON = {
   /** Bullet travel speed in pixels per second */
   bulletSpeed: 500,

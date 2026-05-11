@@ -33,7 +33,9 @@
 import { Room, Client } from "colyseus";
 import { RoomState } from "../schema/RoomState";
 import { Player, InputData } from "../schema/Player";
+import { Bullet } from "../schema/Bullet";
 import { GAME_CONFIG } from "../config/game";
+import { PLAYER_BOLTER_WEAPON } from "../config/weapons";
 import { PlayerSystem } from "../systems/PlayerSystem";
 import { EnemyAISystem } from "../systems/EnemyAISystem";
 import { BulletSystem } from "../systems/BulletSystem";
@@ -137,6 +139,7 @@ export class GameRoom extends Room {
    *
    * Message 0: Movement input (WASD state)
    * Message 1: Respawn request
+   * Message 2: Shoot (mouse world position)
    */
   messages = {
     // Movement input
@@ -157,6 +160,49 @@ export class GameRoom extends Room {
         player.y = Math.random() * this.state.mapHeight;
         player.inputQueue = [];
       }
+    },
+
+    // Shoot — client sends mouse world position { x, y }
+    2: (client: Client, data: { x: number; y: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+
+      // Enforce cooldown (0.5 seconds)
+      if (this.gameTime - player.lastShootTime < PLAYER_BOLTER_WEAPON.cooldown) {
+        return;
+      }
+
+      // Calculate direction from player to mouse position
+      const dx = data.x - player.x;
+      const dy = data.y - player.y;
+      const length = Math.sqrt(dx * dx + dy * dy);
+
+      // Don't shoot if mouse is on top of player
+      if (length === 0) return;
+
+      const dirX = dx / length;
+      const dirY = dy / length;
+
+      // Create bullet
+      const bullet = new Bullet();
+      bullet.x = player.x;
+      bullet.y = player.y;
+      bullet.directionX = dirX;
+      bullet.directionY = dirY;
+      bullet.damage = PLAYER_BOLTER_WEAPON.damage;
+      bullet.isPlayerBullet = true;
+      bullet.ownerId = client.sessionId;
+
+      // Spawn bullet with player weapon speed and lifetime
+      this.bulletSystem.spawnBullet(
+        bullet,
+        this.gameTime,
+        PLAYER_BOLTER_WEAPON.bulletSpeed,
+        PLAYER_BOLTER_WEAPON.lifetime
+      );
+
+      // Update cooldown
+      player.lastShootTime = this.gameTime;
     },
   };
 

@@ -25,7 +25,7 @@
 import { RoomState } from "../schema/RoomState";
 import { Bullet } from "../schema/Bullet";
 import { GAME_CONFIG } from "../config/game";
-import { ORK_RIFLE_WEAPON } from "../config/weapons";
+import { ORK_RIFLE_WEAPON, PLAYER_BOLTER_WEAPON } from "../config/weapons";
 
 /** Server-only tracking for bullet lifetime */
 interface BulletRuntimeState {
@@ -33,6 +33,8 @@ interface BulletRuntimeState {
   spawnTime: number;
   /** Speed of this bullet (pixels per second) */
   speed: number;
+  /** Lifetime of this bullet in milliseconds */
+  lifetime: number;
   /** Whether this bullet has already hit something */
   hasHit: boolean;
 }
@@ -88,7 +90,7 @@ export class BulletSystem {
       // Check if bullet has exceeded its lifetime
       if (bulletState) {
         const age = currentTime - bulletState.spawnTime;
-        if (age >= ORK_RIFLE_WEAPON.lifetime) {
+        if (age >= bulletState.lifetime) {
           bulletsToRemove.push(bulletId);
           return;
         }
@@ -107,9 +109,10 @@ export class BulletSystem {
    * @param bullet - Pre-configured bullet object (position, direction, damage)
    * @param currentTime - Current game time in milliseconds
    * @param speed - Bullet speed in pixels per second (defaults to rifle speed)
+   * @param lifetime - Bullet lifetime in milliseconds (defaults to rifle lifetime)
    * @returns The bullet ID
    */
-  spawnBullet(bullet: Bullet, currentTime: number, speed?: number): string {
+  spawnBullet(bullet: Bullet, currentTime: number, speed?: number, lifetime?: number): string {
     const bulletId = `bullet_${this.bulletIdCounter++}`;
     this.state.bullets.set(bulletId, bullet);
 
@@ -117,6 +120,7 @@ export class BulletSystem {
     this.bulletStates.set(bulletId, {
       spawnTime: currentTime,
       speed: speed ?? ORK_RIFLE_WEAPON.bulletSpeed,
+      lifetime: lifetime ?? ORK_RIFLE_WEAPON.lifetime,
       hasHit: false,
     });
 

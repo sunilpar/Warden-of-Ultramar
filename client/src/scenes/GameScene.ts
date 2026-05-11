@@ -50,7 +50,7 @@ interface EnemyEntity {
 }
 
 interface BulletEntity {
-  sprite: Phaser.GameObjects.Arc;
+  sprite: Phaser.GameObjects.Shape; // Arc for enemy, Rectangle for player
   serverX: number;
   serverY: number;
 }
@@ -87,6 +87,10 @@ export class GameScene extends Phaser.Scene {
   gameOverOverlay: Phaser.GameObjects.Container | null = null;
   isGameOver: boolean = false;
   deathBoxSprite: Phaser.GameObjects.Image | null = null;
+
+  // Shooting cooldown (client-side tracking for visual feedback)
+  lastShootTime: number = 0;
+  private readonly SHOOT_COOLDOWN_MS: number = 500; // 0.5 seconds
 
   // Input
   wasdKeys!: {
@@ -137,6 +141,27 @@ export class GameScene extends Phaser.Scene {
     // FPS counter
     this.debugFPS = this.add.text(4, 4, "", { color: "#efbf68" });
 
+    // Left-click to shoot
+    this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      // Only fire on left-click
+      if (!pointer.leftButtonDown()) return;
+      if (this.isGameOver) return;
+      if (!this.currentPlayer) return;
+
+      // Get mouse world position
+      const worldX = pointer.worldX;
+      const worldY = pointer.worldY;
+
+      // Client-side cooldown check (visual only, server enforces real cooldown)
+      const now = performance.now();
+      if (now - this.lastShootTime < this.SHOOT_COOLDOWN_MS) return;
+
+      this.lastShootTime = now;
+
+      // Send shoot message to server with mouse world position
+      this.room.send(2, { x: worldX, y: worldY });
+    });
+
     // Connect to server
     await this.connect();
 
@@ -152,13 +177,15 @@ export class GameScene extends Phaser.Scene {
       // HP bar graphics
       const hpBarBg = this.add.graphics();
       const hpBarFill = this.add.graphics();
-      const hpText = this.add.text(0, 0, "", {
-        color: "#ffffff",
-        fontSize: "10px",
-        fontFamily: "Georgia",
-        stroke: "#000000",
-        strokeThickness: 2,
-      }).setOrigin(0.5);
+      const hpText = this.add
+        .text(0, 0, "", {
+          color: "#ffffff",
+          fontSize: "10px",
+          fontFamily: "Georgia",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0.5);
 
       this.playerEntities[sessionId] = {
         sprite: entity,
@@ -209,7 +236,9 @@ export class GameScene extends Phaser.Scene {
 
     callbacks.onAdd("enemies", (enemy, enemyId) => {
       const spriteKey = enemy.enemyType === "ork" ? "orck" : "elder";
-      const sprite = this.add.image(enemy.x, enemy.y, spriteKey).setDisplaySize(32, 32);
+      const sprite = this.add
+        .image(enemy.x, enemy.y, spriteKey)
+        .setDisplaySize(32, 32);
 
       const hpBarBg = this.add.graphics();
       const hpBarFill = this.add.graphics();
@@ -234,6 +263,9 @@ export class GameScene extends Phaser.Scene {
     callbacks.onRemove("enemies", (enemy, enemyId) => {
       const enemyEntity = this.enemyEntities[enemyId];
       if (enemyEntity) {
+        // Show blood splash at enemy position
+        this.showBloodSplash(enemyEntity.sprite.x, enemyEntity.sprite.y);
+
         enemyEntity.sprite.destroy();
         enemyEntity.hpBarBg.destroy();
         enemyEntity.hpBarFill.destroy();
@@ -246,8 +278,15 @@ export class GameScene extends Phaser.Scene {
     // ============================================================
 
     callbacks.onAdd("bullets", (bullet, bulletId) => {
-      // Create bullet as a small circle (purple for Ork rifle)
-      const sprite = this.add.circle(bullet.x, bullet.y, 4, 0x9933ff).setDepth(5);
+      let sprite: Phaser.GameObjects.Shape;
+
+      if (bullet.isPlayerBullet) {
+        // Player bullet: light blue rectangle (bolter round)
+        sprite = this.add.rectangle(bullet.x, bullet.y, 12, 4, 0x66ccff).setDepth(5);
+      } else {
+        // Enemy bullet: purple circle (Ork rifle)
+        sprite = this.add.circle(bullet.x, bullet.y, 4, 0x9933ff).setDepth(5);
+      }
 
       /**
        * BULLET ROTATION:
@@ -292,6 +331,55 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ============================================================
+  // BLOOD SPLASH EFFECT
+  // ============================================================
+
+  /**
+   * Show a brief blood splash when an enemy dies.
+   * Creates expanding red circles that fade out quickly.
+   */
+  showBloodSplash(x: number, y: number) {
+    const particleCount = 3 + Math.floor(Math.random() * 3);
+
+    for (let i = 0; i < particleCount; i++) {
+      const offsetX = (Math.random() - 0.5) * 20;
+      const offsetY = (Math.random() - 0.5) * 20;
+      const size = 4 + Math.random() * 8;
+
+      const particle = this.add.circle(
+        x + offsetX, y + offsetY, size,
+        0xcc0000, 0.8
+      ).setDepth(4);
+
+      this.tweens.add({
+        targets: particle,
+        alpha: 0,
+        scaleX: 1.5,
+        scaleY: 1.5,
+        duration: 400,
+        ease: "Power2",
+        onComplete: () => {
+          particle.destroy();
+        },
+      });
+    }
+
+    // Main splash ring
+    const splash = this.add.circle(x, y, 8, 0x880000, 0.6).setDepth(4);
+    this.tweens.add({
+      targets: splash,
+      alpha: 0,
+      scaleX: 3,
+      scaleY: 3,
+      duration: 500,
+      ease: "Power2",
+      onComplete: () => {
+        splash.destroy();
+      },
+    });
+  }
+
+  // ============================================================
   // CONNECTION
   // ============================================================
 
@@ -321,9 +409,12 @@ export class GameScene extends Phaser.Scene {
     const { centerX, centerY } = this.cameras.main;
 
     const bg = this.add.rectangle(
-      centerX, centerY,
-      this.cameras.main.width, this.cameras.main.height,
-      0x000000, 0.7
+      centerX,
+      centerY,
+      this.cameras.main.width,
+      this.cameras.main.height,
+      0x000000,
+      0.7,
     );
 
     const gameOverText = this.add
@@ -352,7 +443,11 @@ export class GameScene extends Phaser.Scene {
         this.room.send(1); // Send respawn request to server
       });
 
-    this.gameOverOverlay = this.add.container(0, 0, [bg, gameOverText, respawnButton]);
+    this.gameOverOverlay = this.add.container(0, 0, [
+      bg,
+      gameOverText,
+      respawnButton,
+    ]);
     this.gameOverOverlay.setDepth(1000);
   }
 
@@ -387,11 +482,10 @@ export class GameScene extends Phaser.Scene {
     const playerEntity = this.playerEntities[sessionId];
     if (playerEntity) {
       if (sessionId === this.room.sessionId && !this.deathBoxSprite) {
-        this.deathBoxSprite = this.add.image(
-          playerEntity.sprite.x,
-          playerEntity.sprite.y,
-          "deathbox"
-        ).setDisplaySize(48, 48).setDepth(1);
+        this.deathBoxSprite = this.add
+          .image(playerEntity.sprite.x, playerEntity.sprite.y, "deathbox")
+          .setDisplaySize(48, 48)
+          .setDepth(1);
       }
       playerEntity.sprite.setVisible(false);
       playerEntity.hpBarBg.setVisible(false);
@@ -429,7 +523,8 @@ export class GameScene extends Phaser.Scene {
     playerEntity.hpBarFill.clear();
     const hpPercent = Math.max(0, hp / maxHp);
     // Color changes: green > 50%, yellow > 25%, red <= 25%
-    const fillColor = hpPercent > 0.5 ? 0x00ff00 : hpPercent > 0.25 ? 0xffff00 : 0xff0000;
+    const fillColor =
+      hpPercent > 0.5 ? 0x00ff00 : hpPercent > 0.25 ? 0xffff00 : 0xff0000;
     playerEntity.hpBarFill.fillStyle(fillColor, 1);
     playerEntity.hpBarFill.fillRect(x, y, barWidth * hpPercent, barHeight);
 
@@ -597,10 +692,14 @@ export class GameScene extends Phaser.Scene {
     for (let enemyId in this.enemyEntities) {
       const enemyEntity = this.enemyEntities[enemyId];
       enemyEntity.sprite.x = Phaser.Math.Linear(
-        enemyEntity.sprite.x, enemyEntity.serverX, 0.2
+        enemyEntity.sprite.x,
+        enemyEntity.serverX,
+        0.2,
       );
       enemyEntity.sprite.y = Phaser.Math.Linear(
-        enemyEntity.sprite.y, enemyEntity.serverY, 0.2
+        enemyEntity.sprite.y,
+        enemyEntity.serverY,
+        0.2,
       );
     }
 

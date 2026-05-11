@@ -50,4 +50,11 @@ export class Player extends Schema {
    * This is how the server stays authoritative.
    */
   inputQueue: InputData[] = [];
+
+  /**
+   * Last shoot time — NOT synced to clients.
+   * Used by the server to enforce shoot cooldown (0.5s).
+   * Stored in milliseconds (game time).
+   */
+  lastShootTime: number = 0;
 }

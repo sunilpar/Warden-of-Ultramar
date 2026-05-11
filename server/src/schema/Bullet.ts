@@ -31,6 +31,10 @@ export class Bullet extends Schema {
   /** Damage dealt on hit */
   @type("number") damage: number = 10;
 
+  /** Whether this bullet was fired by a player (synced for client rendering).
+   * Player bullets = light blue rectangles, enemy bullets = purple circles. */
+  @type("boolean") isPlayerBullet: boolean = false;
+
   /** Who created this bullet (enemy ID or player session ID).
    * NOT synced — server-only, used to prevent friendly fire. */
   ownerId: string = "";
