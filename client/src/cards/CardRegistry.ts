@@ -75,20 +75,86 @@ registerCard({
   },
 });
 
+/**
+ * Pulse Card
+ * ----------
+ * Close-combat AoE shockwave expanding from the player.
+ * Bound to Right Click by default.
+ * Server message type: 3
+ *
+ * CLIENT-SIDE VFX:
+ *   - Skyblue expanding circle with fade
+ *   - Slight camera shake for the local player
+ *   - Ring effect at max radius
+ */
+registerCard({
+  id: "pulse",
+  label: "Pulse",
+  baseImageKey: "card_base",
+  skillImageKey: "card_skill_pulse",
+  cooldownMs: 3000,
+  performAction: (context: CardActionContext): boolean => {
+    const { scene, room, player } = context;
+    if (!player) return false;
+
+    // Send pulse request to server
+    room.send(3);
+
+    // ---- Client-side VFX ----
+    const px = player.x;
+    const py = player.y;
+    const maxRadius = 100;
+
+    // Main expanding skyblue circle
+    const pulseCircle = scene.add.circle(px, py, 4, 0x66ccff, 0.7).setDepth(6);
+    scene.tweens.add({
+      targets: pulseCircle,
+      scaleX: maxRadius / 4,
+      scaleY: maxRadius / 4,
+      alpha: 0,
+      duration: 300,
+      ease: "Cubic.easeOut",
+      onComplete: () => pulseCircle.destroy(),
+    });
+
+    // Outer ring effect
+    const ring = scene.add.circle(px, py, 8, 0x66ccff, 0.0)
+      .setStrokeStyle(2, 0x99eeff, 0.8)
+      .setDepth(6);
+    scene.tweens.add({
+      targets: ring,
+      scaleX: maxRadius / 8,
+      scaleY: maxRadius / 8,
+      alpha: 0,
+      duration: 400,
+      ease: "Cubic.easeOut",
+      onComplete: () => ring.destroy(),
+    });
+
+    // Subtle screen flash instead of camera shake
+    // (shake can desync physics body when camera has setBounds)
+    const flash = scene.add.rectangle(
+      scene.cameras.main.worldView.centerX,
+      scene.cameras.main.worldView.centerY,
+      scene.cameras.main.width,
+      scene.cameras.main.height,
+      0x66ccff,
+      0.15,
+    ).setScrollFactor(0).setDepth(99);
+    scene.tweens.add({
+      targets: flash,
+      alpha: 0,
+      duration: 150,
+      ease: "Quad.easeOut",
+      onComplete: () => flash.destroy(),
+    });
+
+    return true;
+  },
+});
+
 // ============================================================
 // ADD MORE CARDS HERE
 // ============================================================
-// Example:
-//
-// registerCard({
-//   id: "pulse",
-//   label: "Pulse",
-//   baseImageKey: "card_base",
-//   skillImageKey: "card_skill_pulse",
-//   cooldownMs: 3000,
-//   performAction: (context: CardActionContext): boolean => {
-//     const { room } = context;
-//     room.send(3);
-//     return true;
-//   },
-// });
+// Copy the registerCard({ ... }) pattern above.
+// Each card needs: id, label, baseImageKey, skillImageKey, cooldownMs, performAction.

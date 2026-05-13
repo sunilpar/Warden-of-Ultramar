@@ -35,12 +35,13 @@ import { RoomState } from "../schema/RoomState";
 import { Player, InputData } from "../schema/Player";
 import { Bullet } from "../schema/Bullet";
 import { GAME_CONFIG } from "../config/game";
-import { PLAYER_BOLTER_WEAPON } from "../config/weapons";
+import { PLAYER_BOLTER_WEAPON, PLAYER_PULSE_WEAPON } from "../config/weapons";
 import { PlayerSystem } from "../systems/PlayerSystem";
 import { EnemyAISystem } from "../systems/EnemyAISystem";
 import { BulletSystem } from "../systems/BulletSystem";
 import { CombatSystem } from "../systems/CombatSystem";
 import { SpawnSystem } from "../systems/SpawnSystem";
+import { circleCollision } from "../utils/collision";
 
 export class GameRoom extends Room {
   // ============================================================
@@ -203,6 +204,38 @@ export class GameRoom extends Room {
 
       // Update cooldown
       player.lastShootTime = this.gameTime;
+    },
+
+    // Pulse — AoE shockwave around the player
+    3: (client: Client) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+
+      // Enforce cooldown (3 seconds)
+      if (this.gameTime - player.lastPulseTime < PLAYER_PULSE_WEAPON.cooldown) {
+        return;
+      }
+
+      // Apply damage to all enemies within pulse radius
+      this.state.enemies.forEach((enemy) => {
+        if (enemy.isDead) return;
+
+        // Simple distance check (player center vs enemy center)
+        const dx = enemy.x - player.x;
+        const dy = enemy.y - player.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist <= PLAYER_PULSE_WEAPON.radius) {
+          enemy.hp -= PLAYER_PULSE_WEAPON.damage;
+          if (enemy.hp <= 0) {
+            enemy.hp = 0;
+            enemy.isDead = true;
+          }
+        }
+      });
+
+      // Update cooldown
+      player.lastPulseTime = this.gameTime;
     },
   };
 

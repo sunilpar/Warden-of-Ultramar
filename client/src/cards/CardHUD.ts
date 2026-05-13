@@ -47,11 +47,11 @@ const HUD_LAYOUT = {
   marginBottom: 8,
 
   /** Card display size */
-  cardWidth: 60,
+  cardWidth: 59,
   cardHeight: 100,
 
   /** Gap between cards */
-  cardGap: 6,
+  cardGap: 3,
 
   /**
    * HP bar — the ANCHOR point for the entire HUD.

@@ -29,6 +29,7 @@ export class SceneSelector extends Phaser.Scene {
     this.load.image("card_base", "assets/cards/base.png");
     this.load.image("card_locked", "assets/cards/lockedBack.png");
     this.load.image("card_skill_boltgun", "assets/cards/skillCards/boltGun.png");
+    this.load.image("card_skill_pulse", "assets/cards/skillCards/pulse.png");
   }
 
   create() {

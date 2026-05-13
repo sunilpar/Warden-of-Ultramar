@@ -29,6 +29,22 @@ export const PLAYER_BOLTER_WEAPON = {
   lifetime: 3000,
 };
 
+/**
+ * Player Pulse Weapon Configuration
+ * ==================================
+ * Close-combat AoE shockwave expanding from the player.
+ */
+export const PLAYER_PULSE_WEAPON = {
+  /** Pulse effect radius in pixels */
+  radius: 100,
+
+  /** Milliseconds between pulses (3 second cooldown) */
+  cooldown: 3000,
+
+  /** Damage dealt to all enemies within radius */
+  damage: 150,
+};
+
 export const ORK_RIFLE_WEAPON = {
   /** Bullet travel speed in pixels per second */
   bulletSpeed: 500,

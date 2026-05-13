@@ -57,4 +57,11 @@ export class Player extends Schema {
    * Stored in milliseconds (game time).
    */
   lastShootTime: number = 0;
+
+  /**
+   * Last pulse time — NOT synced to clients.
+   * Used by the server to enforce pulse cooldown (3s).
+   * Stored in milliseconds (game time).
+   */
+  lastPulseTime: number = 0;
 }

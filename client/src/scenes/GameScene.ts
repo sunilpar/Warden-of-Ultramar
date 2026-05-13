@@ -159,6 +159,7 @@ export class GameScene extends Phaser.Scene {
     // Initialize card slot manager and HUD
     this.cardSlotManager = new CardSlotManager();
     this.cardSlotManager.equipCard(0, "bolt_gun"); // Slot 0 = Left Click
+    this.cardSlotManager.equipCard(1, "pulse");     // Slot 1 = Right Click
     this.cardHUD = new CardHUD(this, this.cardSlotManager);
 
     // Card input keys
