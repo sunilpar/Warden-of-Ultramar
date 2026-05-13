@@ -23,6 +23,12 @@ export class SceneSelector extends Phaser.Scene {
     this.load.image("elder", "assets/eldar.png");
     this.load.image("deathbox", "assets/deathbox_lowres.png");
     this.load.image("orck", "assets/orck.png");
+
+    // Card system assets
+    this.load.image("hud_bg", "assets/hud.png");
+    this.load.image("card_base", "assets/cards/base.png");
+    this.load.image("card_locked", "assets/cards/lockedBack.png");
+    this.load.image("card_skill_boltgun", "assets/cards/skillCards/boltGun.png");
   }
 
   create() {

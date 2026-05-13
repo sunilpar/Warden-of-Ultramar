@@ -37,6 +37,10 @@ import type server from "../../../server/src/app.config";
 import type { InputData } from "../../../server/src/schema/Player";
 import type { GameRoom } from "../../../server/src/rooms/GameRoom";
 
+// Card system
+import { CardSlotManager, CardHUD } from "../cards/CardHUD";
+import { CardActionContext } from "../cards/CardTypes";
+
 // ============================================================
 // Entity interfaces — track visual objects for each entity
 // ============================================================
@@ -88,9 +92,16 @@ export class GameScene extends Phaser.Scene {
   isGameOver: boolean = false;
   deathBoxSprite: Phaser.GameObjects.Image | null = null;
 
-  // Shooting cooldown (client-side tracking for visual feedback)
-  lastShootTime: number = 0;
-  private readonly SHOOT_COOLDOWN_MS: number = 500; // 0.5 seconds
+  // Card system
+  cardSlotManager!: CardSlotManager;
+  cardHUD!: CardHUD;
+
+  // Card input keys (space, 1, 2)
+  cardKeys!: {
+    space: Phaser.Input.Keyboard.Key;
+    one: Phaser.Input.Keyboard.Key;
+    two: Phaser.Input.Keyboard.Key;
+  };
 
   // Input
   wasdKeys!: {
@@ -141,26 +152,44 @@ export class GameScene extends Phaser.Scene {
     // FPS counter
     this.debugFPS = this.add.text(4, 4, "", { color: "#efbf68" });
 
-    // Left-click to shoot
+    // ============================================================
+    // CARD SYSTEM SETUP
+    // ============================================================
+
+    // Initialize card slot manager and HUD
+    this.cardSlotManager = new CardSlotManager();
+    this.cardSlotManager.equipCard(0, "bolt_gun"); // Slot 0 = Left Click
+    this.cardHUD = new CardHUD(this, this.cardSlotManager);
+
+    // Card input keys
+    this.cardKeys = {
+      space: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE),
+      one: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ONE),
+      two: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.TWO),
+    };
+
+    // ---- Card input: Left Click (slot 0) ----
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
-      // Only fire on left-click
-      if (!pointer.leftButtonDown()) return;
-      if (this.isGameOver) return;
-      if (!this.currentPlayer) return;
+      if (this.isGameOver || !this.currentPlayer) return;
 
-      // Get mouse world position
-      const worldX = pointer.worldX;
-      const worldY = pointer.worldY;
+      const slotIndex = pointer.leftButtonDown()
+        ? this.cardSlotManager.getSlotByBinding("leftClick")
+        : pointer.rightButtonDown()
+          ? this.cardSlotManager.getSlotByBinding("rightClick")
+          : -1;
 
-      // Client-side cooldown check (visual only, server enforces real cooldown)
-      const now = performance.now();
-      if (now - this.lastShootTime < this.SHOOT_COOLDOWN_MS) return;
+      if (slotIndex < 0) return;
 
-      this.lastShootTime = now;
-
-      // Send shoot message to server with mouse world position
-      this.room.send(2, { x: worldX, y: worldY });
+      this.cardSlotManager.activateSlot(slotIndex, {
+        scene: this,
+        pointer: { worldX: pointer.worldX, worldY: pointer.worldY },
+        room: this.room,
+        player: this.currentPlayer,
+      });
     });
+
+    // Disable right-click context menu for RMB card slot
+    this.input.mouse.disableContextMenu();
 
     // Connect to server
     await this.connect();
@@ -605,6 +634,36 @@ export class GameScene extends Phaser.Scene {
     while (this.elapsedTime >= this.fixedTimeStep) {
       this.elapsedTime -= this.fixedTimeStep;
       this.fixedTick(time, this.fixedTimeStep);
+    }
+
+    // ---- Card system: keyboard card slots (space, 1, 2) ----
+    if (!this.isGameOver && this.currentPlayer) {
+      const cardContext: CardActionContext = {
+        scene: this,
+        room: this.room,
+        player: this.currentPlayer,
+      };
+
+      if (Phaser.Input.Keyboard.JustDown(this.cardKeys.space)) {
+        const slotIdx = this.cardSlotManager.getSlotByBinding("space");
+        this.cardSlotManager.activateSlot(slotIdx, cardContext);
+      }
+      if (Phaser.Input.Keyboard.JustDown(this.cardKeys.one)) {
+        const slotIdx = this.cardSlotManager.getSlotByBinding("key1");
+        this.cardSlotManager.activateSlot(slotIdx, cardContext);
+      }
+      if (Phaser.Input.Keyboard.JustDown(this.cardKeys.two)) {
+        const slotIdx = this.cardSlotManager.getSlotByBinding("key2");
+        this.cardSlotManager.activateSlot(slotIdx, cardContext);
+      }
+    }
+
+    // ---- Update card HUD ----
+    if (this.currentPlayer) {
+      const ps = this.room.state.players.get(this.room.sessionId);
+      if (ps) {
+        this.cardHUD.update(ps.hp, ps.maxHp);
+      }
     }
 
     this.debugFPS.text = `${Math.floor(this.game.loop.actualFps)}`;

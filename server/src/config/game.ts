@@ -21,7 +21,7 @@ export const GAME_CONFIG = {
   FIXED_TIME_STEP_MS: 1000 / 60,
 
   /** Fixed timestep in seconds (used for delta-time movement) */
-  FIXED_DELTA_TIME: (1000 / 60) / 1000,
+  FIXED_DELTA_TIME: 1000 / 60 / 1000,
 
   /** Maximum inputs processed per player per tick.
    * WHY: A lagging player could queue hundreds of inputs and
