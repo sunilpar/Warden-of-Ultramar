@@ -28,6 +28,7 @@
  *     3. EnemyAISystem  — update enemy AI, move enemies, melee attacks
  *     4. BulletSystem   — move bullets, handle bullet lifecycle
  *     5. CombatSystem   — check bullet collisions, apply damage
+ *     6. MapSystem      — check exit zones, obstacle collisions
  */
 
 import { Room, Client } from "colyseus";
@@ -41,7 +42,8 @@ import { EnemyAISystem } from "../systems/EnemyAISystem";
 import { BulletSystem } from "../systems/BulletSystem";
 import { CombatSystem } from "../systems/CombatSystem";
 import { SpawnSystem } from "../systems/SpawnSystem";
-import { circleCollision } from "../utils/collision";
+import { MapSystem } from "../systems/MapSystem";
+import { getDefaultMap } from "../config/maps";
 
 export class GameRoom extends Room {
   // ============================================================
@@ -60,6 +62,7 @@ export class GameRoom extends Room {
   bulletSystem!: BulletSystem;
   combatSystem!: CombatSystem;
   spawnSystem!: SpawnSystem;
+  mapSystem!: MapSystem;
 
   /** Running game time accumulator in milliseconds */
   gameTime = 0;
@@ -69,17 +72,22 @@ export class GameRoom extends Room {
   // ============================================================
 
   onCreate(options: any) {
-    // Set up map dimensions
-    this.state.mapWidth = GAME_CONFIG.MAP_WIDTH;
-    this.state.mapHeight = GAME_CONFIG.MAP_HEIGHT;
+    // ---- Load the map ----
+    const mapDef = getDefaultMap();
+    if (!mapDef) throw new Error("No maps registered!");
+    this.mapSystem = new MapSystem(mapDef);
+
+    // Set up map dimensions from the loaded map
+    this.state.mapWidth = this.mapSystem.mapWidth;
+    this.state.mapHeight = this.mapSystem.mapHeight;
 
     // Initialize all game systems
     // Order matters: BulletSystem must exist before CombatSystem
-    this.playerSystem = new PlayerSystem(this.state);
-    this.enemyAISystem = new EnemyAISystem(this.state);
+    this.playerSystem = new PlayerSystem(this.state, this.mapSystem);
+    this.enemyAISystem = new EnemyAISystem(this.state, this.mapSystem);
     this.bulletSystem = new BulletSystem(this.state);
-    this.combatSystem = new CombatSystem(this.state, this.bulletSystem);
-    this.spawnSystem = new SpawnSystem(this.state, this.enemyAISystem);
+    this.combatSystem = new CombatSystem(this.state, this.bulletSystem, this.mapSystem);
+    this.spawnSystem = new SpawnSystem(this.state, this.enemyAISystem, this.mapSystem);
 
     // Start the fixed timestep simulation
     let elapsedTime = 0;
@@ -93,7 +101,7 @@ export class GameRoom extends Room {
       }
     });
 
-    console.log("GameRoom created");
+    console.log("GameRoom created with map:", mapDef.name);
   }
 
   /**
@@ -129,6 +137,18 @@ export class GameRoom extends Room {
 
     // 6. Check bullet-player collisions & apply damage
     this.combatSystem.update(this.gameTime);
+
+    // 7. Check exit zone (teleport players who reach the exit)
+    this.state.players.forEach((player) => {
+      if (player.isDead) return;
+      if (this.mapSystem.isInExitZone(player.x, player.y)) {
+        // For now: teleport to initial spawn point (same map)
+        const spawn = this.mapSystem.getInitialSpawnPoint();
+        player.x = spawn.x;
+        player.y = spawn.y;
+        console.log(`Player reached exit, teleported to spawn`);
+      }
+    });
   }
 
   // ============================================================
@@ -141,6 +161,8 @@ export class GameRoom extends Room {
    * Message 0: Movement input (WASD state)
    * Message 1: Respawn request
    * Message 2: Shoot (mouse world position)
+   * Message 3: Pulse (AoE)
+   * Message 4: Heal
    */
   messages = {
     // Movement input
@@ -151,14 +173,16 @@ export class GameRoom extends Room {
       }
     },
 
-    // Respawn request
+    // Respawn request — spawn at nearest checkpoint
     1: (client: Client) => {
       const player = this.state.players.get(client.sessionId);
       if (player && player.isDead) {
         player.hp = GAME_CONFIG.PLAYER.RESPAWN_HP;
         player.isDead = false;
-        player.x = Math.random() * this.state.mapWidth;
-        player.y = Math.random() * this.state.mapHeight;
+        // Find the nearest checkpoint to where the player died
+        const spawn = this.mapSystem.getNearestSpawnPoint(player.x, player.y);
+        player.x = spawn.x;
+        player.y = spawn.y;
         player.inputQueue = [];
       }
     },
@@ -168,7 +192,7 @@ export class GameRoom extends Room {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.isDead) return;
 
-      // Enforce cooldown (0.5 seconds)
+      // Enforce cooldown
       if (this.gameTime - player.lastShootTime < PLAYER_BOLTER_WEAPON.cooldown) {
         return;
       }
@@ -211,7 +235,7 @@ export class GameRoom extends Room {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.isDead) return;
 
-      // Enforce cooldown (3 seconds)
+      // Enforce cooldown
       if (this.gameTime - player.lastPulseTime < PLAYER_PULSE_WEAPON.cooldown) {
         return;
       }
@@ -220,7 +244,6 @@ export class GameRoom extends Room {
       this.state.enemies.forEach((enemy) => {
         if (enemy.isDead) return;
 
-        // Simple distance check (player center vs enemy center)
         const dx = enemy.x - player.x;
         const dy = enemy.y - player.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
@@ -230,25 +253,43 @@ export class GameRoom extends Room {
           if (enemy.hp <= 0) {
             enemy.hp = 0;
             enemy.isDead = true;
+            player.killsSinceLastHeal++;
           }
         }
       });
 
-      // Update cooldown
       player.lastPulseTime = this.gameTime;
+    },
+
+    // Heal — Restore HP based on kill count cooldown (6 kills required)
+    4: (client: Client) => {
+      const HEAL_KILLS_REQUIRED = 6;
+      const HEAL_AMOUNT = 300;
+
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+
+      if (player.killsSinceLastHeal < HEAL_KILLS_REQUIRED) {
+        return;
+      }
+
+      player.hp = Math.min(player.hp + HEAL_AMOUNT, player.maxHp);
+      player.killsSinceLastHeal = 0;
     },
   };
 
   /**
    * Called when a new client connects.
-   * Creates a player entity at a random position.
+   * Creates a player entity at the map's initial spawn point.
    */
   onJoin(client: Client, options: any) {
     console.log("Player joined:", client.sessionId);
 
     const player = new Player();
-    player.x = Math.random() * this.state.mapWidth;
-    player.y = Math.random() * this.state.mapHeight;
+    // Spawn at the map's initial spawn point
+    const spawn = this.mapSystem.getInitialSpawnPoint();
+    player.x = spawn.x;
+    player.y = spawn.y;
     player.hp = GAME_CONFIG.PLAYER.HP;
     player.maxHp = GAME_CONFIG.PLAYER.HP;
     player.speed = GAME_CONFIG.PLAYER.SPEED;
@@ -258,7 +299,6 @@ export class GameRoom extends Room {
 
   /**
    * Called when a client disconnects.
-   * Removes their player entity from the game.
    */
   onLeave(client: Client, code: number) {
     console.log("Player left:", client.sessionId);
@@ -266,7 +306,7 @@ export class GameRoom extends Room {
   }
 
   /**
-   * Called when the room is disposed (no more clients).
+   * Called when the room is disposed.
    */
   onDispose() {
     console.log("GameRoom disposed:", this.roomId);

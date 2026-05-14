@@ -153,6 +153,84 @@ registerCard({
   },
 });
 
+/**
+ * Heal Card
+ * ---------
+ * Restores 300 HP to the player.
+ * Bound to Key "1" by default (slot 3).
+ * Cooldown: Kill-based — must kill 6 enemies before reuse.
+ * Server message type: 4
+ *
+ * CLIENT-SIDE VFX:
+ *   - Green glow ring expanding from the player
+ *   - Green flash overlay
+ */
+registerCard({
+  id: "heal",
+  label: "+300 HP",
+  baseImageKey: "card_base",
+  skillImageKey: "card_skill_heal",
+  cooldownMs: 0, // Not time-based
+  cooldownMode: "kills",
+  killsRequired: 6,
+  performAction: (context: CardActionContext): boolean => {
+    const { scene, room, player } = context;
+    if (!player) return false;
+
+    // Send heal request to server
+    room.send(4);
+
+    // ---- Client-side green heal VFX ----
+    const px = player.x;
+    const py = player.y;
+
+    // Green expanding circle (heal aura)
+    const healCircle = scene.add.circle(px, py, 10, 0x00ff44, 0.6).setDepth(6);
+    scene.tweens.add({
+      targets: healCircle,
+      scaleX: 8,
+      scaleY: 8,
+      alpha: 0,
+      duration: 500,
+      ease: "Cubic.easeOut",
+      onComplete: () => healCircle.destroy(),
+    });
+
+    // Green glow ring
+    const healRing = scene.add.circle(px, py, 12, 0x00ff44, 0.0)
+      .setStrokeStyle(3, 0x44ff88, 0.9)
+      .setDepth(6);
+    scene.tweens.add({
+      targets: healRing,
+      scaleX: 6,
+      scaleY: 6,
+      alpha: 0,
+      duration: 600,
+      ease: "Cubic.easeOut",
+      onComplete: () => healRing.destroy(),
+    });
+
+    // Green screen flash
+    const flash = scene.add.rectangle(
+      scene.cameras.main.worldView.centerX,
+      scene.cameras.main.worldView.centerY,
+      scene.cameras.main.width,
+      scene.cameras.main.height,
+      0x00ff44,
+      0.2,
+    ).setScrollFactor(0).setDepth(99);
+    scene.tweens.add({
+      targets: flash,
+      alpha: 0,
+      duration: 300,
+      ease: "Quad.easeOut",
+      onComplete: () => flash.destroy(),
+    });
+
+    return true;
+  },
+});
+
 // ============================================================
 // ADD MORE CARDS HERE
 // ============================================================

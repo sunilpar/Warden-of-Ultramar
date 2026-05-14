@@ -64,4 +64,10 @@ export class Player extends Schema {
    * Stored in milliseconds (game time).
    */
   lastPulseTime: number = 0;
+
+  /**
+   * Number of enemies killed since last heal card use.
+   * Synced so client can display kill-based cooldown progress.
+   */
+  @type("number") killsSinceLastHeal: number = 0;
 }

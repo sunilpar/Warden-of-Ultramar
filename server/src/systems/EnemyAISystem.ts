@@ -25,10 +25,12 @@ import { OrkRuntimeState, updateOrkAI } from "../ai/OrkAI";
 import { distanceSq } from "../utils/math";
 import { clampToMap } from "../utils/movement";
 import { GAME_CONFIG } from "../config/game";
-import { ELDER_CONFIG } from "../config/enemies";
+import { ELDER_CONFIG, ORK_CONFIG } from "../config/enemies";
+import { MapSystem } from "./MapSystem";
 
 export class EnemyAISystem {
   private state: RoomState;
+  private mapSystem: MapSystem;
 
   /** Runtime state for Elders, keyed by enemy ID */
   private elderStates: Map<string, ElderRuntimeState> = new Map();
@@ -39,8 +41,9 @@ export class EnemyAISystem {
   /** Bullets that need to be spawned this tick */
   private pendingBullets: { bullet: Bullet; enemyId: string }[] = [];
 
-  constructor(state: RoomState) {
+  constructor(state: RoomState, mapSystem: MapSystem) {
     this.state = state;
+    this.mapSystem = mapSystem;
   }
 
   /**
@@ -70,10 +73,29 @@ export class EnemyAISystem {
         this.updateOrk(enemy, enemyId, dt, currentTime);
       }
 
-      // Clamp enemy position to map bounds
-      const clamped = clampToMap(enemy.x, enemy.y);
+      // Clamp enemy position to actual map bounds
+      const clamped = clampToMap(
+        enemy.x, enemy.y,
+        this.mapSystem.mapWidth, this.mapSystem.mapHeight
+      );
       enemy.x = clamped.x;
       enemy.y = clamped.y;
+
+      // Resolve blocking collisions for enemies (obstacles + enemy spawn zones)
+      // WHY: Enemies should not walk through obstacles or back into spawn zones.
+      const enemyRadius = enemy.enemyType === "ork"
+        ? ORK_CONFIG.collisionRadius
+        : ELDER_CONFIG.collisionRadius;
+      const hitBlocker = this.mapSystem.checkAllBlockingCollision(
+        enemy.x, enemy.y, enemyRadius
+      );
+      if (hitBlocker) {
+        const resolved = this.mapSystem.resolveBlockingCollision(
+          enemy.x, enemy.y, enemyRadius, hitBlocker
+        );
+        enemy.x = resolved.x;
+        enemy.y = resolved.y;
+      }
     });
 
     // Clean up dead enemies

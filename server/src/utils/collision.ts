@@ -44,3 +44,46 @@ export function pointInRange(
   const rangeSq = range * range;
   return distanceSq(x1, y1, x2, y2) < rangeSq;
 }
+
+/**
+ * Check if a circle collides with a rectangle (axis-aligned).
+ *
+ * HOW: Find the closest point on the rectangle to the circle center.
+ * If the distance from the circle center to that closest point is
+ * less than the circle's radius, they overlap.
+ *
+ * This is the standard circle-AABB collision test used in most 2D games.
+ *
+ * @param cx - Circle center X
+ * @param cy - Circle center Y
+ * @param cr - Circle radius
+ * @param rx - Rectangle top-left X
+ * @param ry - Rectangle top-left Y
+ * @param rw - Rectangle width
+ * @param rh - Rectangle height
+ * @returns true if the circle and rectangle overlap
+ */
+export function circleRectCollision(
+  cx: number, cy: number, cr: number,
+  rx: number, ry: number, rw: number, rh: number
+): boolean {
+  // Find the closest point on the rectangle to the circle center
+  const closestX = Math.max(rx, Math.min(cx, rx + rw));
+  const closestY = Math.max(ry, Math.min(cy, ry + rh));
+
+  // Check if the closest point is within the circle's radius
+  return distanceSq(cx, cy, closestX, closestY) < cr * cr;
+}
+
+/**
+ * Check if a point is inside a rectangle.
+ *
+ * @returns true if the point is inside the rectangle
+ */
+export function pointInRect(
+  px: number, py: number,
+  rx: number, ry: number,
+  rw: number, rh: number
+): boolean {
+  return px >= rx && px <= rx + rw && py >= ry && py <= ry + rh;
+}

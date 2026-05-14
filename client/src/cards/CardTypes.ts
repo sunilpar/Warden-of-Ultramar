@@ -25,12 +25,19 @@
 /** Input binding for a card slot */
 export type CardInputBinding = "leftClick" | "rightClick" | "space" | "key1" | "key2";
 
+/** Cooldown mode for a card */
+export type CooldownMode = "time" | "kills";
+
 /** Phases a card cooldown overlay goes through */
 export interface CardCooldownState {
   /** Timestamp when the card was last used */
   lastUsedTime: number;
   /** Cooldown duration in ms */
   cooldownMs: number;
+  /** Current kill count for kill-based cooldowns */
+  currentKills: number;
+  /** Kills required to unlock (for kill-based cooldowns) */
+  killsRequired: number;
 }
 
 /**
@@ -46,8 +53,12 @@ export interface CardDefinition {
   baseImageKey: string;
   /** Phaser texture key for the skill overlay image */
   skillImageKey: string;
-  /** Cooldown duration in milliseconds */
+  /** Cooldown duration in milliseconds (for time-based cooldowns) */
   cooldownMs: number;
+  /** Cooldown mode: "time" (default) or "kills" (fill based on enemy kills) */
+  cooldownMode?: CooldownMode;
+  /** Number of kills required to activate (only for kill-based cooldowns) */
+  killsRequired?: number;
   /**
    * The action to perform when this card is activated.
    * Receives the scene and pointer (for mouse-based cards).

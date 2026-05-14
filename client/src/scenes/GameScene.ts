@@ -41,6 +41,9 @@ import type { GameRoom } from "../../../server/src/rooms/GameRoom";
 import { CardSlotManager, CardHUD } from "../cards/CardHUD";
 import { CardActionContext } from "../cards/CardTypes";
 
+// Map system
+import { MAP_1 } from "../maps/mapData";
+
 // ============================================================
 // Entity interfaces — track visual objects for each entity
 // ============================================================
@@ -96,6 +99,10 @@ export class GameScene extends Phaser.Scene {
   cardSlotManager!: CardSlotManager;
   cardHUD!: CardHUD;
 
+  // Map rendering
+  private currentMap = MAP_1;
+  private debugHitboxes: Phaser.GameObjects.Graphics | null = null;
+
   // Card input keys (space, 1, 2)
   cardKeys!: {
     space: Phaser.Input.Keyboard.Key;
@@ -144,10 +151,10 @@ export class GameScene extends Phaser.Scene {
       down: Phaser.Input.Keyboard.KeyCodes.S,
     }) as any;
 
-    // Draw background
-    this.add
-      .image(this.cameras.main.centerX, this.cameras.main.centerY, "map1")
-      .setDisplaySize(this.cameras.main.width, this.cameras.main.height);
+    // ---- Render the tile-based map ----
+    this.renderMapTiles();
+    this.renderMapEntities();
+    this.renderDebugHitboxes();
 
     // FPS counter
     this.debugFPS = this.add.text(4, 4, "", { color: "#efbf68" });
@@ -160,6 +167,7 @@ export class GameScene extends Phaser.Scene {
     this.cardSlotManager = new CardSlotManager();
     this.cardSlotManager.equipCard(0, "bolt_gun"); // Slot 0 = Left Click
     this.cardSlotManager.equipCard(1, "pulse");     // Slot 1 = Right Click
+    this.cardSlotManager.equipCard(3, "heal");       // Slot 3 = Key "1"
     this.cardHUD = new CardHUD(this, this.cardSlotManager);
 
     // Card input keys
@@ -202,7 +210,7 @@ export class GameScene extends Phaser.Scene {
     // ============================================================
 
     callbacks.onAdd("players", (player, sessionId) => {
-      const entity = this.physics.add.image(player.x, player.y, "ship_0001");
+      const entity = this.physics.add.image(player.x, player.y, "ship_0001").setDepth(2);
 
       // HP bar graphics
       const hpBarBg = this.add.graphics();
@@ -228,6 +236,10 @@ export class GameScene extends Phaser.Scene {
         // ---- LOCAL PLAYER ----
         this.currentPlayer = entity;
 
+        // Camera follows the local player
+        this.cameras.main.startFollow(entity, true, 0.1, 0.1);
+        this.cameras.main.setBounds(0, 0, this.currentMap.widthPx, this.currentMap.heightPx);
+
         // Visual references for prediction debugging
         this.localRef = this.add.rectangle(0, 0, entity.width, entity.height);
         this.localRef.setStrokeStyle(1, 0x00ff00); // green = predicted
@@ -235,9 +247,21 @@ export class GameScene extends Phaser.Scene {
         this.remoteRef.setStrokeStyle(1, 0xff0000); // red = server confirmed
 
         // Update remote reference when server sends new position
+        // Also snap client prediction on teleport (exit zone, respawn, etc.)
         callbacks.onChange(player, () => {
           this.remoteRef.x = player.x;
           this.remoteRef.y = player.y;
+
+          // Reconcile: if server position is far from prediction, snap
+          // (happens on exit zone teleport, respawn, or significant desync)
+          if (this.currentPlayer) {
+            const dx = Math.abs(player.x - this.currentPlayer.x);
+            const dy = Math.abs(player.y - this.currentPlayer.y);
+            if (dx > 32 || dy > 32) {
+              this.currentPlayer.x = player.x;
+              this.currentPlayer.y = player.y;
+            }
+          }
         });
       } else {
         // ---- REMOTE PLAYER ----
@@ -268,7 +292,8 @@ export class GameScene extends Phaser.Scene {
       const spriteKey = enemy.enemyType === "ork" ? "orck" : "elder";
       const sprite = this.add
         .image(enemy.x, enemy.y, spriteKey)
-        .setDisplaySize(32, 32);
+        .setDisplaySize(32, 32)
+        .setDepth(2); // Above map entities (-1), below bullets (5)
 
       const hpBarBg = this.add.graphics();
       const hpBarFill = this.add.graphics();
@@ -357,7 +382,118 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    this.cameras.main.setBounds(0, 0, 800, 600);
+    // Camera bounds set when player joins (see player handler above)
+  }
+
+  // ============================================================
+  // MAP RENDERING
+  // ============================================================
+
+  /**
+   * Render floor tiles from the map data using a canvas texture.
+   */
+  private renderMapTiles(): void {
+    const map = this.currentMap;
+    const { tileSize, tiles, tilesetColumns } = map;
+    const rows = tiles.length;
+    const cols = tiles[0].length;
+
+    const canvas = this.textures.createCanvas(
+      "map_floor_canvas", cols * tileSize, rows * tileSize
+    );
+
+    const tilesetImg = this.textures.get("map1_tiles").getSourceImage() as HTMLImageElement;
+
+    const ctx = canvas.getContext();
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const tileId = tiles[row][col];
+        if (tileId === 0) continue;
+
+        const dx = col * tileSize;
+        const dy = row * tileSize;
+
+        // Draw the ENTIRE spritesheet image scaled to fit one tile
+        // The full maptileBasic.png (all 4 variations) becomes one game tile
+        ctx.drawImage(tilesetImg, 0, 0, tilesetImg.width, tilesetImg.height, dx, dy, tileSize, tileSize);
+
+      }
+    }
+    canvas.refresh();
+
+    this.add.image(0, 0, "map_floor_canvas").setOrigin(0, 0).setDepth(0);
+  }
+
+  /**
+   * Render obstacles, spawn points, and exit as sprites.
+   * DEPTH ORDER:
+   *   0 = floor tiles
+   *   1 = map entities (obstacles, spawns, exit) — ABOVE floor, BELOW players
+   *   2 = players, enemies
+   *   5 = bullets
+   */
+  private renderMapEntities(): void {
+    const map = this.currentMap;
+
+    for (const obs of map.obstacles) {
+      const key = obs.obstacleType === "big" ? "map1_obstacle_big" : "map1_obstacle_small";
+      this.add.image(obs.x + obs.width / 2, obs.y + obs.height / 2, key)
+        .setDepth(1).setDisplaySize(obs.width, obs.height);
+    }
+
+    for (const spawn of map.playerSpawns) {
+      this.add.image(spawn.x, spawn.y, "map1_spawn_player")
+        .setDepth(1).setDisplaySize(32, 32);
+    }
+
+    const enemySpawnKeys = ["map1_spawn_enemy1", "map1_spawn_enemy2", "map1_spawn_enemy3"];
+    map.enemySpawnZones.forEach((zone, i) => {
+      const key = enemySpawnKeys[i % enemySpawnKeys.length];
+      this.add.image(zone.x + zone.width / 2, zone.y + zone.height / 2, key)
+        .setDepth(1).setDisplaySize(zone.width, zone.height);
+    });
+
+    const exit = map.exitPoint;
+    this.add.image(exit.x + exit.width / 2, exit.y + exit.height / 2, "map1_exit")
+      .setDepth(1).setDisplaySize(exit.width, exit.height);
+  }
+
+  /**
+   * Render debug hitbox overlays.
+   * RED = obstacles, YELLOW = spawns, CYAN = exit, WHITE = map boundary
+   */
+  private renderDebugHitboxes(): void {
+    const map = this.currentMap;
+    const gfx = this.add.graphics().setDepth(10);
+
+    // Obstacles (RED)
+    gfx.lineStyle(2, 0xff0000, 0.8);
+    for (const obs of map.obstacles) {
+      gfx.strokeRect(obs.x, obs.y, obs.width, obs.height);
+    }
+
+    // Player spawns (YELLOW)
+    gfx.lineStyle(2, 0xffff00, 0.6);
+    for (const spawn of map.playerSpawns) {
+      gfx.strokeRect(spawn.x - 16, spawn.y - 16, 32, 32);
+    }
+
+    // Enemy spawn zones (ORANGE)
+    gfx.lineStyle(2, 0xffaa00, 0.6);
+    for (const zone of map.enemySpawnZones) {
+      gfx.strokeRect(zone.x, zone.y, zone.width, zone.height);
+    }
+
+    // Exit zone (CYAN)
+    gfx.lineStyle(2, 0x00ffff, 0.8);
+    const exit = map.exitPoint;
+    gfx.strokeRect(exit.x, exit.y, exit.width, exit.height);
+
+    // Map boundary (WHITE)
+    gfx.lineStyle(1, 0xffffff, 0.3);
+    gfx.strokeRect(0, 0, map.widthPx, map.heightPx);
+
+    this.debugHitboxes = gfx;
   }
 
   // ============================================================
@@ -663,6 +799,10 @@ export class GameScene extends Phaser.Scene {
     if (this.currentPlayer) {
       const ps = this.room.state.players.get(this.room.sessionId);
       if (ps) {
+        // Sync kill-based cooldown from server
+        const healSlotIdx = this.cardSlotManager.getSlotByBinding("key1");
+        this.cardSlotManager.updateKillsForSlot(healSlotIdx, ps.killsSinceLastHeal);
+
         this.cardHUD.update(ps.hp, ps.maxHp);
       }
     }
@@ -713,7 +853,6 @@ export class GameScene extends Phaser.Scene {
     this.room.send(0, this.inputPayload);
 
     // ---- Client-side prediction (apply locally) ----
-    // Uses same normalized movement as server for accurate prediction
     const dt = this.fixedTimeStep / 1000;
     let dirX = 0;
     let dirY = 0;
@@ -731,6 +870,52 @@ export class GameScene extends Phaser.Scene {
 
     this.currentPlayer.x += dirX * this.PLAYER_SPEED * dt;
     this.currentPlayer.y += dirY * this.PLAYER_SPEED * dt;
+
+    // Clamp to map boundaries (match server bounds)
+    this.currentPlayer.x = Phaser.Math.Clamp(
+      this.currentPlayer.x, 0, this.currentMap.widthPx
+    );
+    this.currentPlayer.y = Phaser.Math.Clamp(
+      this.currentPlayer.y, 0, this.currentMap.heightPx
+    );
+
+    // ---- Client-side blocking collision (match server) ----
+    // WHY: Without this, the client prediction lets the player walk through
+    // obstacles and enemy spawn zones. When the server corrects, there's a snap.
+    // Blocking rects = obstacles + enemy spawn zones (same as server).
+    const PLAYER_RADIUS = 16;
+    const blockingRects = [...this.currentMap.obstacles, ...this.currentMap.enemySpawnZones];
+    for (const rect of blockingRects) {
+      const closestX = Phaser.Math.Clamp(this.currentPlayer.x, rect.x, rect.x + rect.width);
+      const closestY = Phaser.Math.Clamp(this.currentPlayer.y, rect.y, rect.y + rect.height);
+
+      const dx = this.currentPlayer.x - closestX;
+      const dy = this.currentPlayer.y - closestY;
+      const distSq = dx * dx + dy * dy;
+
+      if (distSq < PLAYER_RADIUS * PLAYER_RADIUS) {
+        const entityLeft = this.currentPlayer.x - PLAYER_RADIUS;
+        const entityRight = this.currentPlayer.x + PLAYER_RADIUS;
+        const entityTop = this.currentPlayer.y - PLAYER_RADIUS;
+        const entityBottom = this.currentPlayer.y + PLAYER_RADIUS;
+
+        const pushLeft = rect.x - entityRight;
+        const pushRight = (rect.x + rect.width) - entityLeft;
+        const pushUp = rect.y - entityBottom;
+        const pushDown = (rect.y + rect.height) - entityTop;
+
+        const pushes = [
+          { dx: pushLeft, dy: 0 },
+          { dx: pushRight, dy: 0 },
+          { dx: 0, dy: pushUp },
+          { dx: 0, dy: pushDown },
+        ];
+        pushes.sort((a, b) => Math.abs(a.dx + a.dy) - Math.abs(b.dx + b.dy));
+
+        this.currentPlayer.x += pushes[0].dx;
+        this.currentPlayer.y += pushes[0].dy;
+      }
+    }
 
     // Update local prediction reference
     this.localRef.x = this.currentPlayer.x;

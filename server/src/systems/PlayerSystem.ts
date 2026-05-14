@@ -7,6 +7,7 @@
  *   - Delta-time based movement
  *   - Input rate limiting (prevents lag exploits)
  *   - Map boundary clamping
+ *   - Obstacle collision resolution
  *
  * SERVER AUTHORITY: This system is the ONLY thing that moves players.
  * The client sends inputs, but this system decides the actual position.
@@ -22,13 +23,17 @@ import { RoomState } from "../schema/RoomState";
 import { Player, InputData } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
 import { inputToMovement, clampToMap } from "../utils/movement";
+import { MapSystem } from "./MapSystem";
 
 export class PlayerSystem {
   /** Reference to the shared game state */
   private state: RoomState;
+  /** Reference to the map system (for obstacle collision + dynamic bounds) */
+  private mapSystem: MapSystem;
 
-  constructor(state: RoomState) {
+  constructor(state: RoomState, mapSystem: MapSystem) {
     this.state = state;
+    this.mapSystem = mapSystem;
   }
 
   /**
@@ -40,6 +45,7 @@ export class PlayerSystem {
    *   3. Convert input to normalized movement vector
    *   4. Apply movement with delta time
    *   5. Clamp to map boundaries
+   *   6. Resolve obstacle collisions (push out of walls)
    *
    * @param dt - Delta time in seconds (fixed timestep / 1000)
    */
@@ -72,10 +78,30 @@ export class PlayerSystem {
         player.x += movement.x;
         player.y += movement.y;
 
-        // Clamp to map boundaries
-        const clamped = clampToMap(player.x, player.y);
+        // Clamp to map boundaries (use actual map size from MapSystem)
+        const clamped = clampToMap(
+          player.x, player.y,
+          this.mapSystem.mapWidth, this.mapSystem.mapHeight
+        );
         player.x = clamped.x;
         player.y = clamped.y;
+
+        // Resolve obstacle + enemy spawn zone collisions
+        // WHY: After movement + clamp, the player might be inside an obstacle
+        // or enemy spawn zone. We push them out along the shortest axis.
+        const hitBlocker = this.mapSystem.checkAllBlockingCollision(
+          player.x, player.y,
+          GAME_CONFIG.PLAYER.COLLISION_RADIUS
+        );
+        if (hitBlocker) {
+          const resolved = this.mapSystem.resolveBlockingCollision(
+            player.x, player.y,
+            GAME_CONFIG.PLAYER.COLLISION_RADIUS,
+            hitBlocker
+          );
+          player.x = resolved.x;
+          player.y = resolved.y;
+        }
 
         // Store last processed tick (for client prediction)
         if (input.tick !== undefined) {

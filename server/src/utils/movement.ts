@@ -63,11 +63,19 @@ export function moveInDirection(
 /**
  * Clamp a position to stay within map boundaries.
  * Prevents entities from walking off the edge of the world.
+ *
+ * @param x - Current X position
+ * @param y - Current Y position
+ * @param maxX - Map width in pixels (defaults to GAME_CONFIG for backward compat)
+ * @param maxY - Map height in pixels (defaults to GAME_CONFIG for backward compat)
  */
-export function clampToMap(x: number, y: number): { x: number; y: number } {
+export function clampToMap(
+  x: number, y: number,
+  maxX?: number, maxY?: number
+): { x: number; y: number } {
   return {
-    x: clamp(x, 0, GAME_CONFIG.MAP_WIDTH),
-    y: clamp(y, 0, GAME_CONFIG.MAP_HEIGHT),
+    x: clamp(x, 0, maxX ?? GAME_CONFIG.MAP_WIDTH),
+    y: clamp(y, 0, maxY ?? GAME_CONFIG.MAP_HEIGHT),
   };
 }
 

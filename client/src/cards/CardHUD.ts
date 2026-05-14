@@ -110,31 +110,31 @@ export class CardSlotManager {
         card: null,
         binding: "leftClick",
         bindingLabel: "LMB",
-        cooldown: { lastUsedTime: 0, cooldownMs: 0 },
+        cooldown: { lastUsedTime: 0, cooldownMs: 0, currentKills: 0, killsRequired: 0 },
       },
       {
         card: null,
         binding: "rightClick",
         bindingLabel: "RMB",
-        cooldown: { lastUsedTime: 0, cooldownMs: 0 },
+        cooldown: { lastUsedTime: 0, cooldownMs: 0, currentKills: 0, killsRequired: 0 },
       },
       {
         card: null,
         binding: "space",
         bindingLabel: "SPC",
-        cooldown: { lastUsedTime: 0, cooldownMs: 0 },
+        cooldown: { lastUsedTime: 0, cooldownMs: 0, currentKills: 0, killsRequired: 0 },
       },
       {
         card: null,
         binding: "key1",
         bindingLabel: "1",
-        cooldown: { lastUsedTime: 0, cooldownMs: 0 },
+        cooldown: { lastUsedTime: 0, cooldownMs: 0, currentKills: 0, killsRequired: 0 },
       },
       {
         card: null,
         binding: "key2",
         bindingLabel: "2",
-        cooldown: { lastUsedTime: 0, cooldownMs: 0 },
+        cooldown: { lastUsedTime: 0, cooldownMs: 0, currentKills: 0, killsRequired: 0 },
       },
     ];
   }
@@ -151,6 +151,10 @@ export class CardSlotManager {
     }
     this.slots[slotIndex].card = card;
     this.slots[slotIndex].cooldown.cooldownMs = card.cooldownMs;
+    // Set kill-based cooldown properties if applicable
+    if (card.killsRequired) {
+      this.slots[slotIndex].cooldown.killsRequired = card.killsRequired;
+    }
     console.log(
       `CardHUD: Equipped "${card.label}" in slot ${slotIndex} (${this.slots[slotIndex].bindingLabel})`,
     );
@@ -161,12 +165,24 @@ export class CardSlotManager {
     if (slotIndex < 0 || slotIndex >= this.slots.length) return false;
     const slot = this.slots[slotIndex];
     if (!slot.card) return false;
-    const now = performance.now();
-    const elapsed = now - slot.cooldown.lastUsedTime;
-    if (elapsed < slot.cooldown.cooldownMs) return false;
+
+    // Kill-based cooldown: check if enough kills accumulated
+    if (slot.card.cooldownMode === "kills") {
+      if (slot.cooldown.currentKills < slot.cooldown.killsRequired) return false;
+    } else {
+      // Time-based cooldown
+      const now = performance.now();
+      const elapsed = now - slot.cooldown.lastUsedTime;
+      if (elapsed < slot.cooldown.cooldownMs) return false;
+    }
+
     const success = slot.card.performAction(context);
     if (success) {
-      slot.cooldown.lastUsedTime = now;
+      // For kill-based cards, reset kills; for time-based, reset timer
+      if (slot.card.cooldownMode === "kills") {
+        slot.cooldown.currentKills = 0;
+      }
+      slot.cooldown.lastUsedTime = performance.now();
     }
     return success;
   }
@@ -179,9 +195,25 @@ export class CardSlotManager {
     if (slotIndex < 0 || slotIndex >= this.slots.length) return 1;
     const slot = this.slots[slotIndex];
     if (!slot.card) return 1;
+
+    // Kill-based cooldown progress
+    if (slot.card.cooldownMode === "kills" && slot.cooldown.killsRequired > 0) {
+      return Math.min(slot.cooldown.currentKills / slot.cooldown.killsRequired, 1);
+    }
+
+    // Time-based cooldown progress
     const now = performance.now();
     const elapsed = now - slot.cooldown.lastUsedTime;
     return Math.min(elapsed / slot.cooldown.cooldownMs, 1);
+  }
+
+  /**
+   * Update the kill counter for kill-based cooldown slots.
+   * Called when the server syncs killsSinceLastHeal.
+   */
+  updateKillsForSlot(slotIndex: number, kills: number): void {
+    if (slotIndex < 0 || slotIndex >= this.slots.length) return;
+    this.slots[slotIndex].cooldown.currentKills = kills;
   }
 }
 
@@ -415,6 +447,8 @@ export class CardHUD {
 
   /**
    * Update card visuals based on equipped cards.
+   * For kill-based cards, shows "X/6" progress when charging
+   * and the card label when ready.
    */
   private updateCardVisuals() {
     for (let i = 0; i < 5; i++) {
@@ -425,8 +459,20 @@ export class CardHUD {
 
       if (slot.card) {
         skillSprite.setTexture(slot.card.skillImageKey);
-        cardLabel.setText(slot.card.label);
         baseSprite.setAlpha(1);
+
+        // Kill-based cards: show kill progress
+        if (slot.card.cooldownMode === "kills" && slot.cooldown.killsRequired > 0) {
+          const kills = slot.cooldown.currentKills;
+          const required = slot.cooldown.killsRequired;
+          if (kills >= required) {
+            cardLabel.setText(slot.card.label);
+          } else {
+            cardLabel.setText(`${kills}/${required}`);
+          }
+        } else {
+          cardLabel.setText(slot.card.label);
+        }
       } else {
         skillSprite.setTexture("card_locked");
         cardLabel.setText("");

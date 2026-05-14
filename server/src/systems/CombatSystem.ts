@@ -25,6 +25,7 @@
 
 import { RoomState } from "../schema/RoomState";
 import { BulletSystem } from "./BulletSystem";
+import { MapSystem } from "./MapSystem";
 import { GAME_CONFIG } from "../config/game";
 import { ELDER_CONFIG, ORK_CONFIG } from "../config/enemies";
 import { circleCollision } from "../utils/collision";
@@ -32,10 +33,12 @@ import { circleCollision } from "../utils/collision";
 export class CombatSystem {
   private state: RoomState;
   private bulletSystem: BulletSystem;
+  private mapSystem: MapSystem;
 
-  constructor(state: RoomState, bulletSystem: BulletSystem) {
+  constructor(state: RoomState, bulletSystem: BulletSystem, mapSystem: MapSystem) {
     this.state = state;
     this.bulletSystem = bulletSystem;
+    this.mapSystem = mapSystem;
   }
 
   /**
@@ -52,6 +55,15 @@ export class CombatSystem {
     this.state.bullets.forEach((bullet, bulletId) => {
       // Skip bullets that already hit something this tick
       if (this.bulletSystem.isBulletHit(bulletId)) {
+        return;
+      }
+
+      // ---- BULLET vs OBSTACLES ----
+      // Check if bullet hit a wall/obstacle before checking entity collisions
+      if (this.mapSystem.checkBulletObstacleCollision(
+        bullet.x, bullet.y, GAME_CONFIG.BULLET.COLLISION_RADIUS
+      )) {
+        this.bulletSystem.markBulletAsHit(bulletId);
         return;
       }
 
@@ -96,6 +108,12 @@ export class CombatSystem {
         if (enemy.hp <= 0) {
           enemy.hp = 0;
           enemy.isDead = true;
+
+          // Track kill for the bullet's owner (for heal card cooldown)
+          const owner = this.state.players.get(bullet.ownerId);
+          if (owner) {
+            owner.killsSinceLastHeal++;
+          }
         }
 
         // Mark bullet as hit — one bullet = one damage event

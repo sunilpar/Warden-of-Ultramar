@@ -1,93 +1,100 @@
 /**
  * Spawn System
  * =============
- * Handles spawning new enemies at timed intervals:
- *   - Tracks spawn timers for each enemy type
- *   - Limits max alive enemies per type
- *   - Spawns enemies at random map edges
+ * Handles spawning new enemies at map-defined spawn zones:
+ *   - Tracks spawn timers per zone
+ *   - Limits max alive enemies per zone
+ *   - Spawns enemies at random positions within each zone
  *   - Registers new enemies with the AI system
  *
- * WHY A SEPARATE SYSTEM: Spawning is timing logic, not AI or combat.
- * Isolating it means:
- *   - Spawn rates are easy to tune
- *   - Adding new enemy types = adding a new spawn config
- *   - Spawn logic doesn't clutter the main game loop
+ * MAP-DRIVEN SPAWNING:
+ *   The old system spawned enemies at random map edges.
+ *   The new system reads spawn zones from the MapDefinition.
+ *   Each zone defines: position, size, enemy types, max alive, interval.
  *
- * SCALABILITY: To add a new enemy type:
- *   1. Add config to config/enemies.ts
- *   2. Create AI file in ai/
- *   3. Add spawn case here
- *   4. Add update case in EnemyAISystem
+ * WHY A SEPARATE SYSTEM: Spawning is timing logic, not AI or combat.
+ * Isolating it means spawn rates are easy to tune and zone-based.
  */
 
 import { RoomState } from "../schema/RoomState";
 import { Enemy } from "../schema/Enemy";
 import { EnemyAISystem } from "./EnemyAISystem";
-import { GAME_CONFIG } from "../config/game";
+import { MapSystem } from "./MapSystem";
+import { EnemySpawnZone } from "../config/maps";
 import { ELDER_CONFIG, ORK_CONFIG } from "../config/enemies";
+
+/** Runtime timer state per spawn zone */
+interface ZoneTimer {
+  /** Accumulated time in milliseconds */
+  timer: number;
+}
 
 export class SpawnSystem {
   private state: RoomState;
   private enemyAISystem: EnemyAISystem;
+  private mapSystem: MapSystem;
 
   /** Counter for unique enemy IDs */
   private enemyIdCounter = 0;
 
-  /** Time accumulator for Elder spawns (milliseconds) */
-  private elderSpawnTimer: number = 0;
+  /** Spawn timers per zone (keyed by zone name) */
+  private zoneTimers: Map<string, ZoneTimer> = new Map();
 
-  /** Time accumulator for Ork spawns (milliseconds) */
-  private orkSpawnTimer: number = 0;
-
-  constructor(state: RoomState, enemyAISystem: EnemyAISystem) {
+  constructor(state: RoomState, enemyAISystem: EnemyAISystem, mapSystem: MapSystem) {
     this.state = state;
     this.enemyAISystem = enemyAISystem;
+    this.mapSystem = mapSystem;
+
+    // Initialize timers for each spawn zone
+    for (const zone of this.mapSystem.getEnemySpawnZones()) {
+      this.zoneTimers.set(zone.name, { timer: 0 });
+    }
   }
 
   /**
-   * Check if it's time to spawn new enemies.
+   * Check if it's time to spawn new enemies in each zone.
    *
    * HOW IT WORKS:
-   *   1. Accumulate delta time each tick
-   *   2. When timer exceeds spawn interval, attempt a spawn
-   *   3. Only spawn if we're below the max alive limit
-   *   4. Reset timer after spawn attempt
+   *   1. For each spawn zone on the map
+   *   2. Accumulate delta time on the zone's timer
+   *   3. When timer exceeds the zone's interval, attempt a spawn
+   *   4. Only spawn if we're below the zone's max alive limit
+   *   5. Pick a random position within the zone's rectangle
    *
-   * @param dt - Delta time in MILLISECONDS (we convert internally)
+   * @param dtMs - Delta time in MILLISECONDS
    * @param currentTime - Current game time in milliseconds
    */
   update(dtMs: number, currentTime: number): void {
-    // --- Elder Spawning ---
-    this.elderSpawnTimer += dtMs;
-    if (this.elderSpawnTimer >= ELDER_CONFIG.spawn.intervalMs) {
-      this.elderSpawnTimer = 0;
+    const zones = this.mapSystem.getEnemySpawnZones();
 
-      // Count current elders
-      const elderCount = this.countEnemyType("elder");
-      if (elderCount < ELDER_CONFIG.spawn.maxAlive) {
-        this.spawnEnemy("elder");
-      }
-    }
+    for (const zone of zones) {
+      const timerState = this.zoneTimers.get(zone.name);
+      if (!timerState) continue;
 
-    // --- Ork Spawning ---
-    this.orkSpawnTimer += dtMs;
-    if (this.orkSpawnTimer >= ORK_CONFIG.spawn.intervalMs) {
-      this.orkSpawnTimer = 0;
+      // Accumulate time
+      timerState.timer += dtMs;
 
-      const orkCount = this.countEnemyType("ork");
-      if (orkCount < ORK_CONFIG.spawn.maxAlive) {
-        this.spawnEnemy("ork");
+      // Check if it's time to spawn
+      if (timerState.timer >= zone.intervalMs) {
+        timerState.timer = 0;
+
+        // Count alive enemies from this zone type
+        const aliveCount = this.countEnemiesOfTypes(zone.enemyTypes);
+
+        if (aliveCount < zone.maxAlive) {
+          this.spawnEnemyInZone(zone);
+        }
       }
     }
   }
 
   /**
-   * Count how many alive enemies of a given type exist.
+   * Count how many alive enemies match any of the given types.
    */
-  private countEnemyType(type: string): number {
+  private countEnemiesOfTypes(types: string[]): number {
     let count = 0;
     this.state.enemies.forEach((enemy) => {
-      if (enemy.enemyType === type && !enemy.isDead) {
+      if (!enemy.isDead && types.includes(enemy.enemyType)) {
         count++;
       }
     });
@@ -95,12 +102,16 @@ export class SpawnSystem {
   }
 
   /**
-   * Spawn a new enemy at a random map edge.
+   * Spawn a new enemy at a random position within a zone's rectangle.
    *
-   * WHY EDGES: Spawning at edges prevents enemies from appearing
-   * on top of players in the middle of the map, which feels unfair.
+   * WHY ZONES: Instead of spawning at random map edges, enemies
+   * appear in designated areas. This gives the map designer control
+   * over where combat happens.
    */
-  private spawnEnemy(type: "elder" | "ork"): void {
+  private spawnEnemyInZone(zone: EnemySpawnZone): void {
+    // Pick a random enemy type from the zone's allowed types
+    const type = zone.enemyTypes[Math.floor(Math.random() * zone.enemyTypes.length)];
+
     const enemy = new Enemy();
     enemy.enemyType = type;
     enemy.isDead = false;
@@ -116,24 +127,28 @@ export class SpawnSystem {
       enemy.attack = 0; // orks use bullets, not melee
     }
 
-    // Spawn at a random map edge
+    // Spawn OUTSIDE the zone (adjacent to a random edge)
+    // WHY: Enemy spawn zones are blocking rects — enemies can't be inside them.
+    // Pick a random edge (top, bottom, left, right) and spawn just outside.
+    const radius = type === "ork" ? ORK_CONFIG.collisionRadius : ELDER_CONFIG.collisionRadius;
+    const margin = radius + 2; // Small buffer so they don't immediately collide
     const edge = Math.floor(Math.random() * 4);
     switch (edge) {
-      case 0: // top
-        enemy.x = Math.random() * this.state.mapWidth;
-        enemy.y = 0;
+      case 0: // Top edge
+        enemy.x = zone.x + Math.random() * zone.width;
+        enemy.y = zone.y - margin;
         break;
-      case 1: // bottom
-        enemy.x = Math.random() * this.state.mapWidth;
-        enemy.y = this.state.mapHeight;
+      case 1: // Bottom edge
+        enemy.x = zone.x + Math.random() * zone.width;
+        enemy.y = zone.y + zone.height + margin;
         break;
-      case 2: // left
-        enemy.x = 0;
-        enemy.y = Math.random() * this.state.mapHeight;
+      case 2: // Left edge
+        enemy.x = zone.x - margin;
+        enemy.y = zone.y + Math.random() * zone.height;
         break;
-      case 3: // right
-        enemy.x = this.state.mapWidth;
-        enemy.y = Math.random() * this.state.mapHeight;
+      case 3: // Right edge
+        enemy.x = zone.x + zone.width + margin;
+        enemy.y = zone.y + Math.random() * zone.height;
         break;
     }
 
