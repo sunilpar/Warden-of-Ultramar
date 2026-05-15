@@ -24,9 +24,33 @@
  *   the entity out of the obstacle along the shortest axis.
  */
 
-import { MapDefinition, MapObstacle, MapRect } from "../config/maps";
+import { MapDefinition, MapObstacle, HitboxOverride } from "../config/maps";
 import { circleRectCollision, pointInRect } from "../utils/collision";
 import { GAME_CONFIG } from "../config/game";
+
+/**
+ * Compute the effective collision rect from a visual rect + optional hitbox override.
+ * If hitbox is defined, it is centered within the visual bounds.
+ * If hitbox is omitted, the visual rect is used as-is.
+ */
+function getHitboxRect(
+  x: number, y: number,
+  width: number, height: number,
+  hitbox?: HitboxOverride
+): { x: number; y: number; width: number; height: number } {
+  if (!hitbox) {
+    return { x, y, width, height };
+  }
+  // Center the hitbox within the visual bounds
+  const offsetX = (width - hitbox.width) / 2;
+  const offsetY = (height - hitbox.height) / 2;
+  return {
+    x: x + offsetX,
+    y: y + offsetY,
+    width: hitbox.width,
+    height: hitbox.height,
+  };
+}
 
 export class MapSystem {
   /** The currently loaded map */
@@ -83,7 +107,8 @@ export class MapSystem {
     x: number, y: number, radius: number
   ): MapObstacle | null {
     for (const obstacle of this.map.obstacles) {
-      if (circleRectCollision(x, y, radius, obstacle.x, obstacle.y, obstacle.width, obstacle.height)) {
+      const hb = getHitboxRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height, obstacle.hitbox);
+      if (circleRectCollision(x, y, radius, hb.x, hb.y, hb.width, hb.height)) {
         return obstacle;
       }
     }
@@ -109,16 +134,19 @@ export class MapSystem {
     radius: number,
     obstacle: MapObstacle
   ): { x: number; y: number } {
+    // Use hitbox dimensions for collision resolution
+    const hb = getHitboxRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height, obstacle.hitbox);
+
     // Calculate the overlap on each axis
     const entityLeft = x - radius;
     const entityRight = x + radius;
     const entityTop = y - radius;
     const entityBottom = y + radius;
 
-    const obsLeft = obstacle.x;
-    const obsRight = obstacle.x + obstacle.width;
-    const obsTop = obstacle.y;
-    const obsBottom = obstacle.y + obstacle.height;
+    const obsLeft = hb.x;
+    const obsRight = hb.x + hb.width;
+    const obsTop = hb.y;
+    const obsBottom = hb.y + hb.height;
 
     // Calculate push distances for each direction
     const pushLeft = obsLeft - entityRight;  // push entity left
@@ -152,13 +180,15 @@ export class MapSystem {
     x: number, y: number, radius: number
   ): boolean {
     for (const obstacle of this.map.obstacles) {
-      if (circleRectCollision(x, y, radius, obstacle.x, obstacle.y, obstacle.width, obstacle.height)) {
+      const hb = getHitboxRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height, obstacle.hitbox);
+      if (circleRectCollision(x, y, radius, hb.x, hb.y, hb.width, hb.height)) {
         return true;
       }
     }
     // Also check enemy spawn zones as bullet blockers
     for (const zone of this.map.enemySpawnZones) {
-      if (circleRectCollision(x, y, radius, zone.x, zone.y, zone.width, zone.height)) {
+      const hb = getHitboxRect(zone.x, zone.y, zone.width, zone.height, zone.hitbox);
+      if (circleRectCollision(x, y, radius, hb.x, hb.y, hb.width, hb.height)) {
         return true;
       }
     }
@@ -167,26 +197,32 @@ export class MapSystem {
 
   /**
    * Get ALL blocking rects: obstacles + enemy spawn zones.
+   * Returns PRE-COMPUTED hitbox rects (collision rectangles).
    * Used by PlayerSystem and client prediction to block player movement.
+   *
+   * IMPORTANT: These are the actual collision rects (with hitbox applied),
+   * NOT the visual rects. The visual rects are on the original map data.
    */
-  getAllBlockingRects(): MapRect[] {
-    const rects: MapRect[] = [];
+  getAllBlockingRects(): { x: number; y: number; width: number; height: number; name: string }[] {
+    const rects: { x: number; y: number; width: number; height: number; name: string }[] = [];
     for (const obs of this.map.obstacles) {
-      rects.push(obs);
+      const hb = getHitboxRect(obs.x, obs.y, obs.width, obs.height, obs.hitbox);
+      rects.push({ ...hb, name: obs.name });
     }
     for (const zone of this.map.enemySpawnZones) {
-      rects.push(zone);
+      const hb = getHitboxRect(zone.x, zone.y, zone.width, zone.height, zone.hitbox);
+      rects.push({ ...hb, name: zone.name });
     }
     return rects;
   }
 
   /**
    * Check if a circular entity collides with any blocking rect
-   * (obstacles + enemy spawn zones). Used for player collision.
+   * (obstacles + enemy spawn zones). Uses hitbox dimensions for collision.
    */
   checkAllBlockingCollision(
     x: number, y: number, radius: number
-  ): MapRect | null {
+  ): { x: number; y: number; width: number; height: number; name: string } | null {
     for (const rect of this.getAllBlockingRects()) {
       if (circleRectCollision(x, y, radius, rect.x, rect.y, rect.width, rect.height)) {
         return rect;
@@ -196,13 +232,13 @@ export class MapSystem {
   }
 
   /**
-   * Resolve collision against any blocking rect.
-   * Same logic as resolveObstacleCollision but works with MapRect.
+   * Resolve collision against any blocking rect (hitbox-aware).
+   * Same logic as resolveObstacleCollision but works with pre-computed hitbox rects.
    */
   resolveBlockingCollision(
     x: number, y: number,
     radius: number,
-    rect: MapRect
+    rect: { x: number; y: number; width: number; height: number }
   ): { x: number; y: number } {
     const entityLeft = x - radius;
     const entityRight = x + radius;
@@ -235,7 +271,8 @@ export class MapSystem {
    */
   isInExitZone(x: number, y: number): boolean {
     const exit = this.map.exitPoint;
-    return pointInRect(x, y, exit.x, exit.y, exit.width, exit.height);
+    const hb = getHitboxRect(exit.x, exit.y, exit.width, exit.height, exit.hitbox);
+    return pointInRect(x, y, hb.x, hb.y, hb.width, hb.height);
   }
 
   /**

@@ -42,7 +42,7 @@ import { CardSlotManager, CardHUD } from "../cards/CardHUD";
 import { CardActionContext } from "../cards/CardTypes";
 
 // Map system
-import { MAP_1 } from "../maps/mapData";
+import { MAP_1, getHitboxRect } from "../maps/mapData";
 
 // ============================================================
 // Entity interfaces — track visual objects for each entity
@@ -83,8 +83,11 @@ export class GameScene extends Phaser.Scene {
   enemyEntities: { [enemyId: string]: EnemyEntity } = {};
   bulletEntities: { [bulletId: string]: BulletEntity } = {};
 
-  // Debug
+  // Debug HUD (fixed to screen, top-left)
   debugFPS!: Phaser.GameObjects.Text;
+  private showHitboxes: boolean = false; // Start OFF, toggle with button or F3
+  private hitboxToggleButton!: Phaser.GameObjects.Text;
+  private hitboxToggleKey!: Phaser.Input.Keyboard.Key;
 
   // Client-side prediction visual references
   localRef!: Phaser.GameObjects.Rectangle;
@@ -154,10 +157,17 @@ export class GameScene extends Phaser.Scene {
     // ---- Render the tile-based map ----
     this.renderMapTiles();
     this.renderMapEntities();
+    // Hitboxes start hidden — rendered but invisible until toggled
     this.renderDebugHitboxes();
+    if (this.debugHitboxes) {
+      this.debugHitboxes.setVisible(this.showHitboxes);
+    }
 
-    // FPS counter
-    this.debugFPS = this.add.text(4, 4, "", { color: "#efbf68" });
+    // ---- Debug HUD (fixed to screen top-left) ----
+    this.createDebugHUD();
+
+    // Toggle key: F3
+    this.hitboxToggleKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F3);
 
     // ============================================================
     // CARD SYSTEM SETUP
@@ -442,8 +452,9 @@ export class GameScene extends Phaser.Scene {
     }
 
     for (const spawn of map.playerSpawns) {
+      const size = spawn.visualSize ?? 32;
       this.add.image(spawn.x, spawn.y, "map1_spawn_player")
-        .setDepth(1).setDisplaySize(32, 32);
+        .setDepth(1).setDisplaySize(size, size);
     }
 
     const enemySpawnKeys = ["map1_spawn_enemy1", "map1_spawn_enemy2", "map1_spawn_enemy3"];
@@ -460,40 +471,142 @@ export class GameScene extends Phaser.Scene {
 
   /**
    * Render debug hitbox overlays.
-   * RED = obstacles, YELLOW = spawns, CYAN = exit, WHITE = map boundary
+   *
+   * TWO LAYERS per entity:
+   *   1. VISUAL bounds (original colors, thinner line) — the sprite size
+   *   2. SERVER HITBOX (RED, thicker line) — the actual collision rect
+   *
+   * Colors:
+   *   RED (thick)     = server collision hitbox (what actually blocks movement)
+   *   RED (thin)      = obstacle visual bounds
+   *   YELLOW (thin)   = player spawn visual bounds
+   *   ORANGE (thin)   = enemy spawn zone visual bounds
+   *   CYAN (thin)     = exit zone visual bounds
+   *   WHITE           = map boundary
    */
   private renderDebugHitboxes(): void {
     const map = this.currentMap;
     const gfx = this.add.graphics().setDepth(10);
 
-    // Obstacles (RED)
-    gfx.lineStyle(2, 0xff0000, 0.8);
+    // ---- Layer 1: Visual bounds (original colors, thin line) ----
+
+    // Obstacles visual bounds (RED thin)
+    gfx.lineStyle(1, 0xff0000, 0.4);
     for (const obs of map.obstacles) {
       gfx.strokeRect(obs.x, obs.y, obs.width, obs.height);
     }
 
-    // Player spawns (YELLOW)
+    // Player spawns visual bounds (YELLOW)
     gfx.lineStyle(2, 0xffff00, 0.6);
     for (const spawn of map.playerSpawns) {
-      gfx.strokeRect(spawn.x - 16, spawn.y - 16, 32, 32);
+      const size = spawn.visualSize ?? 32;
+      gfx.strokeRect(spawn.x - size / 2, spawn.y - size / 2, size, size);
     }
 
-    // Enemy spawn zones (ORANGE)
-    gfx.lineStyle(2, 0xffaa00, 0.6);
+    // Enemy spawn zones visual bounds (ORANGE thin)
+    gfx.lineStyle(1, 0xffaa00, 0.4);
     for (const zone of map.enemySpawnZones) {
       gfx.strokeRect(zone.x, zone.y, zone.width, zone.height);
     }
 
-    // Exit zone (CYAN)
-    gfx.lineStyle(2, 0x00ffff, 0.8);
+    // Exit zone visual bounds (CYAN thin)
+    gfx.lineStyle(1, 0x00ffff, 0.4);
     const exit = map.exitPoint;
     gfx.strokeRect(exit.x, exit.y, exit.width, exit.height);
+
+    // ---- Layer 2: Server collision hitboxes (RED thick) ----
+    // These are the ACTUAL collision rectangles that block movement/bullets.
+
+    // Obstacle hitboxes (RED thick)
+    gfx.lineStyle(3, 0xff0000, 0.9);
+    for (const obs of map.obstacles) {
+      const hb = getHitboxRect(obs.x, obs.y, obs.width, obs.height, obs.hitbox);
+      gfx.strokeRect(hb.x, hb.y, hb.width, hb.height);
+    }
+
+    // Enemy spawn zone hitboxes (RED thick)
+    gfx.lineStyle(3, 0xff0000, 0.9);
+    for (const zone of map.enemySpawnZones) {
+      const hb = getHitboxRect(zone.x, zone.y, zone.width, zone.height, zone.hitbox);
+      gfx.strokeRect(hb.x, hb.y, hb.width, hb.height);
+    }
+
+    // Exit zone hitbox (RED thick, slightly different shade to distinguish)
+    gfx.lineStyle(3, 0xff4444, 0.9);
+    const exitHb = getHitboxRect(exit.x, exit.y, exit.width, exit.height, exit.hitbox);
+    gfx.strokeRect(exitHb.x, exitHb.y, exitHb.width, exitHb.height);
 
     // Map boundary (WHITE)
     gfx.lineStyle(1, 0xffffff, 0.3);
     gfx.strokeRect(0, 0, map.widthPx, map.heightPx);
 
     this.debugHitboxes = gfx;
+  }
+
+  // ============================================================
+  // DEBUG HUD (FPS + Hitbox Toggle)
+  // ============================================================
+
+  /**
+   * Create the debug HUD fixed to the top-left of the screen.
+   * Contains:
+   *   - FPS counter
+   *   - Hitbox toggle button (click or press F3)
+   *
+   * Uses setScrollFactor(0) so it stays in place while the camera moves.
+   */
+  private createDebugHUD(): void {
+    const hudX = 10; // 10px from left edge
+
+    // FPS counter (top-left)
+    this.debugFPS = this.add.text(hudX, 10, "", {
+      color: "#00ff00",
+      fontSize: "14px",
+      fontFamily: "monospace",
+      stroke: "#000000",
+      strokeThickness: 3,
+    })
+      .setOrigin(0, 0) // Left-aligned
+      .setScrollFactor(0) // Fixed to screen
+      .setDepth(999);
+
+    // Hitbox toggle button (below FPS)
+    const toggleLabel = this.showHitboxes ? "[HITBOXES: ON]" : "[HITBOXES: OFF]";
+    this.hitboxToggleButton = this.add.text(hudX, 30, toggleLabel, {
+      color: this.showHitboxes ? "#00ff00" : "#888888",
+      fontSize: "12px",
+      fontFamily: "monospace",
+      stroke: "#000000",
+      strokeThickness: 3,
+      backgroundColor: this.showHitboxes ? "#003300aa" : "#333333aa",
+      padding: { x: 6, y: 3 },
+    })
+      .setOrigin(0, 0) // Left-aligned
+      .setScrollFactor(0) // Fixed to screen
+      .setDepth(999)
+      .setInteractive({ useHandCursor: true })
+      .on("pointerdown", () => {
+        this.toggleHitboxes();
+      });
+  }
+
+  /**
+   * Toggle hitbox overlay visibility.
+   * Called by the HUD button click or F3 key.
+   */
+  private toggleHitboxes(): void {
+    this.showHitboxes = !this.showHitboxes;
+
+    // Show/hide the hitbox graphics
+    if (this.debugHitboxes) {
+      this.debugHitboxes.setVisible(this.showHitboxes);
+    }
+
+    // Update button label and style
+    const label = this.showHitboxes ? "[HITBOXES: ON]" : "[HITBOXES: OFF]";
+    this.hitboxToggleButton.setText(label);
+    this.hitboxToggleButton.setColor(this.showHitboxes ? "#00ff00" : "#888888");
+    this.hitboxToggleButton.setBackgroundColor(this.showHitboxes ? "#003300aa" : "#333333aa");
   }
 
   // ============================================================
@@ -807,7 +920,21 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    this.debugFPS.text = `${Math.floor(this.game.loop.actualFps)}`;
+    // Update FPS counter with color based on framerate
+    const fps = Math.floor(this.game.loop.actualFps);
+    this.debugFPS.setText(`FPS: ${fps}`);
+    if (fps >= 60) {
+      this.debugFPS.setColor("#00ff00"); // Green: 60+
+    } else if (fps >= 50) {
+      this.debugFPS.setColor("#ffff00"); // Yellow: 50-59
+    } else {
+      this.debugFPS.setColor("#ff0000"); // Red: below 50
+    }
+
+    // ---- F3: Toggle hitbox overlay ----
+    if (Phaser.Input.Keyboard.JustDown(this.hitboxToggleKey)) {
+      this.toggleHitboxes();
+    }
   }
 
   // ============================================================
@@ -882,12 +1009,14 @@ export class GameScene extends Phaser.Scene {
     // ---- Client-side blocking collision (match server) ----
     // WHY: Without this, the client prediction lets the player walk through
     // obstacles and enemy spawn zones. When the server corrects, there's a snap.
-    // Blocking rects = obstacles + enemy spawn zones (same as server).
+    // Blocking rects = obstacles + enemy spawn zones (using HITBOX dimensions, same as server).
     const PLAYER_RADIUS = 16;
     const blockingRects = [...this.currentMap.obstacles, ...this.currentMap.enemySpawnZones];
     for (const rect of blockingRects) {
-      const closestX = Phaser.Math.Clamp(this.currentPlayer.x, rect.x, rect.x + rect.width);
-      const closestY = Phaser.Math.Clamp(this.currentPlayer.y, rect.y, rect.y + rect.height);
+      // Compute the hitbox rect (centered, smaller than visual if hitbox is defined)
+      const hb = getHitboxRect(rect.x, rect.y, rect.width, rect.height, rect.hitbox);
+      const closestX = Phaser.Math.Clamp(this.currentPlayer.x, hb.x, hb.x + hb.width);
+      const closestY = Phaser.Math.Clamp(this.currentPlayer.y, hb.y, hb.y + hb.height);
 
       const dx = this.currentPlayer.x - closestX;
       const dy = this.currentPlayer.y - closestY;
@@ -899,10 +1028,11 @@ export class GameScene extends Phaser.Scene {
         const entityTop = this.currentPlayer.y - PLAYER_RADIUS;
         const entityBottom = this.currentPlayer.y + PLAYER_RADIUS;
 
-        const pushLeft = rect.x - entityRight;
-        const pushRight = (rect.x + rect.width) - entityLeft;
-        const pushUp = rect.y - entityBottom;
-        const pushDown = (rect.y + rect.height) - entityTop;
+        // Use hitbox dimensions for push calculation (match server)
+        const pushLeft = hb.x - entityRight;
+        const pushRight = (hb.x + hb.width) - entityLeft;
+        const pushUp = hb.y - entityBottom;
+        const pushDown = (hb.y + hb.height) - entityTop;
 
         const pushes = [
           { dx: pushLeft, dy: 0 },
