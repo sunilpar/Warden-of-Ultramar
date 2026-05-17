@@ -144,7 +144,9 @@ export const MAP_1: MapDefinition = {
   tiles: generateFloorTiles(50, 40),
 
   // Obstacles — visual size + smaller hitbox for collision
+  // 16 total obstacles (6 big + 10 small) spread across the map
   obstacles: [
+    // ---- BIG OBSTACLES (ruined buildings / churches) ----
     {
       name: "big_obstacle_1",
       x: 768,
@@ -166,6 +168,47 @@ export const MAP_1: MapDefinition = {
       hitbox: { width: 100, height: 160 },
     },
     {
+      name: "big_obstacle_3",
+      x: 384,
+      y: 1152,
+      width: 150,
+      height: 180,
+      obstacleType: "big",
+      //broken curch type
+      hitbox: { width: 100, height: 160 },
+    },
+    {
+      name: "big_obstacle_4",
+      x: 1984,
+      y: 1152,
+      width: 150,
+      height: 180,
+      obstacleType: "big",
+      //broken curch type
+      hitbox: { width: 100, height: 160 },
+    },
+    {
+      name: "big_obstacle_5",
+      x: 704,
+      y: 2432,
+      width: 150,
+      height: 180,
+      obstacleType: "big",
+      //broken curch type
+      hitbox: { width: 100, height: 160 },
+    },
+    {
+      name: "big_obstacle_6",
+      x: 1536,
+      y: 640,
+      width: 150,
+      height: 180,
+      obstacleType: "big",
+      //broken curch type
+      hitbox: { width: 100, height: 160 },
+    },
+    // ---- SMALL OBSTACLES (pillars) ----
+    {
       name: "small_obstacle_1",
       x: 384,
       y: 576,
@@ -185,6 +228,86 @@ export const MAP_1: MapDefinition = {
       //piller type
       hitbox: { width: 66, height: 140 },
     },
+    {
+      name: "small_obstacle_3",
+      x: 1088,
+      y: 832,
+      width: 66,
+      height: 160,
+      obstacleType: "small",
+      //piller type
+      hitbox: { width: 66, height: 140 },
+    },
+    {
+      name: "small_obstacle_4",
+      x: 640,
+      y: 1728,
+      width: 66,
+      height: 160,
+      obstacleType: "small",
+      //piller type
+      hitbox: { width: 66, height: 140 },
+    },
+    {
+      name: "small_obstacle_5",
+      x: 1920,
+      y: 1728,
+      width: 66,
+      height: 160,
+      obstacleType: "small",
+      //piller type
+      hitbox: { width: 66, height: 140 },
+    },
+    {
+      name: "small_obstacle_6",
+      x: 1152,
+      y: 1472,
+      width: 66,
+      height: 160,
+      obstacleType: "small",
+      //piller type
+      hitbox: { width: 66, height: 140 },
+    },
+    {
+      name: "small_obstacle_7",
+      x: 320,
+      y: 2816,
+      width: 66,
+      height: 160,
+      obstacleType: "small",
+      //piller type
+      hitbox: { width: 66, height: 140 },
+    },
+    {
+      name: "small_obstacle_8",
+      x: 2112,
+      y: 768,
+      width: 66,
+      height: 160,
+      obstacleType: "small",
+      //piller type
+      hitbox: { width: 66, height: 140 },
+    },
+    {
+      name: "small_obstacle_9",
+      x: 1408,
+      y: 2880,
+      width: 66,
+      height: 160,
+      obstacleType: "small",
+      //piller type
+      hitbox: { width: 66, height: 140 },
+    },
+    {
+      name: "small_obstacle_10",
+      x: 832,
+      y: 384,
+      width: 66,
+      height: 160,
+      obstacleType: "small",
+      //piller type
+      hitbox: { width: 66, height: 140 },
+    },
   ],
 
   // Player spawn points — visualSize for client marker rendering
@@ -194,7 +317,9 @@ export const MAP_1: MapDefinition = {
   ],
 
   // Enemy spawn zones — visual size + smaller hitbox for collision
+  // 10 total spawn zones spread across the map for dynamic combat
   enemySpawnZones: [
+    // ---- TOP SECTION (y: 0-640) ----
     {
       name: "enemy_zone_top",
       x: 512,
@@ -208,7 +333,7 @@ export const MAP_1: MapDefinition = {
       hitbox: { width: 134, height: 160 },
     },
     {
-      name: "enemy_zone_right",
+      name: "enemy_zone_top_right",
       x: 1920,
       y: 256,
       width: 147,
@@ -220,6 +345,56 @@ export const MAP_1: MapDefinition = {
       hitbox: { width: 128, height: 130 },
     },
     {
+      name: "enemy_zone_top_center",
+      x: 1152,
+      y: 320,
+      width: 192,
+      height: 192,
+      enemyTypes: ["elder", "ork"],
+      maxAlive: 3,
+      intervalMs: 3500,
+      //sightly broken curch type
+      hitbox: { width: 148, height: 158 },
+    },
+    // ---- MIDDLE SECTION (y: 640-1920) ----
+    {
+      name: "enemy_zone_mid_left",
+      x: 128,
+      y: 896,
+      width: 192,
+      height: 192,
+      enemyTypes: ["ork"],
+      maxAlive: 3,
+      intervalMs: 3000,
+      //chrch type
+      hitbox: { width: 134, height: 160 },
+    },
+    {
+      name: "enemy_zone_mid_center",
+      x: 1088,
+      y: 1088,
+      width: 147,
+      height: 130,
+      enemyTypes: ["elder"],
+      maxAlive: 2,
+      intervalMs: 3500,
+      //trynids type
+      hitbox: { width: 128, height: 130 },
+    },
+    {
+      name: "enemy_zone_mid_right",
+      x: 2048,
+      y: 1408,
+      width: 192,
+      height: 192,
+      enemyTypes: ["ork", "elder"],
+      maxAlive: 3,
+      intervalMs: 3000,
+      //sightly broken curch type
+      hitbox: { width: 148, height: 158 },
+    },
+    // ---- LOWER SECTION (y: 1920-3200) ----
+    {
       name: "enemy_zone_bottom",
       x: 896,
       y: 2560,
@@ -230,6 +405,42 @@ export const MAP_1: MapDefinition = {
       intervalMs: 2500,
       //sightly broken curch type
       hitbox: { width: 148, height: 158 },
+    },
+    {
+      name: "enemy_zone_bottom_left",
+      x: 256,
+      y: 2240,
+      width: 147,
+      height: 130,
+      enemyTypes: ["ork"],
+      maxAlive: 3,
+      intervalMs: 3000,
+      //trynids type
+      hitbox: { width: 128, height: 130 },
+    },
+    {
+      name: "enemy_zone_bottom_far_left",
+      x: 128,
+      y: 2880,
+      width: 192,
+      height: 192,
+      enemyTypes: ["elder"],
+      maxAlive: 3,
+      intervalMs: 3500,
+      //chrch type
+      hitbox: { width: 134, height: 160 },
+    },
+    {
+      name: "enemy_zone_bottom_right",
+      x: 1792,
+      y: 2880,
+      width: 147,
+      height: 130,
+      enemyTypes: ["ork", "elder"],
+      maxAlive: 3,
+      intervalMs: 2500,
+      //trynids type
+      hitbox: { width: 128, height: 130 },
     },
   ],
 
