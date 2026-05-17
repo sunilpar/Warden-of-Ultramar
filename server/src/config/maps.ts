@@ -230,45 +230,49 @@ export const MAP_1: MapDefinition = {
       name: "big_obstacle_1",
       x: 768,
       y: 192,
-      width: 256,
-      height: 192, // Visual sprite size
+      width: 150,
+      height: 180,
       obstacleType: "big",
-      hitbox: { width: 100, height: 100 }, // ~70% collision area
+      //broken curch type
+      hitbox: { width: 100, height: 160 },
     },
     {
       name: "big_obstacle_2",
       x: 1280,
       y: 2048,
-      width: 256,
-      height: 192, // Visual sprite size
+      width: 150,
+      height: 180,
       obstacleType: "big",
-      hitbox: { width: 180, height: 134 }, // ~70% collision area
+      //broken curch type
+      hitbox: { width: 100, height: 160 },
     },
     {
       name: "small_obstacle_1",
       x: 384,
       y: 576,
-      width: 96,
-      height: 96, // Visual sprite size
+      width: 66,
+      height: 160,
       obstacleType: "small",
-      hitbox: { width: 64, height: 64 }, // ~67% collision area
+      //piller type
+      hitbox: { width: 66, height: 140 },
     },
     {
       name: "small_obstacle_2",
       x: 1728,
       y: 2560,
-      width: 96,
-      height: 96, // Visual sprite size
+      width: 66,
+      height: 160,
       obstacleType: "small",
-      hitbox: { width: 64, height: 64 }, // ~67% collision area
+      //piller type
+      hitbox: { width: 66, height: 140 },
     },
   ],
 
   // Player spawn points (checkpoints)
   // `visualSize` controls the client-side marker size (default 32px if omitted)
   playerSpawns: [
-    { name: "spawn_start", x: 192, y: 192, visualSize: 32 },
-    { name: "checkpoint_mid", x: 1280, y: 1600, visualSize: 32 },
+    { name: "spawn_start", x: 192, y: 192, visualSize: 50 },
+    { name: "checkpoint_mid", x: 1280, y: 1600, visualSize: 50 },
   ],
 
   // Enemy spawn zones (also act as obstacles for players)
@@ -279,33 +283,36 @@ export const MAP_1: MapDefinition = {
       x: 512,
       y: 128,
       width: 192,
-      height: 192, // Visual sprite size
+      height: 192,
       enemyTypes: ["elder"],
       maxAlive: 3,
       intervalMs: 3000,
-      hitbox: { width: 134, height: 134 }, // ~70% collision area
+      //chrch type
+      hitbox: { width: 134, height: 160 },
     },
     {
       name: "enemy_zone_right",
       x: 1920,
       y: 256,
-      width: 192,
-      height: 256, // Visual sprite size
+      width: 147,
+      height: 130,
       enemyTypes: ["ork"],
       maxAlive: 2,
       intervalMs: 4000,
-      hitbox: { width: 134, height: 180 }, // ~70% collision area
+      //trynids type
+      hitbox: { width: 128, height: 130 },
     },
     {
       name: "enemy_zone_bottom",
       x: 896,
       y: 2560,
-      width: 256,
-      height: 192, // Visual sprite size
+      width: 192,
+      height: 192,
       enemyTypes: ["elder", "ork"],
       maxAlive: 4,
       intervalMs: 2500,
-      hitbox: { width: 180, height: 134 }, // ~70% collision area
+      //sightly broken curch type
+      hitbox: { width: 148, height: 158 },
     },
   ],
 
@@ -315,9 +322,9 @@ export const MAP_1: MapDefinition = {
     name: "exit_bottom_right",
     x: 2304,
     y: 3008,
-    width: 192,
-    height: 128, // Visual sprite size
-    hitbox: { width: 134, height: 90 }, // ~70% trigger zone
+    width: 200,
+    height: 140,
+    hitbox: { width: 150, height: 80 },
   },
 
   // Client-only: asset paths
