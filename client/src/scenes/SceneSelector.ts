@@ -28,18 +28,39 @@ export class SceneSelector extends Phaser.Scene {
     this.load.image("hud_bg", "assets/hud.png");
     this.load.image("card_base", "assets/cards/base.png");
     this.load.image("card_locked", "assets/cards/lockedBack.png");
-    this.load.image("card_skill_boltgun", "assets/cards/skillCards/boltGun.png");
+    this.load.image(
+      "card_skill_boltgun",
+      "assets/cards/skillCards/boltGun.png",
+    );
     this.load.image("card_skill_pulse", "assets/cards/skillCards/pulse.png");
-    this.load.image("card_skill_heal", "assets/cards/skillCards/hpIncrease.png");
+    this.load.image(
+      "card_skill_heal",
+      "assets/cards/skillCards/hpIncrease.png",
+    );
 
     // Map 1 assets
-    this.load.image("map1_tiles", "assets/maps/map1/maptileBasic.png");
+    this.load.image("map1_tiles", "assets/maps/map1/mapTileBase.png");
     this.load.image("map1_obstacle_big", "assets/maps/map1/mapObsticalBig.png");
-    this.load.image("map1_obstacle_small", "assets/maps/map1/smallObstical.png");
-    this.load.image("map1_spawn_player", "assets/maps/map1/playerSpawnPoint.png");
-    this.load.image("map1_spawn_enemy1", "assets/maps/map1/enemyspawnPoint1.png");
-    this.load.image("map1_spawn_enemy2", "assets/maps/map1/enemyswpanPoint2.png");
-    this.load.image("map1_spawn_enemy3", "assets/maps/map1/enemyspawnpoint3.png");
+    this.load.image(
+      "map1_obstacle_small",
+      "assets/maps/map1/smallObstical.png",
+    );
+    this.load.image(
+      "map1_spawn_player",
+      "assets/maps/map1/checkpointNew.png",
+    );
+    this.load.image(
+      "map1_spawn_enemy1",
+      "assets/maps/map1/enemyspawnPoint1.png",
+    );
+    this.load.image(
+      "map1_spawn_enemy2",
+      "assets/maps/map1/enemyswpanPoint2.png",
+    );
+    this.load.image(
+      "map1_spawn_enemy3",
+      "assets/maps/map1/enemyspawnpoint3.png",
+    );
     this.load.image("map1_exit", "assets/maps/map1/mapExitpoint.png");
   }
 

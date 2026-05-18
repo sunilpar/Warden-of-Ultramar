@@ -68,10 +68,12 @@ export class PlayerSystem {
 
         // Convert input to normalized movement and apply
         const movement = inputToMovement(
-          input.left, input.right,
-          input.up, input.down,
+          input.left,
+          input.right,
+          input.up,
+          input.down,
           player.speed,
-          dt
+          dt,
         );
 
         // Apply movement
@@ -79,9 +81,12 @@ export class PlayerSystem {
         player.y += movement.y;
 
         // Clamp to map boundaries (use actual map size from MapSystem)
+        // dont move the player if the player cord is on the edge
         const clamped = clampToMap(
-          player.x, player.y,
-          this.mapSystem.mapWidth, this.mapSystem.mapHeight
+          player.x,
+          player.y,
+          this.mapSystem.mapWidth,
+          this.mapSystem.mapHeight,
         );
         player.x = clamped.x;
         player.y = clamped.y;
@@ -90,14 +95,16 @@ export class PlayerSystem {
         // WHY: After movement + clamp, the player might be inside an obstacle
         // or enemy spawn zone. We push them out along the shortest axis.
         const hitBlocker = this.mapSystem.checkAllBlockingCollision(
-          player.x, player.y,
-          GAME_CONFIG.PLAYER.COLLISION_RADIUS
+          player.x,
+          player.y,
+          GAME_CONFIG.PLAYER.COLLISION_RADIUS,
         );
         if (hitBlocker) {
           const resolved = this.mapSystem.resolveBlockingCollision(
-            player.x, player.y,
+            player.x,
+            player.y,
             GAME_CONFIG.PLAYER.COLLISION_RADIUS,
-            hitBlocker
+            hitBlocker,
           );
           player.x = resolved.x;
           player.y = resolved.y;
@@ -120,3 +127,4 @@ export class PlayerSystem {
     });
   }
 }
+

@@ -457,7 +457,7 @@ export class GameScene extends Phaser.Scene {
         .setDepth(1).setDisplaySize(size, size);
     }
 
-    const enemySpawnKeys = ["map1_spawn_enemy1", "map1_spawn_enemy2", "map1_spawn_enemy3"];
+    const enemySpawnKeys = ["map1_obstacle_big", "map1_spawn_enemy2", "map1_spawn_enemy3"];
     map.enemySpawnZones.forEach((zone, i) => {
       const key = enemySpawnKeys[i % enemySpawnKeys.length];
       this.add.image(zone.x + zone.width / 2, zone.y + zone.height / 2, key)

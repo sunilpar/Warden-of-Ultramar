@@ -312,8 +312,8 @@ export const MAP_1: MapDefinition = {
 
   // Player spawn points — visualSize for client marker rendering
   playerSpawns: [
-    { name: "spawn_start", x: 192, y: 192, visualSize: 50 },
-    { name: "checkpoint_mid", x: 1280, y: 1600, visualSize: 50 },
+    { name: "spawn_start", x: 192, y: 192, visualSize: 40 },
+    { name: "checkpoint_mid", x: 1280, y: 1600, visualSize: 40 },
   ],
 
   // Enemy spawn zones — visual size + smaller hitbox for collision
@@ -324,13 +324,14 @@ export const MAP_1: MapDefinition = {
       name: "enemy_zone_top",
       x: 512,
       y: 128,
-      width: 192,
-      height: 192,
-      enemyTypes: ["elder"],
+      width: 150,
+      height: 180,
+      enemyTypes: ["ork"],
       maxAlive: 3,
       intervalMs: 3000,
       //chrch type
-      hitbox: { width: 134, height: 160 },
+      //broken curch type
+      hitbox: { width: 100, height: 160 },
     },
     {
       name: "enemy_zone_top_right",
@@ -338,7 +339,7 @@ export const MAP_1: MapDefinition = {
       y: 256,
       width: 147,
       height: 130,
-      enemyTypes: ["ork"],
+      enemyTypes: ["elder"],
       maxAlive: 2,
       intervalMs: 4000,
       //trynids type
@@ -363,7 +364,7 @@ export const MAP_1: MapDefinition = {
       y: 896,
       width: 192,
       height: 192,
-      enemyTypes: ["ork"],
+      enemyTypes: ["elder"],
       maxAlive: 3,
       intervalMs: 3000,
       //chrch type
@@ -412,7 +413,7 @@ export const MAP_1: MapDefinition = {
       y: 2240,
       width: 147,
       height: 130,
-      enemyTypes: ["ork"],
+      enemyTypes: ["elder"],
       maxAlive: 3,
       intervalMs: 3000,
       //trynids type
