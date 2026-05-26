@@ -35,7 +35,11 @@ export class CombatSystem {
   private bulletSystem: BulletSystem;
   private mapSystem: MapSystem;
 
-  constructor(state: RoomState, bulletSystem: BulletSystem, mapSystem: MapSystem) {
+  constructor(
+    state: RoomState,
+    bulletSystem: BulletSystem,
+    mapSystem: MapSystem,
+  ) {
     this.state = state;
     this.bulletSystem = bulletSystem;
     this.mapSystem = mapSystem;
@@ -60,9 +64,13 @@ export class CombatSystem {
 
       // ---- BULLET vs OBSTACLES ----
       // Check if bullet hit a wall/obstacle before checking entity collisions
-      if (this.mapSystem.checkBulletObstacleCollision(
-        bullet.x, bullet.y, GAME_CONFIG.BULLET.COLLISION_RADIUS
-      )) {
+      if (
+        this.mapSystem.checkBulletObstacleCollision(
+          bullet.x,
+          bullet.y,
+          GAME_CONFIG.BULLET.COLLISION_RADIUS,
+        )
+      ) {
         this.bulletSystem.markBulletAsHit(bulletId);
         return;
       }
@@ -90,14 +98,19 @@ export class CombatSystem {
       if (this.bulletSystem.isBulletHit(bulletId)) return;
 
       // Get collision radius based on enemy type
-      const enemyRadius = enemy.enemyType === "ork"
-        ? ORK_CONFIG.collisionRadius
-        : ELDER_CONFIG.collisionRadius;
+      const enemyRadius =
+        enemy.enemyType === "ork"
+          ? ORK_CONFIG.collisionRadius
+          : ELDER_CONFIG.collisionRadius;
 
       // Check collision
       const hit = circleCollision(
-        bullet.x, bullet.y, GAME_CONFIG.BULLET.COLLISION_RADIUS,
-        enemy.x, enemy.y, enemyRadius
+        bullet.x,
+        bullet.y,
+        GAME_CONFIG.BULLET.COLLISION_RADIUS,
+        enemy.x,
+        enemy.y,
+        enemyRadius,
       );
 
       if (hit) {
@@ -136,8 +149,12 @@ export class CombatSystem {
 
       // Check collision using circle vs circle
       const hit = circleCollision(
-        bullet.x, bullet.y, GAME_CONFIG.BULLET.COLLISION_RADIUS,
-        player.x, player.y, GAME_CONFIG.PLAYER.COLLISION_RADIUS
+        bullet.x,
+        bullet.y,
+        GAME_CONFIG.BULLET.COLLISION_RADIUS,
+        player.x,
+        player.y,
+        GAME_CONFIG.PLAYER.COLLISION_RADIUS,
       );
 
       if (hit) {

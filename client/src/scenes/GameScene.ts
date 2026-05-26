@@ -54,6 +54,7 @@ interface EnemyEntity {
   hpBarFill: Phaser.GameObjects.Graphics;
   serverX: number;
   serverY: number;
+  lastHp: number;
 }
 
 interface BulletEntity {
@@ -314,13 +315,20 @@ export class GameScene extends Phaser.Scene {
         hpBarFill,
         serverX: enemy.x,
         serverY: enemy.y,
+        lastHp: enemy.hp,
       };
 
-      // Update server position for interpolation
+      // Update server position for interpolation + detect flinch on HP drop
       callbacks.onChange(enemy, () => {
         if (this.enemyEntities[enemyId]) {
           this.enemyEntities[enemyId].serverX = enemy.x;
           this.enemyEntities[enemyId].serverY = enemy.y;
+
+          // Detect damage: HP dropped → play directional flinch
+          if (enemy.hp < this.enemyEntities[enemyId].lastHp) {
+            this.showEnemyFlinch(enemyId);
+          }
+          this.enemyEntities[enemyId].lastHp = enemy.hp;
         }
       });
     });
@@ -654,6 +662,62 @@ export class GameScene extends Phaser.Scene {
       ease: "Power2",
       onComplete: () => {
         splash.destroy();
+      },
+    });
+  }
+
+  // ============================================================
+  // ENEMY FLINCH EFFECT
+  // ============================================================
+
+  /**
+   * Show a directional flinch when an enemy takes damage.
+   *
+   * HOW IT WORKS:
+   *   1. Calculate direction from local player → enemy (bullet travel direction)
+   *   2. Push the enemy sprite in that direction (away from the attacker)
+   *   3. Flash the sprite red briefly
+   *   4. The interpolation in fixedTick naturally pulls the sprite back
+   *      to serverX/serverY, creating a smooth snapback
+   *
+   * PURELY CLIENT-SIDE: The server position is never changed.
+   * This is a cosmetic effect only.
+   */
+  showEnemyFlinch(enemyId: string) {
+    const enemyEntity = this.enemyEntities[enemyId];
+    if (!enemyEntity || !this.currentPlayer) return;
+
+    const sprite = enemyEntity.sprite;
+
+    // Direction from player to enemy (bullet impact direction)
+    const dx = sprite.x - this.currentPlayer.x;
+    const dy = sprite.y - this.currentPlayer.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    // Normalize; fallback to (0, -1) if positions overlap
+    const dirX = dist > 0 ? dx / dist : 0;
+    const dirY = dist > 0 ? dy / dist : -1;
+
+    const FLINCH_DISTANCE = 8; // pixels to push
+    const FLINCH_DURATION = 120; // ms for knockback
+    const TINT_DURATION = 150; // ms for red flash
+
+    // Red tint flash
+    sprite.setTint(0xff4444);
+
+    // Kill any active flinch tween on this sprite to avoid stacking
+    this.tweens.killTweensOf(sprite);
+
+    // Push sprite in the bullet's travel direction (away from player)
+    this.tweens.add({
+      targets: sprite,
+      x: sprite.x + dirX * FLINCH_DISTANCE,
+      y: sprite.y + dirY * FLINCH_DISTANCE,
+      duration: FLINCH_DURATION,
+      ease: "Quad.easeOut",
+      onComplete: () => {
+        // Clear tint after flinch
+        sprite.clearTint();
       },
     });
   }
