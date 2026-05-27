@@ -1,0 +1,23 @@
+{
+  "name": "warden-of-ultramar",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunilpar/Warden-of-Ultramar.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/sunilpar/Warden-of-Ultramar/issues"
+  },
+  "homepage": "https://github.com/sunilpar/Warden-of-Ultramar#readme",
+  "description": "",
+  "dependencies": {
+    "npkill": "^0.12.2"
+  }
+}

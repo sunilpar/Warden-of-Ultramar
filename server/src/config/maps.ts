@@ -408,7 +408,7 @@ export const MAP_1: MapDefinition = {
       y: 128,
       width: 150,
       height: 180,
-      enemyTypes: ["ork"],
+      enemyTypes: ["elder"],
       maxAlive: 3,
       intervalMs: 3000,
       //chrch type

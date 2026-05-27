@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Colyseus + Phaser: Client-side",
   "scripts": {
-    "start": "vite",
+    "start": "node node_modules/vite/bin/vite.js",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -21,5 +21,6 @@
   "dependencies": {
     "@colyseus/sdk": "^0.17.0",
     "phaser": "^3.55.2"
-  }
+  },
+  "main": "index.js"
 }

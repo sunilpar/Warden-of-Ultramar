@@ -168,7 +168,9 @@ export class GameScene extends Phaser.Scene {
     this.createDebugHUD();
 
     // Toggle key: F3
-    this.hitboxToggleKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F3);
+    this.hitboxToggleKey = this.input.keyboard.addKey(
+      Phaser.Input.Keyboard.KeyCodes.F3,
+    );
 
     // ============================================================
     // CARD SYSTEM SETUP
@@ -177,8 +179,8 @@ export class GameScene extends Phaser.Scene {
     // Initialize card slot manager and HUD
     this.cardSlotManager = new CardSlotManager();
     this.cardSlotManager.equipCard(0, "bolt_gun"); // Slot 0 = Left Click
-    this.cardSlotManager.equipCard(1, "pulse");     // Slot 1 = Right Click
-    this.cardSlotManager.equipCard(3, "heal");       // Slot 3 = Key "1"
+    this.cardSlotManager.equipCard(1, "pulse"); // Slot 1 = Right Click
+    this.cardSlotManager.equipCard(3, "heal"); // Slot 3 = Key "1"
     this.cardHUD = new CardHUD(this, this.cardSlotManager);
 
     // Card input keys
@@ -221,7 +223,9 @@ export class GameScene extends Phaser.Scene {
     // ============================================================
 
     callbacks.onAdd("players", (player, sessionId) => {
-      const entity = this.physics.add.image(player.x, player.y, "ship_0001").setDepth(2);
+      const entity = this.physics.add
+        .image(player.x, player.y, "ship_0001")
+        .setDepth(2);
 
       // HP bar graphics
       const hpBarBg = this.add.graphics();
@@ -249,7 +253,12 @@ export class GameScene extends Phaser.Scene {
 
         // Camera follows the local player
         this.cameras.main.startFollow(entity, true, 0.1, 0.1);
-        this.cameras.main.setBounds(0, 0, this.currentMap.widthPx, this.currentMap.heightPx);
+        this.cameras.main.setBounds(
+          0,
+          0,
+          this.currentMap.widthPx,
+          this.currentMap.heightPx,
+        );
 
         // Visual references for prediction debugging
         this.localRef = this.add.rectangle(0, 0, entity.width, entity.height);
@@ -355,7 +364,9 @@ export class GameScene extends Phaser.Scene {
 
       if (bullet.isPlayerBullet) {
         // Player bullet: light blue rectangle (bolter round)
-        sprite = this.add.rectangle(bullet.x, bullet.y, 12, 4, 0x66ccff).setDepth(5);
+        sprite = this.add
+          .rectangle(bullet.x, bullet.y, 12, 4, 0x66ccff)
+          .setDepth(5);
       } else {
         // Enemy bullet: purple circle (Ork rifle)
         sprite = this.add.circle(bullet.x, bullet.y, 4, 0x9933ff).setDepth(5);
@@ -417,10 +428,14 @@ export class GameScene extends Phaser.Scene {
     const cols = tiles[0].length;
 
     const canvas = this.textures.createCanvas(
-      "map_floor_canvas", cols * tileSize, rows * tileSize
+      "map_floor_canvas",
+      cols * tileSize,
+      rows * tileSize,
     );
 
-    const tilesetImg = this.textures.get("map1_tiles").getSourceImage() as HTMLImageElement;
+    const tilesetImg = this.textures
+      .get("map1_tiles")
+      .getSourceImage() as HTMLImageElement;
 
     const ctx = canvas.getContext();
     for (let row = 0; row < rows; row++) {
@@ -433,8 +448,17 @@ export class GameScene extends Phaser.Scene {
 
         // Draw the ENTIRE spritesheet image scaled to fit one tile
         // The full maptileBasic.png (all 4 variations) becomes one game tile
-        ctx.drawImage(tilesetImg, 0, 0, tilesetImg.width, tilesetImg.height, dx, dy, tileSize, tileSize);
-
+        ctx.drawImage(
+          tilesetImg,
+          0,
+          0,
+          tilesetImg.width,
+          tilesetImg.height,
+          dx,
+          dy,
+          tileSize,
+          tileSize,
+        );
       }
     }
     canvas.refresh();
@@ -454,27 +478,42 @@ export class GameScene extends Phaser.Scene {
     const map = this.currentMap;
 
     for (const obs of map.obstacles) {
-      const key = obs.obstacleType === "big" ? "map1_obstacle_big" : "map1_obstacle_small";
-      this.add.image(obs.x + obs.width / 2, obs.y + obs.height / 2, key)
-        .setDepth(1).setDisplaySize(obs.width, obs.height);
+      const key =
+        obs.obstacleType === "big"
+          ? "map1_obstacle_big"
+          : "map1_obstacle_small";
+      this.add
+        .image(obs.x + obs.width / 2, obs.y + obs.height / 2, key)
+        .setDepth(1)
+        .setDisplaySize(obs.width, obs.height);
     }
 
     for (const spawn of map.playerSpawns) {
       const size = spawn.visualSize ?? 32;
-      this.add.image(spawn.x, spawn.y, "map1_spawn_player")
-        .setDepth(1).setDisplaySize(size, size);
+      this.add
+        .image(spawn.x, spawn.y, "map1_spawn_player")
+        .setDepth(1)
+        .setDisplaySize(size, size);
     }
 
-    const enemySpawnKeys = ["map1_obstacle_big", "map1_spawn_enemy2", "map1_spawn_enemy3"];
+    const enemySpawnKeys = [
+      "map1_obstacle_big",
+      "map1_spawn_enemy2",
+      "map1_spawn_enemy3",
+    ];
     map.enemySpawnZones.forEach((zone, i) => {
       const key = enemySpawnKeys[i % enemySpawnKeys.length];
-      this.add.image(zone.x + zone.width / 2, zone.y + zone.height / 2, key)
-        .setDepth(1).setDisplaySize(zone.width, zone.height);
+      this.add
+        .image(zone.x + zone.width / 2, zone.y + zone.height / 2, key)
+        .setDepth(1)
+        .setDisplaySize(zone.width, zone.height);
     });
 
     const exit = map.exitPoint;
-    this.add.image(exit.x + exit.width / 2, exit.y + exit.height / 2, "map1_exit")
-      .setDepth(1).setDisplaySize(exit.width, exit.height);
+    this.add
+      .image(exit.x + exit.width / 2, exit.y + exit.height / 2, "map1_exit")
+      .setDepth(1)
+      .setDisplaySize(exit.width, exit.height);
   }
 
   /**
@@ -535,13 +574,25 @@ export class GameScene extends Phaser.Scene {
     // Enemy spawn zone hitboxes (RED thick)
     gfx.lineStyle(3, 0xff0000, 0.9);
     for (const zone of map.enemySpawnZones) {
-      const hb = getHitboxRect(zone.x, zone.y, zone.width, zone.height, zone.hitbox);
+      const hb = getHitboxRect(
+        zone.x,
+        zone.y,
+        zone.width,
+        zone.height,
+        zone.hitbox,
+      );
       gfx.strokeRect(hb.x, hb.y, hb.width, hb.height);
     }
 
     // Exit zone hitbox (RED thick, slightly different shade to distinguish)
     gfx.lineStyle(3, 0xff4444, 0.9);
-    const exitHb = getHitboxRect(exit.x, exit.y, exit.width, exit.height, exit.hitbox);
+    const exitHb = getHitboxRect(
+      exit.x,
+      exit.y,
+      exit.width,
+      exit.height,
+      exit.hitbox,
+    );
     gfx.strokeRect(exitHb.x, exitHb.y, exitHb.width, exitHb.height);
 
     // Map boundary (WHITE)
@@ -567,28 +618,32 @@ export class GameScene extends Phaser.Scene {
     const hudX = 10; // 10px from left edge
 
     // FPS counter (top-left)
-    this.debugFPS = this.add.text(hudX, 10, "", {
-      color: "#00ff00",
-      fontSize: "14px",
-      fontFamily: "monospace",
-      stroke: "#000000",
-      strokeThickness: 3,
-    })
+    this.debugFPS = this.add
+      .text(hudX, 10, "", {
+        color: "#00ff00",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
       .setOrigin(0, 0) // Left-aligned
       .setScrollFactor(0) // Fixed to screen
       .setDepth(999);
 
     // Hitbox toggle button (below FPS)
-    const toggleLabel = this.showHitboxes ? "[HITBOXES: ON]" : "[HITBOXES: OFF]";
-    this.hitboxToggleButton = this.add.text(hudX, 30, toggleLabel, {
-      color: this.showHitboxes ? "#00ff00" : "#888888",
-      fontSize: "12px",
-      fontFamily: "monospace",
-      stroke: "#000000",
-      strokeThickness: 3,
-      backgroundColor: this.showHitboxes ? "#003300aa" : "#333333aa",
-      padding: { x: 6, y: 3 },
-    })
+    const toggleLabel = this.showHitboxes
+      ? "[HITBOXES: ON]"
+      : "[HITBOXES: OFF]";
+    this.hitboxToggleButton = this.add
+      .text(hudX, 30, toggleLabel, {
+        color: this.showHitboxes ? "#00ff00" : "#888888",
+        fontSize: "12px",
+        fontFamily: "monospace",
+        stroke: "#000000",
+        strokeThickness: 3,
+        backgroundColor: this.showHitboxes ? "#003300aa" : "#333333aa",
+        padding: { x: 6, y: 3 },
+      })
       .setOrigin(0, 0) // Left-aligned
       .setScrollFactor(0) // Fixed to screen
       .setDepth(999)
@@ -614,7 +669,9 @@ export class GameScene extends Phaser.Scene {
     const label = this.showHitboxes ? "[HITBOXES: ON]" : "[HITBOXES: OFF]";
     this.hitboxToggleButton.setText(label);
     this.hitboxToggleButton.setColor(this.showHitboxes ? "#00ff00" : "#888888");
-    this.hitboxToggleButton.setBackgroundColor(this.showHitboxes ? "#003300aa" : "#333333aa");
+    this.hitboxToggleButton.setBackgroundColor(
+      this.showHitboxes ? "#003300aa" : "#333333aa",
+    );
   }
 
   // ============================================================
@@ -633,10 +690,9 @@ export class GameScene extends Phaser.Scene {
       const offsetY = (Math.random() - 0.5) * 20;
       const size = 4 + Math.random() * 8;
 
-      const particle = this.add.circle(
-        x + offsetX, y + offsetY, size,
-        0xcc0000, 0.8
-      ).setDepth(4);
+      const particle = this.add
+        .circle(x + offsetX, y + offsetY, size, 0xcc0000, 0.8)
+        .setDepth(4);
 
       this.tweens.add({
         targets: particle,
@@ -698,7 +754,7 @@ export class GameScene extends Phaser.Scene {
     const dirX = dist > 0 ? dx / dist : 0;
     const dirY = dist > 0 ? dy / dist : -1;
 
-    const FLINCH_DISTANCE = 8; // pixels to push
+    const FLINCH_DISTANCE = 4; // pixels to push
     const FLINCH_DURATION = 120; // ms for knockback
     const TINT_DURATION = 150; // ms for red flash
 
@@ -978,7 +1034,10 @@ export class GameScene extends Phaser.Scene {
       if (ps) {
         // Sync kill-based cooldown from server
         const healSlotIdx = this.cardSlotManager.getSlotByBinding("key1");
-        this.cardSlotManager.updateKillsForSlot(healSlotIdx, ps.killsSinceLastHeal);
+        this.cardSlotManager.updateKillsForSlot(
+          healSlotIdx,
+          ps.killsSinceLastHeal,
+        );
 
         this.cardHUD.update(ps.hp, ps.maxHp);
       }
@@ -1064,10 +1123,14 @@ export class GameScene extends Phaser.Scene {
 
     // Clamp to map boundaries (match server bounds)
     this.currentPlayer.x = Phaser.Math.Clamp(
-      this.currentPlayer.x, 0, this.currentMap.widthPx
+      this.currentPlayer.x,
+      0,
+      this.currentMap.widthPx,
     );
     this.currentPlayer.y = Phaser.Math.Clamp(
-      this.currentPlayer.y, 0, this.currentMap.heightPx
+      this.currentPlayer.y,
+      0,
+      this.currentMap.heightPx,
     );
 
     // ---- Client-side blocking collision (match server) ----
@@ -1075,12 +1138,29 @@ export class GameScene extends Phaser.Scene {
     // obstacles and enemy spawn zones. When the server corrects, there's a snap.
     // Blocking rects = obstacles + enemy spawn zones (using HITBOX dimensions, same as server).
     const PLAYER_RADIUS = 16;
-    const blockingRects = [...this.currentMap.obstacles, ...this.currentMap.enemySpawnZones];
+    const blockingRects = [
+      ...this.currentMap.obstacles,
+      ...this.currentMap.enemySpawnZones,
+    ];
     for (const rect of blockingRects) {
       // Compute the hitbox rect (centered, smaller than visual if hitbox is defined)
-      const hb = getHitboxRect(rect.x, rect.y, rect.width, rect.height, rect.hitbox);
-      const closestX = Phaser.Math.Clamp(this.currentPlayer.x, hb.x, hb.x + hb.width);
-      const closestY = Phaser.Math.Clamp(this.currentPlayer.y, hb.y, hb.y + hb.height);
+      const hb = getHitboxRect(
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        rect.hitbox,
+      );
+      const closestX = Phaser.Math.Clamp(
+        this.currentPlayer.x,
+        hb.x,
+        hb.x + hb.width,
+      );
+      const closestY = Phaser.Math.Clamp(
+        this.currentPlayer.y,
+        hb.y,
+        hb.y + hb.height,
+      );
 
       const dx = this.currentPlayer.x - closestX;
       const dy = this.currentPlayer.y - closestY;
@@ -1094,9 +1174,9 @@ export class GameScene extends Phaser.Scene {
 
         // Use hitbox dimensions for push calculation (match server)
         const pushLeft = hb.x - entityRight;
-        const pushRight = (hb.x + hb.width) - entityLeft;
+        const pushRight = hb.x + hb.width - entityLeft;
         const pushUp = hb.y - entityBottom;
-        const pushDown = (hb.y + hb.height) - entityTop;
+        const pushDown = hb.y + hb.height - entityTop;
 
         const pushes = [
           { dx: pushLeft, dy: 0 },
