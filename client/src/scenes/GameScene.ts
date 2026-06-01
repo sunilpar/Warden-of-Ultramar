@@ -64,7 +64,7 @@ interface BulletEntity {
 }
 
 interface PlayerEntity {
-  sprite: Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
+  sprite: Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
   hpBarBg: Phaser.GameObjects.Graphics;
   hpBarFill: Phaser.GameObjects.Graphics;
   hpText: Phaser.GameObjects.Text;
@@ -79,7 +79,7 @@ export class GameScene extends Phaser.Scene {
   room!: Room<GameRoom>;
 
   // Entity tracking
-  currentPlayer!: Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
+  currentPlayer!: Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
   playerEntities: { [sessionId: string]: PlayerEntity } = {};
   enemyEntities: { [enemyId: string]: EnemyEntity } = {};
   bulletEntities: { [bulletId: string]: BulletEntity } = {};
@@ -93,6 +93,10 @@ export class GameScene extends Phaser.Scene {
   // Client-side prediction visual references
   localRef!: Phaser.GameObjects.Rectangle;
   remoteRef!: Phaser.GameObjects.Rectangle;
+
+  // Character animation state
+  private animationsCreated: boolean = false;
+  private lastDirection: string = "down"; // default facing direction
 
   // Game over state
   gameOverOverlay: Phaser.GameObjects.Container | null = null;
@@ -224,8 +228,18 @@ export class GameScene extends Phaser.Scene {
 
     callbacks.onAdd("players", (player, sessionId) => {
       const entity = this.physics.add
-        .image(player.x, player.y, "ship_0001")
+        .sprite(player.x, player.y, "character_sheet", 0)
+        .setDisplaySize(64, 64)
         .setDepth(2);
+
+      // Create character animations once (shared across all player sprites)
+      if (!this.animationsCreated) {
+        this.createCharacterAnimations();
+        this.animationsCreated = true;
+      }
+
+      // Start with idle (first frame of walk-down animation)
+      entity.anims.play("char_idle_down");
 
       // HP bar graphics
       const hpBarBg = this.add.graphics();
@@ -263,8 +277,10 @@ export class GameScene extends Phaser.Scene {
         // Visual references for prediction debugging
         this.localRef = this.add.rectangle(0, 0, entity.width, entity.height);
         this.localRef.setStrokeStyle(1, 0x00ff00); // green = predicted
+        this.localRef.setVisible(this.showHitboxes); // only visible when toggle is ON
         this.remoteRef = this.add.rectangle(0, 0, entity.width, entity.height);
         this.remoteRef.setStrokeStyle(1, 0xff0000); // red = server confirmed
+        this.remoteRef.setVisible(this.showHitboxes); // only visible when toggle is ON
 
         // Update remote reference when server sends new position
         // Also snap client prediction on teleport (exit zone, respawn, etc.)
@@ -654,15 +670,23 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * Toggle hitbox overlay visibility.
+   * Toggle hitbox overlay visibility AND player prediction hitbox rectangles.
    * Called by the HUD button click or F3 key.
    */
   private toggleHitboxes(): void {
     this.showHitboxes = !this.showHitboxes;
 
-    // Show/hide the hitbox graphics
+    // Show/hide the map hitbox graphics
     if (this.debugHitboxes) {
       this.debugHitboxes.setVisible(this.showHitboxes);
+    }
+
+    // Show/hide the player prediction hitbox rectangles (localRef + remoteRef)
+    if (this.localRef) {
+      this.localRef.setVisible(this.showHitboxes);
+    }
+    if (this.remoteRef) {
+      this.remoteRef.setVisible(this.showHitboxes);
     }
 
     // Update button label and style
@@ -672,6 +696,90 @@ export class GameScene extends Phaser.Scene {
     this.hitboxToggleButton.setBackgroundColor(
       this.showHitboxes ? "#003300aa" : "#333333aa",
     );
+  }
+
+  // ============================================================
+  // CHARACTER ANIMATION
+  // ============================================================
+
+  /**
+   * Create walking animations from the 4x4 sprite sheet.
+   *
+   * Sprite sheet layout (4x4 grid, each frame 256x256):
+   *   Row 0: walk RIGHT  (frames 0, 1, 2, 3)
+   *   Row 1: walk LEFT   (frames 4, 5, 6, 7)
+   *   Row 2: walk UP     (frames 8, 9, 10, 11)
+   *   Row 3: walk DOWN   (frames 12, 13, 14, 15)
+   */
+  private createCharacterAnimations(): void {
+    const directions = [
+      { dir: "right", startFrame: 0 },
+      { dir: "left", startFrame: 4 },
+      { dir: "up", startFrame: 8 },
+      { dir: "down", startFrame: 12 },
+    ];
+
+    for (const { dir, startFrame } of directions) {
+      // Walk animation (4 frames, looping)
+      this.anims.create({
+        key: `char_walk_${dir}`,
+        frames: this.anims.generateFrameNumbers("character_sheet", {
+          start: startFrame,
+          end: startFrame + 3,
+        }),
+        frameRate: 10,
+        repeat: -1,
+      });
+
+      // Idle animation (single frame, no repeat)
+      this.anims.create({
+        key: `char_idle_${dir}`,
+        frames: [{ key: "character_sheet", frame: startFrame }],
+        frameRate: 1,
+        repeat: 0,
+      });
+    }
+  }
+
+  /**
+   * Update the local player's animation based on current input direction.
+   * Plays walk animation when moving, idle animation when standing still.
+   */
+  private updatePlayerAnimation(): void {
+    if (!this.currentPlayer) return;
+
+    let moving = false;
+    let newDirection = this.lastDirection;
+
+    // Determine direction (last pressed wins for diagonals)
+    if (this.inputPayload.left) {
+      newDirection = "left";
+      moving = true;
+    }
+    if (this.inputPayload.right) {
+      newDirection = "right";
+      moving = true;
+    }
+    if (this.inputPayload.up) {
+      newDirection = "up";
+      moving = true;
+    }
+    if (this.inputPayload.down) {
+      newDirection = "down";
+      moving = true;
+    }
+
+    this.lastDirection = newDirection;
+
+    // Play appropriate animation
+    const animKey = moving
+      ? `char_walk_${newDirection}`
+      : `char_idle_${newDirection}`;
+
+    const currentAnim = this.currentPlayer.anims.currentAnim;
+    if (!currentAnim || currentAnim.key !== animKey) {
+      this.currentPlayer.anims.play(animKey, true);
+    }
   }
 
   // ============================================================
@@ -868,8 +976,8 @@ export class GameScene extends Phaser.Scene {
       playerEntity.hpText.setVisible(true);
     }
 
-    if (this.localRef) this.localRef.setVisible(true);
-    if (this.remoteRef) this.remoteRef.setVisible(true);
+    if (this.localRef) this.localRef.setVisible(this.showHitboxes);
+    if (this.remoteRef) this.remoteRef.setVisible(this.showHitboxes);
 
     if (this.deathBoxSprite) {
       this.deathBoxSprite.destroy();
@@ -1101,6 +1209,9 @@ export class GameScene extends Phaser.Scene {
 
     // ---- Send input to server ----
     this.room.send(0, this.inputPayload);
+
+    // ---- Update character animation based on direction ----
+    this.updatePlayerAnimation();
 
     // ---- Client-side prediction (apply locally) ----
     const dt = this.fixedTimeStep / 1000;

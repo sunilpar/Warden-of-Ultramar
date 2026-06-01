@@ -45,10 +45,7 @@ export class SceneSelector extends Phaser.Scene {
       "map1_obstacle_small",
       "assets/maps/map1/smallObstical.png",
     );
-    this.load.image(
-      "map1_spawn_player",
-      "assets/maps/map1/checkpointNew.png",
-    );
+    this.load.image("map1_spawn_player", "assets/maps/map1/checkpointNew.png");
     this.load.image(
       "map1_spawn_enemy1",
       "assets/maps/map1/enemyspawnPoint1.png",
@@ -62,6 +59,17 @@ export class SceneSelector extends Phaser.Scene {
       "assets/maps/map1/enemyspawnpoint3.png",
     );
     this.load.image("map1_exit", "assets/maps/map1/mapExitpoint.png");
+
+    // Character sprite sheet (4x4 grid, each frame 256x256)
+    // Row 0: walk right, Row 1: walk left, Row 2: walk up, Row 3: walk down
+    this.load.spritesheet(
+      "character_sheet",
+      "assets/CharacterSpriteSheet64.png",
+      {
+        frameWidth: 64,
+        frameHeight: 64,
+      },
+    );
   }
 
   create() {
