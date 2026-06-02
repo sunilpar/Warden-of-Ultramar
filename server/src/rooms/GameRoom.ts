@@ -35,6 +35,7 @@ import { Room, Client } from "colyseus";
 import { RoomState } from "../schema/RoomState";
 import { Player, InputData } from "../schema/Player";
 import { Bullet } from "../schema/Bullet";
+import { ClawSlash } from "../schema/ClawSlash";
 import { GAME_CONFIG } from "../config/game";
 import { PLAYER_BOLTER_WEAPON, PLAYER_PULSE_WEAPON } from "../config/weapons";
 import { PlayerSystem } from "../systems/PlayerSystem";
@@ -125,20 +126,40 @@ export class GameRoom extends Room {
     this.playerSystem.update(dt);
 
     // 3. Update enemy AI, move enemies, handle melee attacks
-    const pendingBullets = this.enemyAISystem.update(dt, this.gameTime);
+    const { bullets: pendingBullets, clawSlashes: pendingClawSlashes } =
+      this.enemyAISystem.update(dt, this.gameTime);
 
     // 4. Spawn any bullets that enemies fired
     for (const { bullet } of pendingBullets) {
       this.bulletSystem.spawnBullet(bullet, this.gameTime);
     }
 
+    // 4b. Spawn any claw slashes from melee enemies
+    for (const { claw } of pendingClawSlashes) {
+      const clawId = `claw_${this.state.clawSlashes.size}_${Date.now()}`;
+      claw.createdAt = this.gameTime;
+      this.state.clawSlashes.set(clawId, claw);
+    }
+
     // 5. Move bullets & handle lifecycle
     this.bulletSystem.update(dt, this.gameTime);
 
-    // 6. Check bullet-player collisions & apply damage
+    // 6. Check bullet-player collisions & claw-player collisions & apply damage
     this.combatSystem.update(this.gameTime);
 
-    // 7. Check exit zone (teleport players who reach the exit)
+    // 7. Clean up claw slashes after 500ms (give client time to see them)
+    const CLAW_LIFETIME = 500;
+    const clawsToRemove: string[] = [];
+    this.state.clawSlashes.forEach((claw, clawId) => {
+      if (claw.processed && (this.gameTime - claw.createdAt >= CLAW_LIFETIME)) {
+        clawsToRemove.push(clawId);
+      }
+    });
+    for (const clawId of clawsToRemove) {
+      this.state.clawSlashes.delete(clawId);
+    }
+
+    // 8. Check exit zone (teleport players who reach the exit)
     this.state.players.forEach((player) => {
       if (player.isDead) return;
       if (this.mapSystem.isInExitZone(player.x, player.y)) {

@@ -408,7 +408,7 @@ export const MAP_1: MapDefinition = {
       y: 128,
       width: 150,
       height: 180,
-      enemyTypes: ["elder"],
+      enemyTypes: ["tyranid"],
       maxAlive: 3,
       intervalMs: 3000,
       //chrch type
@@ -421,7 +421,7 @@ export const MAP_1: MapDefinition = {
       y: 256,
       width: 147,
       height: 130,
-      enemyTypes: ["elder"],
+      enemyTypes: ["tyranid"],
       maxAlive: 2,
       intervalMs: 4000,
       //trynids type
@@ -433,7 +433,7 @@ export const MAP_1: MapDefinition = {
       y: 320,
       width: 192,
       height: 192,
-      enemyTypes: ["elder", "ork"],
+      enemyTypes: ["tyranid", "ork"],
       maxAlive: 3,
       intervalMs: 3500,
       //sightly broken curch type
@@ -446,7 +446,7 @@ export const MAP_1: MapDefinition = {
       y: 896,
       width: 192,
       height: 192,
-      enemyTypes: ["elder"],
+      enemyTypes: ["tyranid"],
       maxAlive: 3,
       intervalMs: 3000,
       //chrch type
@@ -458,7 +458,7 @@ export const MAP_1: MapDefinition = {
       y: 1088,
       width: 147,
       height: 130,
-      enemyTypes: ["elder"],
+      enemyTypes: ["tyranid"],
       maxAlive: 2,
       intervalMs: 3500,
       //trynids type
@@ -470,7 +470,7 @@ export const MAP_1: MapDefinition = {
       y: 1408,
       width: 192,
       height: 192,
-      enemyTypes: ["ork", "elder"],
+      enemyTypes: ["ork", "tyranid"],
       maxAlive: 3,
       intervalMs: 3000,
       //sightly broken curch type
@@ -483,7 +483,7 @@ export const MAP_1: MapDefinition = {
       y: 2560,
       width: 192,
       height: 192,
-      enemyTypes: ["elder", "ork"],
+      enemyTypes: ["tyranid", "ork"],
       maxAlive: 4,
       intervalMs: 2500,
       //sightly broken curch type
@@ -495,7 +495,7 @@ export const MAP_1: MapDefinition = {
       y: 2240,
       width: 147,
       height: 130,
-      enemyTypes: ["elder"],
+      enemyTypes: ["tyranid"],
       maxAlive: 3,
       intervalMs: 3000,
       //trynids type
@@ -507,7 +507,7 @@ export const MAP_1: MapDefinition = {
       y: 2880,
       width: 192,
       height: 192,
-      enemyTypes: ["elder"],
+      enemyTypes: ["tyranid"],
       maxAlive: 3,
       intervalMs: 3500,
       //chrch type
@@ -519,7 +519,7 @@ export const MAP_1: MapDefinition = {
       y: 2880,
       width: 147,
       height: 130,
-      enemyTypes: ["ork", "elder"],
+      enemyTypes: ["ork", "tyranid"],
       maxAlive: 3,
       intervalMs: 2500,
       //trynids type

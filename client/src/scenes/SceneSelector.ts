@@ -60,6 +60,13 @@ export class SceneSelector extends Phaser.Scene {
     );
     this.load.image("map1_exit", "assets/maps/map1/mapExitpoint.png");
 
+    // Tyranid sprite sheet: 2 rows x 4 cols, each frame 64x64
+    // Row 0: walk animation (left-facing), Row 1: attack animation (left-facing)
+    this.load.spritesheet("tyranid_sheet", "assets/spriteSheetTRI64.png", {
+      frameWidth: 64,
+      frameHeight: 64,
+    });
+
     // Character sprite sheet (4x4 grid, each frame 256x256)
     // Row 0: walk right, Row 1: walk left, Row 2: walk up, Row 3: walk down
     this.load.spritesheet(

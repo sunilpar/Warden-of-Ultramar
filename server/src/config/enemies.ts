@@ -36,6 +36,32 @@ export const ELDER_CONFIG = {
   },
 };
 
+export const TYRANID_CONFIG = {
+  /** Display name */
+  name: "Tyranid",
+
+  /** Health points (same as Elder) */
+  hp: 100,
+
+  /** Movement speed in pixels per second */
+  speed: 80,
+
+  /** Melee attack damage per hit (same as Elder) */
+  attackDamage: 15,
+
+  /** Milliseconds between melee attacks (same as Elder) */
+  attackCooldown: 1000,
+
+  /** Collision radius for melee contact */
+  collisionRadius: 20,
+
+  /** Spawning settings */
+  spawn: {
+    maxAlive: 5,
+    intervalMs: 5000,
+  },
+};
+
 export const ORK_CONFIG = {
   /** Display name */
   name: "Ork",

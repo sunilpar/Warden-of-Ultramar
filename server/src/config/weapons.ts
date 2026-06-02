@@ -45,6 +45,26 @@ export const PLAYER_PULSE_WEAPON = {
   damage: 150,
 };
 
+/**
+ * Claw Weapon Configuration
+ * ==========================
+ * Melee cone attack used by Elders and Tyranids.
+ * Short range, instant damage in a cone arc.
+ */
+export const CLAW_WEAPON = {
+  /** Range of the cone attack in pixels */
+  range: 50,
+
+  /** Half-angle of the cone arc in radians (45° = π/4 → full cone is 90°) */
+  halfAngle: Math.PI / 4,
+
+  /** Milliseconds between claw attacks (increased for animation visibility) */
+  cooldown: 3000,
+
+  /** Damage per claw hit */
+  damage: 15,
+};
+
 export const ORK_RIFLE_WEAPON = {
   /** Bullet travel speed in pixels per second */
   bulletSpeed: 500,

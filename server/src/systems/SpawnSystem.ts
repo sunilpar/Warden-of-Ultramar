@@ -21,7 +21,7 @@ import { Enemy } from "../schema/Enemy";
 import { EnemyAISystem } from "./EnemyAISystem";
 import { MapSystem } from "./MapSystem";
 import { EnemySpawnZone } from "../config/maps";
-import { ELDER_CONFIG, ORK_CONFIG } from "../config/enemies";
+import { ELDER_CONFIG, ORK_CONFIG, TYRANID_CONFIG } from "../config/enemies";
 
 /** Runtime timer state per spawn zone */
 interface ZoneTimer {
@@ -121,6 +121,10 @@ export class SpawnSystem {
       enemy.hp = ELDER_CONFIG.hp;
       enemy.maxHp = ELDER_CONFIG.hp;
       enemy.attack = ELDER_CONFIG.attackDamage;
+    } else if (type === "tyranid") {
+      enemy.hp = TYRANID_CONFIG.hp;
+      enemy.maxHp = TYRANID_CONFIG.hp;
+      enemy.attack = TYRANID_CONFIG.attackDamage;
     } else if (type === "ork") {
       enemy.hp = ORK_CONFIG.hp;
       enemy.maxHp = ORK_CONFIG.hp;
@@ -130,7 +134,9 @@ export class SpawnSystem {
     // Spawn OUTSIDE the zone (adjacent to a random edge)
     // WHY: Enemy spawn zones are blocking rects — enemies can't be inside them.
     // Pick a random edge (top, bottom, left, right) and spawn just outside.
-    const radius = type === "ork" ? ORK_CONFIG.collisionRadius : ELDER_CONFIG.collisionRadius;
+    const radius = type === "ork" ? ORK_CONFIG.collisionRadius
+      : type === "tyranid" ? TYRANID_CONFIG.collisionRadius
+      : ELDER_CONFIG.collisionRadius;
     const margin = radius + 2; // Small buffer so they don't immediately collide
     const edge = Math.floor(Math.random() * 4);
     switch (edge) {

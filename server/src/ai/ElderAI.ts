@@ -20,6 +20,7 @@
 import { Enemy } from "../schema/Enemy";
 import { Player } from "../schema/Player";
 import { ELDER_CONFIG } from "../config/enemies";
+import { CLAW_WEAPON } from "../config/weapons";
 import { moveTowardTarget } from "../utils/movement";
 import { circleCollision } from "../utils/collision";
 
@@ -48,43 +49,53 @@ export function updateElderAI(
   findNearestPlayer: (x: number, y: number) => { player: Player; distSq: number } | null,
   dt: number,
   currentTime: number
-): { attacked: boolean; target: Player | null } {
+): { attacked: boolean; target: Player | null; directionX: number; directionY: number } {
   // Don't do anything if dead
   if (enemy.isDead) {
-    return { attacked: false, target: null };
+    return { attacked: false, target: null, directionX: 0, directionY: 0 };
   }
 
   // Find nearest alive player
   const nearest = findNearestPlayer(enemy.x, enemy.y);
   if (!nearest) {
-    return { attacked: false, target: null };
+    return { attacked: false, target: null, directionX: 0, directionY: 0 };
   }
 
   const { player: target } = nearest;
 
-  // Move steadily toward target (no randomness!)
-  const newPos = moveTowardTarget(
-    enemy.x, enemy.y,
-    target.x, target.y,
-    ELDER_CONFIG.speed,
-    dt
-  );
-  enemy.x = newPos.x;
-  enemy.y = newPos.y;
+  // Calculate distance and direction to target
+  const dx = target.x - enemy.x;
+  const dy = target.y - enemy.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const dirX = dist > 0 ? dx / dist : 0;
+  const dirY = dist > 0 ? dy / dist : 1;
 
-  // Check if in melee range
-  const inMeleeRange = circleCollision(
-    enemy.x, enemy.y, ELDER_CONFIG.collisionRadius,
-    target.x, target.y, 20 // player collision radius
-  );
+  // Stop distance: claw range + player radius + 5px buffer
+  // This prevents the enemy from walking through the player
+  const STOP_DISTANCE = CLAW_WEAPON.range + 20 + 5; // claw range + player radius + buffer
 
-  // Attack if in range AND cooldown has expired
-  if (inMeleeRange && currentTime - state.lastAttackTime >= ELDER_CONFIG.attackCooldown) {
-    state.lastAttackTime = currentTime;
-    return { attacked: true, target };
+  // Only move if NOT within stop distance
+  if (dist > STOP_DISTANCE) {
+    const newPos = moveTowardTarget(
+      enemy.x, enemy.y,
+      target.x, target.y,
+      ELDER_CONFIG.speed,
+      dt
+    );
+    enemy.x = newPos.x;
+    enemy.y = newPos.y;
   }
 
-  return { attacked: false, target: null };
+  // Check if in claw range (use claw weapon range + player collision radius)
+  const inClawRange = dist <= (CLAW_WEAPON.range + 20 + 5);
+
+  // Attack if in range AND cooldown has expired
+  if (inClawRange && currentTime - state.lastAttackTime >= CLAW_WEAPON.cooldown) {
+    state.lastAttackTime = currentTime;
+    return { attacked: true, target, directionX: dirX, directionY: dirY };
+  }
+
+  return { attacked: false, target: null, directionX: 0, directionY: 0 };
 }
 
 /**

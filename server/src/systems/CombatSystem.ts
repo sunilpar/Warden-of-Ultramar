@@ -27,8 +27,9 @@ import { RoomState } from "../schema/RoomState";
 import { BulletSystem } from "./BulletSystem";
 import { MapSystem } from "./MapSystem";
 import { GAME_CONFIG } from "../config/game";
-import { ELDER_CONFIG, ORK_CONFIG } from "../config/enemies";
-import { circleCollision } from "../utils/collision";
+import { ELDER_CONFIG, ORK_CONFIG, TYRANID_CONFIG } from "../config/enemies";
+import { CLAW_WEAPON } from "../config/weapons";
+import { circleCollision, coneCollision } from "../utils/collision";
 
 export class CombatSystem {
   private state: RoomState;
@@ -83,6 +84,16 @@ export class CombatSystem {
         this.checkEnemyBulletVsPlayers(bullet, bulletId);
       }
     });
+
+    // ---- CLAW SLASH vs PLAYERS ----
+    this.state.clawSlashes.forEach((claw, clawId) => {
+      if (claw.processed) return;
+
+      if (!claw.isPlayerClaw) {
+        // Enemy claw → check against players
+        this.checkEnemyClawVsPlayers(claw);
+      }
+    });
   }
 
   /**
@@ -101,7 +112,9 @@ export class CombatSystem {
       const enemyRadius =
         enemy.enemyType === "ork"
           ? ORK_CONFIG.collisionRadius
-          : ELDER_CONFIG.collisionRadius;
+          : enemy.enemyType === "tyranid"
+            ? TYRANID_CONFIG.collisionRadius
+            : ELDER_CONFIG.collisionRadius;
 
       // Check collision
       const hit = circleCollision(
@@ -171,5 +184,39 @@ export class CombatSystem {
         this.bulletSystem.markBulletAsHit(bulletId);
       }
     });
+  }
+
+  /**
+   * Check an enemy claw slash against all alive players.
+   * Uses cone collision for the melee arc attack.
+   */
+  private checkEnemyClawVsPlayers(claw: any): void {
+    this.state.players.forEach((player) => {
+      // Skip dead players
+      if (player.isDead) return;
+
+      // Check if player is within the claw's cone
+      const hit = coneCollision(
+        claw.x, claw.y,
+        claw.directionX, claw.directionY,
+        CLAW_WEAPON.range, CLAW_WEAPON.halfAngle,
+        player.x, player.y,
+        GAME_CONFIG.PLAYER.COLLISION_RADIUS,
+      );
+
+      if (hit) {
+        // Apply damage
+        player.hp -= claw.damage;
+
+        // Check for death
+        if (player.hp <= 0) {
+          player.hp = 0;
+          player.isDead = true;
+        }
+      }
+    });
+
+    // Mark claw as processed (whether it hit or missed)
+    claw.processed = true;
   }
 }

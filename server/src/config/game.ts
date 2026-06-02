@@ -34,6 +34,11 @@ export const GAME_CONFIG = {
     SPEED: 120, // pixels per second
     COLLISION_RADIUS: 20,
     RESPAWN_HP: 1000,
+    /** Player hitbox dimensions (independent of sprite size).
+     * This is the actual collision rectangle, centered on the player position.
+     * Used for: debug visualization, bullet collision, and client prediction. */
+    HITBOX_WIDTH: 40,
+    HITBOX_HEIGHT: 40,
   },
 
   /** Bullet collision settings */

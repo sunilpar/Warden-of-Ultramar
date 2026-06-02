@@ -49,12 +49,18 @@ import { MAP_1, getHitboxRect } from "../maps/mapData";
 // ============================================================
 
 interface EnemyEntity {
-  sprite: Phaser.GameObjects.Image;
+  sprite: Phaser.GameObjects.Image | Phaser.GameObjects.Sprite;
   hpBarBg: Phaser.GameObjects.Graphics;
   hpBarFill: Phaser.GameObjects.Graphics;
   serverX: number;
   serverY: number;
   lastHp: number;
+  /** Tyranid-specific: facing direction ("left" or "right") */
+  facing?: "left" | "right";
+  /** Tyranid-specific: true when playing attack animation */
+  isAttacking?: boolean;
+  /** Enemy type for animation logic */
+  enemyType?: string;
 }
 
 interface BulletEntity {
@@ -96,6 +102,7 @@ export class GameScene extends Phaser.Scene {
 
   // Character animation state
   private animationsCreated: boolean = false;
+  private tyranidAnimationsCreated: boolean = false;
   private lastDirection: string = "down"; // default facing direction
 
   // Game over state
@@ -141,6 +148,12 @@ export class GameScene extends Phaser.Scene {
 
   /** Player speed — must match server config for accurate prediction */
   private readonly PLAYER_SPEED = 120; // pixels per second (matches GAME_CONFIG.PLAYER.SPEED)
+
+  /** Player hitbox — independent of sprite size.
+   * MUST match server GAME_CONFIG.PLAYER values for accurate prediction. */
+  private readonly PLAYER_HITBOX_WIDTH = 40;
+  private readonly PLAYER_HITBOX_HEIGHT = 40;
+  private readonly PLAYER_COLLISION_RADIUS = 20; // matches GAME_CONFIG.PLAYER.COLLISION_RADIUS
 
   constructor() {
     super({ key: "game" });
@@ -275,10 +288,11 @@ export class GameScene extends Phaser.Scene {
         );
 
         // Visual references for prediction debugging
-        this.localRef = this.add.rectangle(0, 0, entity.width, entity.height);
+        // Uses PLAYER_HITBOX dimensions (independent of sprite size)
+        this.localRef = this.add.rectangle(0, 0, this.PLAYER_HITBOX_WIDTH, this.PLAYER_HITBOX_HEIGHT);
         this.localRef.setStrokeStyle(1, 0x00ff00); // green = predicted
         this.localRef.setVisible(this.showHitboxes); // only visible when toggle is ON
-        this.remoteRef = this.add.rectangle(0, 0, entity.width, entity.height);
+        this.remoteRef = this.add.rectangle(0, 0, this.PLAYER_HITBOX_WIDTH, this.PLAYER_HITBOX_HEIGHT);
         this.remoteRef.setStrokeStyle(1, 0xff0000); // red = server confirmed
         this.remoteRef.setVisible(this.showHitboxes); // only visible when toggle is ON
 
@@ -325,11 +339,27 @@ export class GameScene extends Phaser.Scene {
     // ============================================================
 
     callbacks.onAdd("enemies", (enemy, enemyId) => {
-      const spriteKey = enemy.enemyType === "ork" ? "orck" : "elder";
-      const sprite = this.add
-        .image(enemy.x, enemy.y, spriteKey)
-        .setDisplaySize(32, 32)
-        .setDepth(2); // Above map entities (-1), below bullets (5)
+      let sprite: Phaser.GameObjects.Image | Phaser.GameObjects.Sprite;
+
+      if (enemy.enemyType === "tyranid") {
+        // Tyranid: animated sprite using sprite sheet
+        if (!this.tyranidAnimationsCreated) {
+          this.createTyranidAnimations();
+          this.tyranidAnimationsCreated = true;
+        }
+        sprite = this.add
+          .sprite(enemy.x, enemy.y, "tyranid_sheet", 0)
+          .setDisplaySize(48, 48)
+          .setDepth(2);
+        (sprite as Phaser.GameObjects.Sprite).anims.play("tyranid_walk_left");
+      } else {
+        // Ork or Elder: static image
+        const spriteKey = enemy.enemyType === "ork" ? "orck" : "elder";
+        sprite = this.add
+          .image(enemy.x, enemy.y, spriteKey)
+          .setDisplaySize(32, 32)
+          .setDepth(2);
+      }
 
       const hpBarBg = this.add.graphics();
       const hpBarFill = this.add.graphics();
@@ -341,9 +371,12 @@ export class GameScene extends Phaser.Scene {
         serverX: enemy.x,
         serverY: enemy.y,
         lastHp: enemy.hp,
+        enemyType: enemy.enemyType,
+        facing: "left",
+        isAttacking: false,
       };
 
-      // Update server position for interpolation + detect flinch on HP drop
+      // Update server position for interpolation + detect flinch/attack on HP drop
       callbacks.onChange(enemy, () => {
         if (this.enemyEntities[enemyId]) {
           this.enemyEntities[enemyId].serverX = enemy.x;
@@ -425,6 +458,36 @@ export class GameScene extends Phaser.Scene {
         bulletEntity.sprite.destroy();
         delete this.bulletEntities[bulletId];
       }
+    });
+
+    // ============================================================
+    // CLAW SLASH HANDLERS
+    // ============================================================
+
+    callbacks.onAdd("clawSlashes", (claw, clawId) => {
+      // Show a red cone slash visual effect
+      this.showClawSlashEffect(claw.x, claw.y, claw.directionX, claw.directionY, claw.ownerId);
+
+      // Trigger tyranid attack animation for the owner
+      const enemyEntity = this.enemyEntities[claw.ownerId];
+      if (enemyEntity && enemyEntity.enemyType === "tyranid") {
+        const sprite = enemyEntity.sprite as Phaser.GameObjects.Sprite;
+        sprite.anims.play("tyranid_attack_left", true);
+        // Set facing direction from claw direction
+        enemyEntity.facing = claw.directionX > 0 ? "right" : "left";
+        sprite.setFlipX(enemyEntity.facing === "right");
+        enemyEntity.isAttacking = true;
+        // Return to walk after attack animation completes (4 frames at 8fps = 500ms)
+        this.time.delayedCall(500, () => {
+          if (enemyEntity) {
+            enemyEntity.isAttacking = false;
+          }
+        });
+      }
+    });
+
+    callbacks.onRemove("clawSlashes", (claw, clawId) => {
+      // Claw slashes are short-lived, cleanup handled by the visual effect tween
     });
 
     // Camera bounds set when player joins (see player handler above)
@@ -783,6 +846,144 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ============================================================
+  // TYRANID ANIMATION
+  // ============================================================
+
+  /**
+   * Create tyranid animations from the 2x4 sprite sheet.
+   *
+   * Sprite sheet layout (2 rows x 4 cols, each frame 64x64):
+   *   Row 0: walk animation, left-facing (frames 0, 1, 2, 3)
+   *   Row 1: attack animation, left-facing (frames 4, 5, 6, 7)
+   *
+   * For right-facing, we flip the sprite horizontally via setFlipX.
+   */
+  private createTyranidAnimations(): void {
+    // Walk left (row 0, frames 0-3)
+    this.anims.create({
+      key: "tyranid_walk_left",
+      frames: this.anims.generateFrameNumbers("tyranid_sheet", {
+        start: 0,
+        end: 3,
+      }),
+      frameRate: 8,
+      repeat: -1,
+    });
+
+    // Attack left (row 1, frames 4-7) — play once per attack
+    this.anims.create({
+      key: "tyranid_attack_left",
+      frames: this.anims.generateFrameNumbers("tyranid_sheet", {
+        start: 4,
+        end: 7,
+      }),
+      frameRate: 8,
+      repeat: 0,
+    });
+  }
+
+  /**
+   * Update tyranid enemy animations each tick.
+   * Determines facing direction from movement and plays appropriate animation.
+   * For right-facing: flip the sprite horizontally.
+   */
+  private updateTyranidAnimations(): void {
+    for (const enemyId in this.enemyEntities) {
+      const entity = this.enemyEntities[enemyId];
+      if (entity.enemyType !== "tyranid") continue;
+
+      const sprite = entity.sprite as Phaser.GameObjects.Sprite;
+
+      // When attacking, DON'T touch facing/flip/animation at all
+      if (entity.isAttacking) continue;
+
+      // Determine facing direction from server position delta
+      const dx = entity.serverX - sprite.x;
+      if (Math.abs(dx) > 1) {
+        entity.facing = dx > 0 ? "right" : "left";
+      }
+
+      // Flip sprite based on facing direction
+      sprite.setFlipX(entity.facing === "right");
+
+      // Play walk animation
+      const walkAnim = "tyranid_walk_left";
+      if (sprite.anims && sprite.anims.currentAnim?.key !== walkAnim) {
+        sprite.anims.play(walkAnim, true);
+      }
+    }
+  }
+
+  // ============================================================
+  // CLAW SLASH VISUAL EFFECT
+  // ============================================================
+
+  /**
+   * Show a red cone slash effect at the given position and direction.
+   * The cone represents the melee attack arc.
+   *
+   * @param x - Origin X (attacker position)
+   * @param y - Origin Y (attacker position)
+   * @param dirX - Normalized direction X
+   * @param dirY - Normalized direction Y
+   * @param ownerId - The enemy that triggered the claw (for future use)
+   */
+  private showClawSlashEffect(
+    x: number, y: number,
+    dirX: number, dirY: number,
+    ownerId: string
+  ): void {
+    const CLAW_RANGE = 50;
+    const HALF_ANGLE = Math.PI / 4; // 45 degrees
+
+    // Calculate the arc's start and end angles
+    const centerAngle = Math.atan2(dirY, dirX);
+    const startAngle = centerAngle - HALF_ANGLE;
+    const endAngle = centerAngle + HALF_ANGLE;
+
+    // Create a filled arc (cone shape) using Graphics
+    const gfx = this.add.graphics().setDepth(4);
+
+    // Draw filled cone
+    gfx.fillStyle(0xff2200, 0.6);
+    gfx.beginPath();
+    gfx.moveTo(x, y);
+    gfx.arc(x, y, CLAW_RANGE, startAngle, endAngle, false);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // Draw arc outline
+    gfx.lineStyle(2, 0xff4400, 0.9);
+    gfx.beginPath();
+    gfx.arc(x, y, CLAW_RANGE, startAngle, endAngle, false);
+    gfx.strokePath();
+
+    // Draw slash lines inside the cone for a more dynamic look
+    gfx.lineStyle(1, 0xff6600, 0.7);
+    for (let i = 0; i < 3; i++) {
+      const angle = startAngle + (endAngle - startAngle) * (i / 2);
+      gfx.beginPath();
+      gfx.moveTo(x, y);
+      gfx.lineTo(
+        x + Math.cos(angle) * CLAW_RANGE * (0.6 + Math.random() * 0.4),
+        y + Math.sin(angle) * CLAW_RANGE * (0.6 + Math.random() * 0.4),
+      );
+      gfx.strokePath();
+    }
+
+    // Animate: fade out and expand slightly, then destroy
+    this.tweens.add({
+      targets: gfx,
+      alpha: 0,
+      duration: 300,
+      ease: "Power2",
+      onComplete: () => {
+        gfx.destroy();
+      },
+    });
+  }
+
+  // ============================================================
   // BLOOD SPLASH EFFECT
   // ============================================================
 
@@ -1016,7 +1217,7 @@ export class GameScene extends Phaser.Scene {
     const sprite = playerEntity.sprite;
     const barWidth = 48;
     const barHeight = 4;
-    const offsetY = sprite.height / 2 + 14;
+    const offsetY = sprite.displayHeight / 2 + 14;
 
     const x = sprite.x - barWidth / 2;
     const y = sprite.y + offsetY;
@@ -1213,6 +1414,9 @@ export class GameScene extends Phaser.Scene {
     // ---- Update character animation based on direction ----
     this.updatePlayerAnimation();
 
+    // ---- Update tyranid enemy animations ----
+    this.updateTyranidAnimations();
+
     // ---- Client-side prediction (apply locally) ----
     const dt = this.fixedTimeStep / 1000;
     let dirX = 0;
@@ -1248,7 +1452,7 @@ export class GameScene extends Phaser.Scene {
     // WHY: Without this, the client prediction lets the player walk through
     // obstacles and enemy spawn zones. When the server corrects, there's a snap.
     // Blocking rects = obstacles + enemy spawn zones (using HITBOX dimensions, same as server).
-    const PLAYER_RADIUS = 16;
+    const PLAYER_RADIUS = this.PLAYER_COLLISION_RADIUS;
     const blockingRects = [
       ...this.currentMap.obstacles,
       ...this.currentMap.enemySpawnZones,

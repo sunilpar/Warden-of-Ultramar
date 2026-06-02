@@ -19,6 +19,7 @@ import { Schema, type, MapSchema } from "@colyseus/schema";
 import { Player } from "./Player";
 import { Enemy } from "./Enemy";
 import { Bullet } from "./Bullet";
+import { ClawSlash } from "./ClawSlash";
 
 export class RoomState extends Schema {
   /** Map/world dimensions (sent so client knows boundaries) */
@@ -33,4 +34,7 @@ export class RoomState extends Schema {
 
   /** All active bullets, keyed by bullet ID */
   @type({ map: Bullet }) bullets = new MapSchema<Bullet>();
+
+  /** All active claw slashes, keyed by slash ID */
+  @type({ map: ClawSlash }) clawSlashes = new MapSchema<ClawSlash>();
 }

@@ -80,6 +80,54 @@ export function circleRectCollision(
  *
  * @returns true if the point is inside the rectangle
  */
+/**
+ * Check if a target point is within a cone (fan-shaped area).
+ *
+ * HOW:
+ *   1. Check if target is within range (distance check)
+ *   2. Calculate angle from origin to target
+ *   3. Compare angle difference against the cone's half-angle
+ *
+ * This is used for the claw melee attack — a cone-shaped hitbox
+ * that extends from the attacker in a specific direction.
+ *
+ * @param originX - Cone origin X (attacker position)
+ * @param originY - Cone origin Y (attacker position)
+ * @param dirX - Normalized direction X (cone faces this way)
+ * @param dirY - Normalized direction Y
+ * @param range - Maximum distance of the cone
+ * @param halfAngle - Half the cone's arc angle in radians
+ * @param targetX - Target point X
+ * @param targetY - Target point Y
+ * @param targetRadius - Target collision radius (for generous hit detection)
+ * @returns true if the target is within the cone
+ */
+export function coneCollision(
+  originX: number, originY: number,
+  dirX: number, dirY: number,
+  range: number, halfAngle: number,
+  targetX: number, targetY: number,
+  targetRadius: number = 0
+): boolean {
+  const dx = targetX - originX;
+  const dy = targetY - originY;
+  const distSq = dx * dx + dy * dy;
+  const effectiveRange = range + targetRadius;
+
+  // Quick distance check
+  if (distSq > effectiveRange * effectiveRange) return false;
+
+  // Calculate angle from origin to target
+  const dist = Math.sqrt(distSq);
+  if (dist === 0) return true; // On top of attacker = always hit
+
+  // Dot product to get cosine of angle between cone direction and target direction
+  const dot = (dx * dirX + dy * dirY) / dist;
+  const angleCos = Math.cos(halfAngle);
+
+  return dot >= angleCos;
+}
+
 export function pointInRect(
   px: number, py: number,
   rx: number, ry: number,
