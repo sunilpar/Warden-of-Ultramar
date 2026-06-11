@@ -499,12 +499,23 @@ export class GameScene extends Phaser.Scene {
 
   /**
    * Render floor tiles from the map data using a canvas texture.
+   *
+   * TILE ID → FRAME MAPPING:
+   *   0 = empty (skip)
+   *   1 = player spawn tile (frame 0)
+   *   2 = basic tile 1 (frame 1)
+   *   3 = basic tile 2 (frame 2)
+   *   4 = exit tile (frame 3)
+   *   5-8 = special tiles (frames 4-7)
+   *
+   * The tile sprite sheet is 2 rows x 4 cols, 64x64 each.
    */
   private renderMapTiles(): void {
     const map = this.currentMap;
-    const { tileSize, tiles, tilesetColumns } = map;
+    const { tileSize, tiles } = map;
     const rows = tiles.length;
     const cols = tiles[0].length;
+    const ss = map.spriteSheets.tiles; // sprite sheet config
 
     const canvas = this.textures.createCanvas(
       "map_floor_canvas",
@@ -522,17 +533,24 @@ export class GameScene extends Phaser.Scene {
         const tileId = tiles[row][col];
         if (tileId === 0) continue;
 
+        // Convert tile ID to sprite sheet frame index (tileId - 1)
+        // Frame 0 = tileId 1 (player spawn), Frame 1 = tileId 2 (basic1), etc.
+        const frameIndex = tileId - 1;
+        const frameCol = frameIndex % ss.columns;
+        const frameRow = Math.floor(frameIndex / ss.columns);
+
+        const sx = frameCol * ss.frameWidth;
+        const sy = frameRow * ss.frameHeight;
+
         const dx = col * tileSize;
         const dy = row * tileSize;
 
-        // Draw the ENTIRE spritesheet image scaled to fit one tile
-        // The full maptileBasic.png (all 4 variations) becomes one game tile
         ctx.drawImage(
           tilesetImg,
-          0,
-          0,
-          tilesetImg.width,
-          tilesetImg.height,
+          sx,
+          sy,
+          ss.frameWidth,
+          ss.frameHeight,
           dx,
           dy,
           tileSize,
@@ -546,51 +564,48 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * Render obstacles, spawn points, and exit as sprites.
-   * DEPTH ORDER:
-   *   0 = floor tiles
-   *   1 = map entities (obstacles, spawns, exit) — ABOVE floor, BELOW players
-   *   2 = players, enemies
-   *   5 = bullets
+   * Render obstacles, spawn points, and exit using sprite sheets.
+   * Each entity has a spriteFrame index into the obstacle sprite sheet.
+   *
+   * Obstacle sprite sheet: 4 rows x 4 cols, 128x128 each
+   *   Frames 0-11 = obstacles
+   *   Frames 12-15 = enemy spawn points
+   *
+   * Tile sprite sheet: 2 rows x 4 cols, 64x64 each
+   *   Frame 0 = player spawn, Frame 3 = exit tile
    */
   private renderMapEntities(): void {
     const map = this.currentMap;
 
+    // Obstacles — use spriteFrame from map data
     for (const obs of map.obstacles) {
-      const key =
-        obs.obstacleType === "big"
-          ? "map1_obstacle_big"
-          : "map1_obstacle_small";
       this.add
-        .image(obs.x + obs.width / 2, obs.y + obs.height / 2, key)
+        .image(obs.x + obs.width / 2, obs.y + obs.height / 2, "map1_obstacles", obs.spriteFrame)
         .setDepth(1)
         .setDisplaySize(obs.width, obs.height);
     }
 
+    // Player spawns — use player spawn tile frame
     for (const spawn of map.playerSpawns) {
-      const size = spawn.visualSize ?? 32;
+      const size = spawn.visualSize ?? 64;
       this.add
-        .image(spawn.x, spawn.y, "map1_spawn_player")
+        .image(spawn.x, spawn.y, "map1_tiles", map.playerSpawnTileFrame)
         .setDepth(1)
         .setDisplaySize(size, size);
     }
 
-    const enemySpawnKeys = [
-      "map1_obstacle_big",
-      "map1_spawn_enemy2",
-      "map1_spawn_enemy3",
-    ];
-    map.enemySpawnZones.forEach((zone, i) => {
-      const key = enemySpawnKeys[i % enemySpawnKeys.length];
+    // Enemy spawn zones — use spriteFrame from map data
+    for (const zone of map.enemySpawnZones) {
       this.add
-        .image(zone.x + zone.width / 2, zone.y + zone.height / 2, key)
+        .image(zone.x + zone.width / 2, zone.y + zone.height / 2, "map1_obstacles", zone.spriteFrame)
         .setDepth(1)
         .setDisplaySize(zone.width, zone.height);
-    });
+    }
 
+    // Exit point — use exit tile frame
     const exit = map.exitPoint;
     this.add
-      .image(exit.x + exit.width / 2, exit.y + exit.height / 2, "map1_exit")
+      .image(exit.x + exit.width / 2, exit.y + exit.height / 2, "map1_tiles", map.exitTileFrame)
       .setDepth(1)
       .setDisplaySize(exit.width, exit.height);
   }
@@ -625,7 +640,7 @@ export class GameScene extends Phaser.Scene {
     // Player spawns visual bounds (YELLOW)
     gfx.lineStyle(2, 0xffff00, 0.6);
     for (const spawn of map.playerSpawns) {
-      const size = spawn.visualSize ?? 32;
+      const size = spawn.visualSize ?? 64;
       gfx.strokeRect(spawn.x - size / 2, spawn.y - size / 2, size, size);
     }
 
@@ -768,7 +783,7 @@ export class GameScene extends Phaser.Scene {
   /**
    * Create walking animations from the 4x4 sprite sheet.
    *
-   * Sprite sheet layout (4x4 grid, each frame 256x256):
+   * Sprite sheet layout (4x4 grid, each frame 64x64):
    *   Row 0: walk RIGHT  (frames 0, 1, 2, 3)
    *   Row 1: walk LEFT   (frames 4, 5, 6, 7)
    *   Row 2: walk UP     (frames 8, 9, 10, 11)
@@ -1450,13 +1465,10 @@ export class GameScene extends Phaser.Scene {
 
     // ---- Client-side blocking collision (match server) ----
     // WHY: Without this, the client prediction lets the player walk through
-    // obstacles and enemy spawn zones. When the server corrects, there's a snap.
-    // Blocking rects = obstacles + enemy spawn zones (using HITBOX dimensions, same as server).
+    // obstacles. When the server corrects, there's a snap.
+    // Blocking rects = obstacles ONLY (enemy spawn zones do NOT block movement).
     const PLAYER_RADIUS = this.PLAYER_COLLISION_RADIUS;
-    const blockingRects = [
-      ...this.currentMap.obstacles,
-      ...this.currentMap.enemySpawnZones,
-    ];
+    const blockingRects = [...this.currentMap.obstacles];
     for (const rect of blockingRects) {
       // Compute the hitbox rect (centered, smaller than visual if hitbox is defined)
       const hb = getHitboxRect(

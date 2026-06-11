@@ -1,0 +1,182 @@
+{
+  "id": "map_1_first_hall",
+  "name": "The First Hall",
+  "widthPx": 4320,
+  "heightPx": 4320,
+  "tileSize": 64,
+  "tiles": "generated",
+  "nextMapId": null,
+
+  "spriteSheets": {
+    "tiles": {
+      "path": "assets/maps/map1/MapTilesSpriteSheet64.png",
+      "frameWidth": 64,
+      "frameHeight": 64,
+      "columns": 4,
+      "rows": 2
+    },
+    "obstacles": {
+      "path": "assets/maps/map1/MapObsSpriteSheet128.png",
+      "frameWidth": 128,
+      "frameHeight": 128,
+      "columns": 4,
+      "rows": 4
+    }
+  },
+
+  "tileTypes": {
+    "empty": 0,
+    "playerSpawn": 1,
+    "basicTile1": 2,
+    "basicTile2": 3,
+    "exitTile": 4,
+    "special1": 5,
+    "special2": 6,
+    "special3": 7,
+    "special4": 8
+  },
+
+  "obstacleSpriteFrames": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+  "enemySpawnSpriteFrames": [12, 13, 14, 15],
+  "playerSpawnTileFrame": 0,
+  "exitTileFrame": 3,
+
+  "obstacles": [
+    {
+      "name": "obs_1",
+      "x": 896,
+      "y": 320,
+      "width": 128,
+      "height": 128,
+      "spriteFrame": 0,
+      "hitbox": { "width": 90, "height": 105 }
+    },
+    {
+      "name": "obs_2",
+      "x": 2560,
+      "y": 320,
+      "width": 128,
+      "height": 128,
+      "spriteFrame": 1,
+      "hitbox": { "width": 95, "height": 100 }
+    },
+    {
+      "name": "obs_3",
+      "x": 256,
+      "y": 1344,
+      "width": 128,
+      "height": 128,
+      "spriteFrame": 2,
+      "hitbox": { "width": 90, "height": 110 }
+    },
+    {
+      "name": "obs_4",
+      "x": 3264,
+      "y": 1344,
+      "width": 128,
+      "height": 128,
+      "spriteFrame": 3,
+      "hitbox": { "width": 85, "height": 108 }
+    },
+    {
+      "name": "obs_5",
+      "x": 1280,
+      "y": 2304,
+      "width": 128,
+      "height": 128,
+      "spriteFrame": 4,
+      "hitbox": { "width": 93, "height": 103 }
+    },
+    {
+      "name": "obs_6",
+      "x": 3008,
+      "y": 2688,
+      "width": 128,
+      "height": 128,
+      "spriteFrame": 5,
+      "hitbox": { "width": 88, "height": 105 }
+    },
+    {
+      "name": "obs_7",
+      "x": 448,
+      "y": 3328,
+      "width": 128,
+      "height": 128,
+      "spriteFrame": 6,
+      "hitbox": { "width": 90, "height": 100 }
+    },
+    {
+      "name": "obs_8",
+      "x": 2176,
+      "y": 3648,
+      "width": 128,
+      "height": 128,
+      "spriteFrame": 7,
+      "hitbox": { "width": 95, "height": 108 }
+    }
+  ],
+
+  "playerSpawns": [
+    { "name": "spawn_start", "x": 320, "y": 320, "visualSize": 64 }
+  ],
+
+  "enemySpawnZones": [
+    {
+      "name": "enemy_zone_1",
+      "x": 1728,
+      "y": 640,
+      "width": 256,
+      "height": 256,
+      "spriteFrame": 12,
+      "enemyTypes": ["tyranid"],
+      "maxAlive": 4,
+      "intervalMs": 3000,
+      "hitbox": { "width": 200, "height": 210 }
+    },
+    {
+      "name": "enemy_zone_2",
+      "x": 128,
+      "y": 2048,
+      "width": 256,
+      "height": 256,
+      "spriteFrame": 13,
+      "enemyTypes": ["tyranid", "ork"],
+      "maxAlive": 4,
+      "intervalMs": 3500,
+      "hitbox": { "width": 190, "height": 220 }
+    },
+    {
+      "name": "enemy_zone_3",
+      "x": 2496,
+      "y": 2048,
+      "width": 256,
+      "height": 256,
+      "spriteFrame": 14,
+      "enemyTypes": ["ork", "tyranid"],
+      "maxAlive": 4,
+      "intervalMs": 3000,
+      "hitbox": { "width": 210, "height": 200 }
+    },
+    {
+      "name": "enemy_zone_4",
+      "x": 1280,
+      "y": 3008,
+      "width": 256,
+      "height": 256,
+      "spriteFrame": 15,
+      "enemyTypes": ["tyranid", "ork"],
+      "maxAlive": 5,
+      "intervalMs": 2500,
+      "hitbox": { "width": 200, "height": 216 }
+    }
+  ],
+
+  "exitPoint": {
+    "name": "exit_south",
+    "x": 3456,
+    "y": 4032,
+    "width": 256,
+    "height": 128,
+    "hitbox": { "width": 200, "height": 90 }
+  }
+}

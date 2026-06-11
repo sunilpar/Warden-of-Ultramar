@@ -1,53 +1,43 @@
 /**
- * Client-Side Map Data
- * =====================
+ * Client-Side Map Data (JSON-driven)
+ * ====================================
  * Mirror of the server's map configuration.
- * KEEP IN SYNC with server/src/config/maps.ts!
+ * Map definitions are loaded from shared JSON files.
+ *
+ * KEEP IN SYNC with server/src/config/maps.ts types!
  */
 
-export interface MapRect {
+// ============================================================
+// TYPE DEFINITIONS
+// ============================================================
+
+export interface HitboxOverride {
+  width: number;
+  height: number;
+}
+
+export interface MapObstacle {
   name: string;
   x: number;
   y: number;
   width: number;
   height: number;
-}
-
-export type ObstacleType = "small" | "big";
-
-/**
- * Optional hitbox override.
- * If specified, the collision rect is centered within the visual bounds.
- * If omitted, the full visual width/height is used for collision.
- */
-export interface HitboxOverride {
-  /** Hitbox width in pixels (≤ visual width) */
-  width: number;
-  /** Hitbox height in pixels (≤ visual height) */
-  height: number;
-}
-
-export interface MapObstacle extends MapRect {
-  obstacleType: ObstacleType;
-  /**
-   * Optional hitbox override for collision.
-   * Visual sprite stays at width/height, but collision uses this smaller rect.
-   * The hitbox is automatically centered within the visual bounds.
-   * If omitted, the full visual width/height is used for collision.
-   */
+  /** Frame index in the obstacle sprite sheet */
+  spriteFrame: number;
   hitbox?: HitboxOverride;
 }
 
-export interface EnemySpawnZone extends MapRect {
+export interface EnemySpawnZone {
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Frame index in the obstacle sprite sheet */
+  spriteFrame: number;
   enemyTypes: string[];
   maxAlive: number;
   intervalMs: number;
-  /**
-   * Optional hitbox override for collision.
-   * Visual sprite stays at width/height, but collision uses this smaller rect.
-   * The hitbox is automatically centered within the visual bounds.
-   * If omitted, the full visual width/height is used for collision.
-   */
   hitbox?: HitboxOverride;
 }
 
@@ -55,10 +45,6 @@ export interface PlayerSpawnPoint {
   name: string;
   x: number;
   y: number;
-  /**
-   * Optional visual size override for rendering.
-   * Controls the visual display size of the spawn marker on the client.
-   */
   visualSize?: number;
 }
 
@@ -68,13 +54,15 @@ export interface MapExitPoint {
   y: number;
   width: number;
   height: number;
-  /**
-   * Optional hitbox override for the trigger zone.
-   * Visual sprite stays at width/height, but the trigger uses this smaller rect.
-   * The hitbox is automatically centered within the visual bounds.
-   * If omitted, the full visual width/height is used.
-   */
   hitbox?: HitboxOverride;
+}
+
+export interface SpriteSheetConfig {
+  path: string;
+  frameWidth: number;
+  frameHeight: number;
+  columns: number;
+  rows: number;
 }
 
 export interface MapDefinition {
@@ -88,32 +76,21 @@ export interface MapDefinition {
   playerSpawns: PlayerSpawnPoint[];
   enemySpawnZones: EnemySpawnZone[];
   exitPoint: MapExitPoint;
-  tilesetColumns: number;
-}
-
-function generateFloorTiles(rows: number, cols: number): number[][] {
-  const tiles: number[][] = [];
-  for (let row = 0; row < rows; row++) {
-    const tileRow: number[] = [];
-    for (let col = 0; col < cols; col++) {
-      tileRow.push(((row + col) % 4) + 1);
-    }
-    tiles.push(tileRow);
-  }
-  return tiles;
+  spriteSheets: {
+    tiles: SpriteSheetConfig;
+    obstacles: SpriteSheetConfig;
+  };
+  playerSpawnTileFrame: number;
+  exitTileFrame: number;
+  obstacleSpriteFrames: number[];
+  enemySpawnSpriteFrames: number[];
+  nextMapId: string | null;
 }
 
 // ============================================================
 // HELPER: Compute centered hitbox rect from visual rect + hitbox override
 // ============================================================
 
-/**
- * Given a visual rect (x, y, width, height) and an optional hitbox override,
- * compute the actual collision rect (x, y, width, height).
- *
- * If hitbox is omitted, returns the visual rect as-is.
- * If hitbox is specified, it is centered within the visual bounds.
- */
 export function getHitboxRect(
   x: number,
   y: number,
@@ -124,7 +101,6 @@ export function getHitboxRect(
   if (!hitbox) {
     return { x, y, width, height };
   }
-  // Center the hitbox within the visual bounds
   const offsetX = (width - hitbox.width) / 2;
   const offsetY = (height - hitbox.height) / 2;
   return {
@@ -135,325 +111,101 @@ export function getHitboxRect(
   };
 }
 
-export const MAP_1: MapDefinition = {
+// ============================================================
+// TILE GRID GENERATOR (matches server logic)
+// ============================================================
+
+function generateFloorTiles(rows: number, cols: number): number[][] {
+  const tiles: number[][] = [];
+  for (let row = 0; row < rows; row++) {
+    const tileRow: number[] = [];
+    for (let col = 0; col < cols; col++) {
+      const rand = Math.random();
+      if (rand < 0.45) {
+        tileRow.push(2); // basicTile1
+      } else if (rand < 0.90) {
+        tileRow.push(3); // basicTile2
+      } else {
+        tileRow.push(5 + Math.floor(Math.random() * 4)); // special tiles 5-8
+      }
+    }
+    tiles.push(tileRow);
+  }
+  return tiles;
+}
+
+// ============================================================
+// MAP 1 DEFINITION (hardcoded from map1.json)
+// ============================================================
+// NOTE: The client duplicates this data because it can't import
+// from the server directory at build time. To add a new map,
+// update both server/src/config/maps/map1.json AND this section.
+
+const MAP1_JSON = {
   id: "map_1_first_hall",
   name: "The First Hall",
-  widthPx: 40 * 64, // 2560 pixels
-  heightPx: 50 * 64, // 3200 pixels
+  widthPx: 4320,
+  heightPx: 4320,
   tileSize: 64,
-  tiles: generateFloorTiles(50, 40),
-
-  // Obstacles — visual size + smaller hitbox for collision
-  // 16 total obstacles (6 big + 10 small) spread across the map
-  obstacles: [
-    // ---- BIG OBSTACLES (ruined buildings / churches) ----
-    {
-      name: "big_obstacle_1",
-      x: 768,
-      y: 192,
-      width: 150,
-      height: 180,
-      obstacleType: "big",
-      //broken curch type
-      hitbox: { width: 100, height: 160 },
+  spriteSheets: {
+    tiles: {
+      path: "assets/maps/map1/MapTilesSpriteSheet64.png",
+      frameWidth: 64,
+      frameHeight: 64,
+      columns: 4,
+      rows: 2,
     },
-    {
-      name: "big_obstacle_2",
-      x: 1280,
-      y: 2048,
-      width: 150,
-      height: 180,
-      obstacleType: "big",
-      //broken curch type
-      hitbox: { width: 100, height: 160 },
+    obstacles: {
+      path: "assets/maps/map1/MapObsSpriteSheet128.png",
+      frameWidth: 128,
+      frameHeight: 128,
+      columns: 4,
+      rows: 4,
     },
-    {
-      name: "big_obstacle_3",
-      x: 384,
-      y: 1152,
-      width: 150,
-      height: 180,
-      obstacleType: "big",
-      //broken curch type
-      hitbox: { width: 100, height: 160 },
-    },
-    {
-      name: "big_obstacle_4",
-      x: 1984,
-      y: 1152,
-      width: 150,
-      height: 180,
-      obstacleType: "big",
-      //broken curch type
-      hitbox: { width: 100, height: 160 },
-    },
-    {
-      name: "big_obstacle_5",
-      x: 704,
-      y: 2432,
-      width: 150,
-      height: 180,
-      obstacleType: "big",
-      //broken curch type
-      hitbox: { width: 100, height: 160 },
-    },
-    {
-      name: "big_obstacle_6",
-      x: 1536,
-      y: 640,
-      width: 150,
-      height: 180,
-      obstacleType: "big",
-      //broken curch type
-      hitbox: { width: 100, height: 160 },
-    },
-    // ---- SMALL OBSTACLES (pillars) ----
-    {
-      name: "small_obstacle_1",
-      x: 384,
-      y: 576,
-      width: 66,
-      height: 160,
-      obstacleType: "small",
-      //piller type
-      hitbox: { width: 66, height: 140 },
-    },
-    {
-      name: "small_obstacle_2",
-      x: 1728,
-      y: 2560,
-      width: 66,
-      height: 160,
-      obstacleType: "small",
-      //piller type
-      hitbox: { width: 66, height: 140 },
-    },
-    {
-      name: "small_obstacle_3",
-      x: 1088,
-      y: 832,
-      width: 66,
-      height: 160,
-      obstacleType: "small",
-      //piller type
-      hitbox: { width: 66, height: 140 },
-    },
-    {
-      name: "small_obstacle_4",
-      x: 640,
-      y: 1728,
-      width: 66,
-      height: 160,
-      obstacleType: "small",
-      //piller type
-      hitbox: { width: 66, height: 140 },
-    },
-    {
-      name: "small_obstacle_5",
-      x: 1920,
-      y: 1728,
-      width: 66,
-      height: 160,
-      obstacleType: "small",
-      //piller type
-      hitbox: { width: 66, height: 140 },
-    },
-    {
-      name: "small_obstacle_6",
-      x: 1152,
-      y: 1472,
-      width: 66,
-      height: 160,
-      obstacleType: "small",
-      //piller type
-      hitbox: { width: 66, height: 140 },
-    },
-    {
-      name: "small_obstacle_7",
-      x: 320,
-      y: 2816,
-      width: 66,
-      height: 160,
-      obstacleType: "small",
-      //piller type
-      hitbox: { width: 66, height: 140 },
-    },
-    {
-      name: "small_obstacle_8",
-      x: 2112,
-      y: 768,
-      width: 66,
-      height: 160,
-      obstacleType: "small",
-      //piller type
-      hitbox: { width: 66, height: 140 },
-    },
-    {
-      name: "small_obstacle_9",
-      x: 1408,
-      y: 2880,
-      width: 66,
-      height: 160,
-      obstacleType: "small",
-      //piller type
-      hitbox: { width: 66, height: 140 },
-    },
-    {
-      name: "small_obstacle_10",
-      x: 832,
-      y: 384,
-      width: 66,
-      height: 160,
-      obstacleType: "small",
-      //piller type
-      hitbox: { width: 66, height: 140 },
-    },
-  ],
-
-  // Player spawn points — visualSize for client marker rendering
-  playerSpawns: [
-    { name: "spawn_start", x: 192, y: 192, visualSize: 40 },
-    { name: "checkpoint_mid", x: 1280, y: 1600, visualSize: 40 },
-  ],
-
-  // Enemy spawn zones — visual size + smaller hitbox for collision
-  // 10 total spawn zones spread across the map for dynamic combat
-  enemySpawnZones: [
-    // ---- TOP SECTION (y: 0-640) ----
-    {
-      name: "enemy_zone_top",
-      x: 512,
-      y: 128,
-      width: 150,
-      height: 180,
-      enemyTypes: ["elder"],
-      maxAlive: 3,
-      intervalMs: 3000,
-      //chrch type
-      //broken curch type
-      hitbox: { width: 100, height: 160 },
-    },
-    {
-      name: "enemy_zone_top_right",
-      x: 1920,
-      y: 256,
-      width: 147,
-      height: 130,
-      enemyTypes: ["elder"],
-      maxAlive: 2,
-      intervalMs: 4000,
-      //trynids type
-      hitbox: { width: 128, height: 130 },
-    },
-    {
-      name: "enemy_zone_top_center",
-      x: 1152,
-      y: 320,
-      width: 192,
-      height: 192,
-      enemyTypes: ["elder", "ork"],
-      maxAlive: 3,
-      intervalMs: 3500,
-      //sightly broken curch type
-      hitbox: { width: 148, height: 158 },
-    },
-    // ---- MIDDLE SECTION (y: 640-1920) ----
-    {
-      name: "enemy_zone_mid_left",
-      x: 128,
-      y: 896,
-      width: 192,
-      height: 192,
-      enemyTypes: ["elder"],
-      maxAlive: 3,
-      intervalMs: 3000,
-      //chrch type
-      hitbox: { width: 134, height: 160 },
-    },
-    {
-      name: "enemy_zone_mid_center",
-      x: 1088,
-      y: 1088,
-      width: 147,
-      height: 130,
-      enemyTypes: ["elder"],
-      maxAlive: 2,
-      intervalMs: 3500,
-      //trynids type
-      hitbox: { width: 128, height: 130 },
-    },
-    {
-      name: "enemy_zone_mid_right",
-      x: 2048,
-      y: 1408,
-      width: 192,
-      height: 192,
-      enemyTypes: ["ork", "elder"],
-      maxAlive: 3,
-      intervalMs: 3000,
-      //sightly broken curch type
-      hitbox: { width: 148, height: 158 },
-    },
-    // ---- LOWER SECTION (y: 1920-3200) ----
-    {
-      name: "enemy_zone_bottom",
-      x: 896,
-      y: 2560,
-      width: 192,
-      height: 192,
-      enemyTypes: ["elder", "ork"],
-      maxAlive: 4,
-      intervalMs: 2500,
-      //sightly broken curch type
-      hitbox: { width: 148, height: 158 },
-    },
-    {
-      name: "enemy_zone_bottom_left",
-      x: 256,
-      y: 2240,
-      width: 147,
-      height: 130,
-      enemyTypes: ["elder"],
-      maxAlive: 3,
-      intervalMs: 3000,
-      //trynids type
-      hitbox: { width: 128, height: 130 },
-    },
-    {
-      name: "enemy_zone_bottom_far_left",
-      x: 128,
-      y: 2880,
-      width: 192,
-      height: 192,
-      enemyTypes: ["elder"],
-      maxAlive: 3,
-      intervalMs: 3500,
-      //chrch type
-      hitbox: { width: 134, height: 160 },
-    },
-    {
-      name: "enemy_zone_bottom_right",
-      x: 1792,
-      y: 2880,
-      width: 147,
-      height: 130,
-      enemyTypes: ["ork", "elder"],
-      maxAlive: 3,
-      intervalMs: 2500,
-      //trynids type
-      hitbox: { width: 128, height: 130 },
-    },
-  ],
-
-  // Exit point — visual size + smaller hitbox for trigger zone
-  exitPoint: {
-    name: "exit_bottom_right",
-    x: 2304,
-    y: 3008,
-    width: 200,
-    height: 140,
-    hitbox: { width: 150, height: 80 },
   },
+  playerSpawnTileFrame: 0,
+  exitTileFrame: 3,
+  obstacleSpriteFrames: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+  enemySpawnSpriteFrames: [12, 13, 14, 15],
+  nextMapId: null,
 
-  tilesetColumns: 4,
+  obstacles: [
+    { name: "obs_1", x: 896, y: 320, width: 128, height: 128, spriteFrame: 0, hitbox: { width: 90, height: 105 } },
+    { name: "obs_2", x: 2560, y: 320, width: 128, height: 128, spriteFrame: 1, hitbox: { width: 95, height: 100 } },
+    { name: "obs_3", x: 256, y: 1344, width: 128, height: 128, spriteFrame: 2, hitbox: { width: 90, height: 110 } },
+    { name: "obs_4", x: 3264, y: 1344, width: 128, height: 128, spriteFrame: 3, hitbox: { width: 85, height: 108 } },
+    { name: "obs_5", x: 1280, y: 2304, width: 128, height: 128, spriteFrame: 4, hitbox: { width: 93, height: 103 } },
+    { name: "obs_6", x: 3008, y: 2688, width: 128, height: 128, spriteFrame: 5, hitbox: { width: 88, height: 105 } },
+    { name: "obs_7", x: 448, y: 3328, width: 128, height: 128, spriteFrame: 6, hitbox: { width: 90, height: 100 } },
+    { name: "obs_8", x: 2176, y: 3648, width: 128, height: 128, spriteFrame: 7, hitbox: { width: 95, height: 108 } },
+  ],
+
+  playerSpawns: [
+    { name: "spawn_start", x: 320, y: 320, visualSize: 64 },
+  ],
+
+  enemySpawnZones: [
+    { name: "enemy_zone_1", x: 1728, y: 640, width: 256, height: 256, spriteFrame: 12, enemyTypes: ["tyranid"], maxAlive: 4, intervalMs: 3000, hitbox: { width: 200, height: 210 } },
+    { name: "enemy_zone_2", x: 128, y: 2048, width: 256, height: 256, spriteFrame: 13, enemyTypes: ["tyranid", "ork"], maxAlive: 4, intervalMs: 3500, hitbox: { width: 190, height: 220 } },
+    { name: "enemy_zone_3", x: 2496, y: 2048, width: 256, height: 256, spriteFrame: 14, enemyTypes: ["ork", "tyranid"], maxAlive: 4, intervalMs: 3000, hitbox: { width: 210, height: 200 } },
+    { name: "enemy_zone_4", x: 1280, y: 3008, width: 256, height: 256, spriteFrame: 15, enemyTypes: ["tyranid", "ork"], maxAlive: 5, intervalMs: 2500, hitbox: { width: 200, height: 216 } },
+  ],
+
+  exitPoint: {
+    name: "exit_south",
+    x: 3456,
+    y: 4032,
+    width: 256,
+    height: 128,
+    hitbox: { width: 200, height: 90 },
+  },
 };
+
+// Generate tile grid
+const rows = Math.ceil(MAP1_JSON.heightPx / MAP1_JSON.tileSize);
+const cols = Math.ceil(MAP1_JSON.widthPx / MAP1_JSON.tileSize);
+
+export const MAP_1: MapDefinition = {
+  ...MAP1_JSON,
+  tiles: generateFloorTiles(rows, cols),
+} as MapDefinition;

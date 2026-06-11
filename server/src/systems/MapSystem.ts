@@ -196,9 +196,10 @@ export class MapSystem {
   }
 
   /**
-   * Get ALL blocking rects: obstacles + enemy spawn zones.
-   * Returns PRE-COMPUTED hitbox rects (collision rectangles).
-   * Used by PlayerSystem and client prediction to block player movement.
+   * Get blocking rects for entity movement (obstacles ONLY).
+   * Enemy spawn zones do NOT block player or enemy movement.
+   *
+   * Used by PlayerSystem and EnemyAISystem to prevent walking through walls.
    *
    * IMPORTANT: These are the actual collision rects (with hitbox applied),
    * NOT the visual rects. The visual rects are on the original map data.
@@ -209,10 +210,8 @@ export class MapSystem {
       const hb = getHitboxRect(obs.x, obs.y, obs.width, obs.height, obs.hitbox);
       rects.push({ ...hb, name: obs.name });
     }
-    for (const zone of this.map.enemySpawnZones) {
-      const hb = getHitboxRect(zone.x, zone.y, zone.width, zone.height, zone.hitbox);
-      rects.push({ ...hb, name: zone.name });
-    }
+    // Enemy spawn zones do NOT block movement — they only block bullets.
+    // See checkBulletObstacleCollision() for bullet blocking.
     return rects;
   }
 

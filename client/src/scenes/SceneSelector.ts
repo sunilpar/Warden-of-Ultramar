@@ -1,9 +1,7 @@
 import Phaser from "phaser";
 
 export class SceneSelector extends Phaser.Scene {
-  // Maps button number → scene key
   parts: { [key: string]: { label: string; sceneKey: string } } = {
-    // "1": { label: "Start Game", sceneKey: "part1" },
     "1": { label: "Start Game", sceneKey: "game" },
     "2": { label: "Quit Game", sceneKey: "game" },
   };
@@ -13,10 +11,9 @@ export class SceneSelector extends Phaser.Scene {
   }
 
   preload() {
-    // update menu background color
     this.cameras.main.setBackgroundColor(0x000000);
 
-    // preload demo assets
+    // Character & enemy sprites
     this.load.image("ship_0001", "assets/Dark_Angel_low_res.png");
     this.load.image("map1", "assets/map1up.png");
     this.load.image("game_menu", "assets/menu_final.png");
@@ -28,65 +25,45 @@ export class SceneSelector extends Phaser.Scene {
     this.load.image("hud_bg", "assets/hud.png");
     this.load.image("card_base", "assets/cards/base.png");
     this.load.image("card_locked", "assets/cards/lockedBack.png");
-    this.load.image(
-      "card_skill_boltgun",
-      "assets/cards/skillCards/boltGun.png",
-    );
+    this.load.image("card_skill_boltgun", "assets/cards/skillCards/boltGun.png");
     this.load.image("card_skill_pulse", "assets/cards/skillCards/pulse.png");
-    this.load.image(
-      "card_skill_heal",
-      "assets/cards/skillCards/hpIncrease.png",
-    );
+    this.load.image("card_skill_heal", "assets/cards/skillCards/hpIncrease.png");
 
-    // Map 1 assets
-    this.load.image("map1_tiles", "assets/maps/map1/mapTileBase.png");
-    this.load.image("map1_obstacle_big", "assets/maps/map1/mapObsticalBig.png");
-    this.load.image(
-      "map1_obstacle_small",
-      "assets/maps/map1/smallObstical.png",
-    );
-    this.load.image("map1_spawn_player", "assets/maps/map1/checkpointNew.png");
-    this.load.image(
-      "map1_spawn_enemy1",
-      "assets/maps/map1/enemyspawnPoint1.png",
-    );
-    this.load.image(
-      "map1_spawn_enemy2",
-      "assets/maps/map1/enemyswpanPoint2.png",
-    );
-    this.load.image(
-      "map1_spawn_enemy3",
-      "assets/maps/map1/enemyspawnpoint3.png",
-    );
-    this.load.image("map1_exit", "assets/maps/map1/mapExitpoint.png");
+    // ---- Map 1 sprite sheets (JSON-driven) ----
+    // Tile sprite sheet: 2 rows x 4 cols, 64x64 each
+    // Frame 0 = player spawn, 1-2 = basic tiles, 3 = exit, 4-7 = special
+    this.load.spritesheet("map1_tiles", "assets/maps/map1/MapTilesSpriteSheet64.png", {
+      frameWidth: 64,
+      frameHeight: 64,
+    });
+
+    // Obstacle/enemy spawn sprite sheet: 4 rows x 4 cols, 128x128 each
+    // Frames 0-11 = obstacles, Frames 12-15 = enemy spawn points
+    this.load.spritesheet("map1_obstacles", "assets/maps/map1/MapObsSpriteSheet128.png", {
+      frameWidth: 128,
+      frameHeight: 128,
+    });
 
     // Tyranid sprite sheet: 2 rows x 4 cols, each frame 64x64
-    // Row 0: walk animation (left-facing), Row 1: attack animation (left-facing)
     this.load.spritesheet("tyranid_sheet", "assets/spriteSheetTRI64.png", {
       frameWidth: 64,
       frameHeight: 64,
     });
 
-    // Character sprite sheet (4x4 grid, each frame 256x256)
-    // Row 0: walk right, Row 1: walk left, Row 2: walk up, Row 3: walk down
-    this.load.spritesheet(
-      "character_sheet",
-      "assets/CharacterSpriteSheet64.png",
-      {
-        frameWidth: 64,
-        frameHeight: 64,
-      },
-    );
+    // Character sprite sheet (4x4 grid, each frame 64x64)
+    this.load.spritesheet("character_sheet", "assets/CharacterSpriteSheet64.png", {
+      frameWidth: 64,
+      frameHeight: 64,
+    });
   }
 
   create() {
-    // automatically navigate to hash scene if provided
     if (window.location.hash) {
       this.runScene(window.location.hash.substring(1));
       return;
     }
 
-    const bgVideo = this.add
+    this.add
       .image(this.cameras.main.centerX, this.cameras.main.centerY, "game_menu")
       .setDisplaySize(this.cameras.main.width, this.cameras.main.height);
 
