@@ -63,10 +63,16 @@ interface EnemyEntity {
   enemyType?: string;
 }
 
-interface BulletEntity {
-  sprite: Phaser.GameObjects.Shape; // Arc for enemy, Rectangle for player
+/**
+ * Visual tracker for a single SkillEffect (claw slash, bolter projectile,
+ * pulse ring, heal aura). The visual type depends on effect.skillId.
+ */
+interface SkillEffectEntity {
+  sprite: Phaser.GameObjects.Shape | Phaser.GameObjects.Graphics;
   serverX: number;
   serverY: number;
+  /** Which skill this effect belongs to (for visual choice) */
+  skillId: string;
 }
 
 interface PlayerEntity {
@@ -88,7 +94,8 @@ export class GameScene extends Phaser.Scene {
   currentPlayer!: Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
   playerEntities: { [sessionId: string]: PlayerEntity } = {};
   enemyEntities: { [enemyId: string]: EnemyEntity } = {};
-  bulletEntities: { [bulletId: string]: BulletEntity } = {};
+  /** All active skill effects (claw slashes, bullets, pulse rings, heal auras) */
+  skillEffectEntities: { [effectId: string]: SkillEffectEntity } = {};
 
   // Debug HUD (fixed to screen, top-left)
   debugFPS!: Phaser.GameObjects.Text;
@@ -405,89 +412,136 @@ export class GameScene extends Phaser.Scene {
     });
 
     // ============================================================
-    // BULLET HANDLERS
+    // SKILL EFFECT HANDLERS (unified bullets, claws, pulses, heals)
     // ============================================================
+    //
+    // The server now sends ONE map of SkillEffect objects.
+    // Each effect has a `skillId` that tells us how to draw it.
+    // We switch on skillId to pick the right visual.
+    //
+    // HANDLED VISUALS:
+    //   - "claw"       : instant cone slash (drawn once, fades via tween)
+    //   - "boltershot" : moving projectile (light blue rectangle for player,
+    //                    purple circle for enemy)
+    //   - "pulse"      : expanding ring AoE
+    //   - "heal"       : brief green aura around caster
+    //
+    // For projectile types we keep a tracked sprite and snap it to the
+    // server position each frame. For instant/short-lived types we draw
+    // a one-shot effect and let a tween clean it up.
 
-    callbacks.onAdd("bullets", (bullet, bulletId) => {
-      let sprite: Phaser.GameObjects.Shape;
+    callbacks.onAdd("skillEffects", (effect, effectId) => {
+      switch (effect.skillId) {
+        case "claw": {
+          // One-shot cone slash visual
+          this.showClawSlashEffect(
+            effect.x, effect.y,
+            effect.directionX, effect.directionY,
+            effect.ownerId,
+          );
 
-      if (bullet.isPlayerBullet) {
-        // Player bullet: light blue rectangle (bolter round)
-        sprite = this.add
-          .rectangle(bullet.x, bullet.y, 12, 4, 0x66ccff)
-          .setDepth(5);
-      } else {
-        // Enemy bullet: purple circle (Ork rifle)
-        sprite = this.add.circle(bullet.x, bullet.y, 4, 0x9933ff).setDepth(5);
-      }
-
-      /**
-       * BULLET ROTATION:
-       * The bullet has directionX and directionY from the server.
-       * We calculate the angle and rotate the sprite so it faces
-       * its travel direction. This gives the visual effect of a
-       * long rifle bullet flying through the air.
-       *
-       * For a long bullet sprite, you would replace the circle
-       * with an image and it would naturally look like a rifle round.
-       */
-      const angle = Math.atan2(bullet.directionY, bullet.directionX);
-      sprite.setRotation(angle);
-
-      this.bulletEntities[bulletId] = {
-        sprite,
-        serverX: bullet.x,
-        serverY: bullet.y,
-      };
-
-      // Update position and rotation
-      callbacks.onChange(bullet, () => {
-        if (this.bulletEntities[bulletId]) {
-          this.bulletEntities[bulletId].serverX = bullet.x;
-          this.bulletEntities[bulletId].serverY = bullet.y;
-          // Update rotation if direction changes
-          const angle = Math.atan2(bullet.directionY, bullet.directionX);
-          this.bulletEntities[bulletId].sprite.setRotation(angle);
-        }
-      });
-    });
-
-    callbacks.onRemove("bullets", (bullet, bulletId) => {
-      const bulletEntity = this.bulletEntities[bulletId];
-      if (bulletEntity) {
-        bulletEntity.sprite.destroy();
-        delete this.bulletEntities[bulletId];
-      }
-    });
-
-    // ============================================================
-    // CLAW SLASH HANDLERS
-    // ============================================================
-
-    callbacks.onAdd("clawSlashes", (claw, clawId) => {
-      // Show a red cone slash visual effect
-      this.showClawSlashEffect(claw.x, claw.y, claw.directionX, claw.directionY, claw.ownerId);
-
-      // Trigger tyranid attack animation for the owner
-      const enemyEntity = this.enemyEntities[claw.ownerId];
-      if (enemyEntity && enemyEntity.enemyType === "tyranid") {
-        const sprite = enemyEntity.sprite as Phaser.GameObjects.Sprite;
-        sprite.anims.play("tyranid_attack_left", true);
-        // Set facing direction from claw direction
-        enemyEntity.facing = claw.directionX > 0 ? "right" : "left";
-        sprite.setFlipX(enemyEntity.facing === "right");
-        enemyEntity.isAttacking = true;
-        // Return to walk after attack animation completes (4 frames at 8fps = 500ms)
-        this.time.delayedCall(500, () => {
-          if (enemyEntity) {
-            enemyEntity.isAttacking = false;
+          // Trigger tyranid attack animation for the owner (if it's an enemy)
+          const enemyEntity = this.enemyEntities[effect.ownerId];
+          if (enemyEntity && enemyEntity.enemyType === "tyranid") {
+            const sprite = enemyEntity.sprite as Phaser.GameObjects.Sprite;
+            sprite.anims.play("tyranid_attack_left", true);
+            enemyEntity.facing = effect.directionX > 0 ? "right" : "left";
+            sprite.setFlipX(enemyEntity.facing === "right");
+            enemyEntity.isAttacking = true;
+            this.time.delayedCall(500, () => {
+              if (enemyEntity) enemyEntity.isAttacking = false;
+            });
           }
-        });
+          // No tracked entity — the cone graphics self-destructs via tween.
+          break;
+        }
+
+        case "boltershot": {
+          // Projectile: light blue rectangle for player, purple circle for enemy
+          let sprite: Phaser.GameObjects.Shape;
+          if (effect.isPlayer) {
+            sprite = this.add
+              .rectangle(effect.x, effect.y, 12, 4, 0x66ccff)
+              .setDepth(5);
+          } else {
+            sprite = this.add.circle(effect.x, effect.y, 4, 0x9933ff).setDepth(5);
+          }
+          const angle = Math.atan2(effect.directionY, effect.directionX);
+          sprite.setRotation(angle);
+
+          this.skillEffectEntities[effectId] = {
+            sprite,
+            serverX: effect.x,
+            serverY: effect.y,
+            skillId: effect.skillId,
+          };
+
+          callbacks.onChange(effect, () => {
+            const e = this.skillEffectEntities[effectId];
+            if (e) {
+              e.serverX = effect.x;
+              e.serverY = effect.y;
+              const ang = Math.atan2(effect.directionY, effect.directionX);
+              e.sprite.setRotation(ang);
+            }
+          });
+          break;
+        }
+
+        case "pulse": {
+          // Expanding ring AoE visual (short-lived, tween handles cleanup)
+          const ring = this.add.graphics().setDepth(4);
+          const ringRadius = effect.radius;
+          ring.lineStyle(2, 0x66ffff, 0.9);
+          ring.strokeCircle(effect.x, effect.y, ringRadius);
+          ring.fillStyle(0x66ffff, 0.2);
+          ring.fillCircle(effect.x, effect.y, ringRadius);
+
+          this.tweens.add({
+            targets: ring,
+            alpha: 0,
+            scale: 1.4,
+            duration: 300,
+            ease: "Power2",
+            onComplete: () => ring.destroy(),
+          });
+          // No tracked entity needed
+          break;
+        }
+
+        case "heal": {
+          // Green aura flash around the caster
+          const aura = this.add.graphics().setDepth(4);
+          aura.fillStyle(0x00ff66, 0.4);
+          aura.fillCircle(effect.x, effect.y, 30);
+          aura.lineStyle(2, 0x00ff66, 0.9);
+          aura.strokeCircle(effect.x, effect.y, 30);
+
+          this.tweens.add({
+            targets: aura,
+            alpha: 0,
+            scale: 1.5,
+            duration: 500,
+            ease: "Power2",
+            onComplete: () => aura.destroy(),
+          });
+          break;
+        }
+
+        default:
+          // Unknown skill — nothing to render
+          break;
       }
     });
 
-    callbacks.onRemove("clawSlashes", (claw, clawId) => {
-      // Claw slashes are short-lived, cleanup handled by the visual effect tween
+    callbacks.onRemove("skillEffects", (effect, effectId) => {
+      const e = this.skillEffectEntities[effectId];
+      if (e) {
+        e.sprite.destroy();
+        delete this.skillEffectEntities[effectId];
+      }
+      // Note: instant effects (claw/pulse/heal) have no tracked entity;
+      // their graphics are destroyed by their own tweens.
     });
 
     // Camera bounds set when player joins (see player handler above)
@@ -1314,12 +1368,12 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    // Update bullet server positions (for snapping)
-    this.room.state.bullets.forEach((bullet, bulletId) => {
-      const bulletEntity = this.bulletEntities[bulletId];
-      if (bulletEntity) {
-        bulletEntity.serverX = bullet.x;
-        bulletEntity.serverY = bullet.y;
+    // Update skill-effect server positions (for projectile snapping)
+    this.room.state.skillEffects.forEach((effect, effectId) => {
+      const e = this.skillEffectEntities[effectId];
+      if (e) {
+        e.serverX = effect.x;
+        e.serverY = effect.y;
       }
     });
 
@@ -1549,11 +1603,14 @@ export class GameScene extends Phaser.Scene {
       );
     }
 
-    // ---- Snap bullets (fast-moving, no interpolation needed) ----
-    for (let bulletId in this.bulletEntities) {
-      const bulletEntity = this.bulletEntities[bulletId];
-      bulletEntity.sprite.x = bulletEntity.serverX;
-      bulletEntity.sprite.y = bulletEntity.serverY;
+    // ---- Snap skill-effect projectiles (fast-moving, no interpolation) ----
+    for (let effectId in this.skillEffectEntities) {
+      const e = this.skillEffectEntities[effectId];
+      // Only projectiles need position snapping; instant effects use tweens.
+      if (e.skillId === "boltershot") {
+        e.sprite.x = e.serverX;
+        e.sprite.y = e.serverY;
+      }
     }
   }
 }

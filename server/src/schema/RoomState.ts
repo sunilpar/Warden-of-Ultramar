@@ -13,13 +13,16 @@
  *
  * SERVER AUTHORITY: Only server code modifies this state.
  * Clients NEVER write to this — they only read it for rendering.
+ *
+ * SKILL EFFECTS: All skill visuals (claw slashes, bullets, pulse rings,
+ * heal auras) are now unified into a single `skillEffects` map.
+ * The old separate `bullets` and `clawSlashes` maps are gone.
  */
 
 import { Schema, type, MapSchema } from "@colyseus/schema";
 import { Player } from "./Player";
 import { Enemy } from "./Enemy";
-import { Bullet } from "./Bullet";
-import { ClawSlash } from "./ClawSlash";
+import { SkillEffect } from "./SkillEffect";
 
 export class RoomState extends Schema {
   /** Map/world dimensions (sent so client knows boundaries) */
@@ -32,9 +35,9 @@ export class RoomState extends Schema {
   /** All alive enemies, keyed by enemy ID */
   @type({ map: Enemy }) enemies = new MapSchema<Enemy>();
 
-  /** All active bullets, keyed by bullet ID */
-  @type({ map: Bullet }) bullets = new MapSchema<Bullet>();
-
-  /** All active claw slashes, keyed by slash ID */
-  @type({ map: ClawSlash }) clawSlashes = new MapSchema<ClawSlash>();
+  /**
+   * All active skill effects (bullets, claw slashes, pulse rings, heal auras),
+   * keyed by effect ID. Managed by SkillSystem.
+   */
+  @type({ map: SkillEffect }) skillEffects = new MapSchema<SkillEffect>();
 }

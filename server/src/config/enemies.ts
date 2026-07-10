@@ -1,98 +1,94 @@
 /**
  * Enemy Configuration
  * ===================
- * All enemy tuning values live here.
+ * Base tuning values for each enemy type.
  *
- * WHY: When you want to make the Elder faster or the Ork shoot
- * slower, you only change this file. No digging through AI code.
+ * REFACTOR: attackDamage / attackCooldown / shootingRange no longer live
+ * here — those belong to SKILLS now (see config/skills.ts). The enemy only
+ * defines health, speed, collision, the skills it can trigger, its
+ * spritesheet, and spawn settings.
  *
- * SCALABILITY: To add a new enemy type, just add a new config
- * object here and create a matching AI file in ai/.
+ * To add a new enemy: add a config here + create/extend an AI behavior.
+ * To change how hard the tyranid hits: edit the "claw" skill, not here.
  */
 
-export const ELDER_CONFIG = {
+import { EnemySpriteSheet } from "../schema/Enemy";
+
+export interface EnemyConfig {
   /** Display name */
-  name: "Elder",
+  name: string;
 
   /** Health points */
-  hp: 100,
+  hp: number;
 
   /** Movement speed in pixels per second */
-  speed: 80,
+  speed: number;
 
-  /** Melee attack damage per hit */
-  attackDamage: 15,
+  /** Collision radius */
+  collisionRadius: number;
 
-  /** Milliseconds between melee attacks (cooldown) */
-  attackCooldown: 1000,
+  /** Skill ids this enemy can trigger (looked up in config/skills.ts) */
+  skills: string[];
 
-  /** Collision radius for melee contact */
-  collisionRadius: 20,
+  /** Spritesheet config for the client */
+  spritesheet: EnemySpriteSheet;
 
   /** Spawning settings */
   spawn: {
-    maxAlive: 5,          // max elders at once
-    intervalMs: 5000,     // spawn attempt every 5 seconds
-  },
-};
+    maxAlive: number;
+    intervalMs: number;
+  };
+}
 
-export const TYRANID_CONFIG = {
-  /** Display name */
+/**
+ * Helper to build an EnemySpriteSheet with sensible defaults.
+ */
+function makeSpritesheet(partial: Partial<EnemySpriteSheet>): EnemySpriteSheet {
+  const s = new EnemySpriteSheet();
+  Object.assign(s, partial);
+  return s;
+}
+
+/**
+ * Tyranid — melee enemy using the Claw skill.
+ * Uses a 2x4 spritesheet: row 0 = walk (frames 0-3), row 1 = attack (4-7).
+ */
+export const TYRANID_CONFIG: EnemyConfig = {
   name: "Tyranid",
-
-  /** Health points (same as Elder) */
   hp: 100,
-
-  /** Movement speed in pixels per second */
   speed: 80,
-
-  /** Melee attack damage per hit (same as Elder) */
-  attackDamage: 15,
-
-  /** Milliseconds between melee attacks (same as Elder) */
-  attackCooldown: 1000,
-
-  /** Collision radius for melee contact */
   collisionRadius: 20,
-
-  /** Spawning settings */
+  skills: ["claw"],
+  spritesheet: makeSpritesheet({
+    key: "tyranid_sheet",
+    displayWidth: 48,
+    displayHeight: 48,
+    frameWidth: 64,
+    frameHeight: 64,
+    walkStart: 0,
+    walkEnd: 3,
+    attackStart: 4,
+    attackEnd: 7,
+    walkFrameRate: 8,
+    attackFrameRate: 10,
+  }),
   spawn: {
     maxAlive: 5,
     intervalMs: 5000,
   },
 };
 
-export const ORK_CONFIG = {
-  /** Display name */
-  name: "Ork",
-
-  /** Health points */
-  hp: 80,
-
-  /** Movement speed in pixels per second */
-  speed: 60,
-
-  /** Rifle bullet damage per hit */
-  attackDamage: 20,
-
-  /** Milliseconds between rifle shots (long cooldown = tactical feel) */
-  attackCooldown: 2500,
-
-  /** Distance at which the Ork stops moving and starts shooting */
-  shootingRange: 350,
-
-  /** Collision radius */
-  collisionRadius: 18,
-
-  /** Strafe/reposition speed in pixels per second */
-  strafeSpeed: 50,
-
-  /** How long to strafe after shooting (milliseconds) */
-  strafeDuration: 800,
-
-  /** Spawning settings */
-  spawn: {
-    maxAlive: 3,          // max orks at once
-    intervalMs: 6000,     // spawn attempt every 6 seconds
-  },
+/**
+ * All enemy configs by type id.
+ * Add new enemies here.
+ */
+export const ENEMIES: Record<string, EnemyConfig> = {
+  tyranid: TYRANID_CONFIG,
 };
+
+/** Get an enemy config by type id (throws if missing). */
+export function getEnemyConfig(type: string): EnemyConfig {
+  const cfg = ENEMIES[type];
+  if (!cfg) throw new Error(`Unknown enemy type: "${type}"`);
+  return cfg;
+}
