@@ -35,6 +35,7 @@ import { SpawnSystem } from "../systems/SpawnSystem";
 import { MapSystem } from "../systems/MapSystem";
 import { getDefaultMap } from "../config/maps";
 import { CasterInfo } from "../skills/ISkill";
+import { LootItem } from "../schema/LootItem";
 
 export class GameRoom extends Room {
   // ============================================================
@@ -214,6 +215,64 @@ export class GameRoom extends Room {
         targetDirY: 0,
       };
       this.skillSystem.activate("heal", caster, this.gameTime);
+    },
+
+    // Generic skill activation — works for any card in any slot
+    // Message 5: { skillId: string, x?: number, y?: number }
+    5: (client: Client, data: { skillId: string; x?: number; y?: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+
+      let dirX = 0;
+      let dirY = 0;
+      if (data.x !== undefined && data.y !== undefined) {
+        const dx = data.x - player.x;
+        const dy = data.y - player.y;
+        const length = Math.sqrt(dx * dx + dy * dy);
+        if (length > 0) {
+          dirX = dx / length;
+          dirY = dy / length;
+        }
+      }
+
+      const caster: CasterInfo = {
+        ownerId: client.sessionId,
+        isPlayer: true,
+        x: player.x,
+        y: player.y,
+        targetDirX: dirX,
+        targetDirY: dirY,
+      };
+      this.skillSystem.activate(data.skillId, caster, this.gameTime);
+    },
+
+    // Pickup loot — removes loot from world (client adds to inventory)
+    // Message 6: { lootId: string }
+    6: (client: Client, data: { lootId: string }) => {
+      const loot = this.state.lootItems.get(data.lootId);
+      if (loot) {
+        this.state.lootItems.delete(data.lootId);
+      }
+    },
+
+    // Drop card to ground — creates loot at player position
+    // Message 7: { cardId: string, skillId: string, label: string }
+    7: (client: Client, data: { cardId: string; skillId: string; label: string }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+
+      const loot = new LootItem();
+      loot.x = player.x;
+      loot.y = player.y;
+      loot.itemType = "card";
+      loot.lootId = data.cardId;
+      loot.category = "Card";
+      loot.label = data.label;
+      loot.description = "";
+      loot.textureKey = "card_skill_" + data.skillId;
+
+      const id = `loot_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+      this.state.lootItems.set(id, loot);
     },
   };
 

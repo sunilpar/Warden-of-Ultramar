@@ -40,6 +40,7 @@ import type { GameRoom } from "../../../server/src/rooms/GameRoom";
 // Card system
 import { CardSlotManager, CardHUD } from "../cards/CardHUD";
 import { CardActionContext } from "../cards/CardTypes";
+import { getCard } from "../cards/CardRegistry";
 
 // Map system
 import { MAP_1, getHitboxRect } from "../maps/mapData";
@@ -220,6 +221,37 @@ export class GameScene extends Phaser.Scene {
     this.cardSlotManager.equipCard(1, "pulse"); // Slot 1 = Right Click
     this.cardSlotManager.equipCard(3, "heal"); // Slot 3 = Key "1"
     this.cardHUD = new CardHUD(this, this.cardSlotManager);
+
+    // When a card is dragged out of the HUD, drop it to the ground
+    this.cardHUD.onCardDropToGround = (slotIndex: number) => {
+      const cardId = this.cardSlotManager.unequipCard(slotIndex);
+      if (!cardId) return;
+      const card = getCard(cardId);
+      if (!card) return;
+      this.room.send(7, {
+        cardId: card.id,
+        skillId: card.skillId,
+        label: card.label,
+      });
+    };
+
+    // When a card is equipped via equip-mode (clicking a + slot)
+    this.cardHUD.onCardEquipped = (cardId: string, slotIndex: number) => {
+      // If slot occupied, drop old card to ground
+      const oldCardId = this.cardSlotManager.getCardIdInSlot(slotIndex);
+      if (oldCardId) {
+        const oldCard = getCard(oldCardId);
+        if (oldCard) {
+          this.room.send(7, {
+            cardId: oldCard.id,
+            skillId: oldCard.skillId,
+            label: oldCard.label,
+          });
+        }
+      }
+      // Equip new card in the slot
+      this.cardSlotManager.equipCard(slotIndex, cardId);
+    };
 
     // Card input keys
     this.cardKeys = {
@@ -606,17 +638,14 @@ export class GameScene extends Phaser.Scene {
       const TOOLTIP_W = 200;
       const TOOLTIP_H = 260;
 
-      // Tooltip background panel
       const panel = this.add
         .rectangle(0, 0, TOOLTIP_W, TOOLTIP_H, 0x000000, 0.85)
         .setStrokeStyle(2, 0xefbf68, 1);
 
-      // Card image at top of tooltip
       const cardImg = this.add
         .image(0, -TOOLTIP_H / 2 + 65, loot.textureKey)
         .setDisplaySize(90, 126);
 
-      // Category label (e.g. "Card")
       const categoryText = this.add
         .text(0, -TOOLTIP_H / 2 + 145, loot.category.toUpperCase(), {
           color: "#99ccff",
@@ -627,7 +656,6 @@ export class GameScene extends Phaser.Scene {
         })
         .setOrigin(0.5);
 
-      // Title (the loot name)
       const titleText = this.add
         .text(0, -TOOLTIP_H / 2 + 165, loot.label, {
           color: "#efbf68",
@@ -639,7 +667,6 @@ export class GameScene extends Phaser.Scene {
         })
         .setOrigin(0.5);
 
-      // Description (wrapped)
       const descText = this.add
         .text(0, -TOOLTIP_H / 2 + 200, loot.description, {
           color: "#cccccc",
@@ -652,7 +679,6 @@ export class GameScene extends Phaser.Scene {
         })
         .setOrigin(0.5, 0);
 
-      // Container positioned above the loot, hidden until hover
       const tooltip = this.add
         .container(loot.x, loot.y - TOOLTIP_H / 2 - 20, [
           panel,
@@ -664,10 +690,13 @@ export class GameScene extends Phaser.Scene {
         .setDepth(200)
         .setVisible(false);
 
-      // Make the ground label and bg interactive for hover
+      // Make the ground label and bg interactive for hover + drag
       bg.setInteractive(new Phaser.Geom.Rectangle(-40, -10, 80, 20), Phaser.Geom.Rectangle.Contains);
       label.setInteractive(new Phaser.Geom.Rectangle(-40, -10, 80, 20), Phaser.Geom.Rectangle.Contains);
+      this.input.setDraggable(bg);
+      this.input.setDraggable(label);
 
+      // --- Hover tooltip ---
       const showTooltip = () => {
         tooltip.setVisible(true);
         tooltip.setScale(0.8);
@@ -691,6 +720,79 @@ export class GameScene extends Phaser.Scene {
       label.on("pointerover", showTooltip);
       bg.on("pointerout", hideTooltip);
       label.on("pointerout", hideTooltip);
+
+      // --- Drag to equip ---
+      // State local to this loot entity
+      let lootDragGhost: Phaser.GameObjects.Image | null = null;
+      let isDragging = false;
+
+      const onDragStart = (pointer: Phaser.Input.Pointer) => {
+        if (isDragging) return;
+        isDragging = true;
+
+        // Hide tooltip while dragging
+        tooltip.setVisible(false);
+
+        // Create a card preview that follows the pointer
+        lootDragGhost = this.add
+          .image(pointer.x, pointer.y, loot.textureKey)
+          .setDisplaySize(59, 100)
+          .setScrollFactor(0)
+          .setDepth(300)
+          .setAlpha(0.85);
+
+        // Show + indicators on all HUD slots
+        this.cardHUD.showDropIndicators();
+      };
+
+      const onDrag = (pointer: Phaser.Input.Pointer) => {
+        if (!isDragging || !lootDragGhost) return;
+        lootDragGhost.x = pointer.x;
+        lootDragGhost.y = pointer.y;
+      };
+
+      const onDragEnd = (pointer: Phaser.Input.Pointer) => {
+        if (!isDragging) return;
+        isDragging = false;
+
+        // Clean up ghost
+        if (lootDragGhost) {
+          lootDragGhost.destroy();
+          lootDragGhost = null;
+        }
+
+        // Hide + indicators
+        this.cardHUD.hideDropIndicators();
+
+        // Check if dropped over a HUD slot
+        const slotIdx = this.cardHUD.isPointerOverSlot(pointer.x, pointer.y);
+        if (slotIdx >= 0) {
+          const card = getCard(loot.lootId);
+          if (card) {
+            // Replace whatever is in the slot; drop old card to ground
+            const oldCardId = this.cardSlotManager.placeCardInSlot(slotIdx, loot.lootId);
+            if (oldCardId) {
+              const oldCard = getCard(oldCardId);
+              if (oldCard) {
+                this.room.send(7, {
+                  cardId: oldCard.id,
+                  skillId: oldCard.skillId,
+                  label: oldCard.label,
+                });
+              }
+            }
+            // Pick up the loot from the world
+            this.room.send(6, { lootId });
+          }
+        }
+      };
+
+      bg.on("dragstart", onDragStart);
+      label.on("dragstart", onDragStart);
+      bg.on("drag", onDrag);
+      label.on("drag", onDrag);
+      bg.on("dragend", onDragEnd);
+      label.on("dragend", onDragEnd);
 
       this.lootEntities[lootId] = {
         bg,

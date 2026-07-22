@@ -47,6 +47,11 @@ export interface CardCooldownState {
 export interface CardDefinition {
   /** Unique identifier for this card */
   id: string;
+  /**
+   * The server skill id this card activates (e.g. "boltershot", "pulse",
+   * "heal", "vortex"). Sent to the server via the generic activate message.
+   */
+  skillId: string;
   /** Display label shown on the card */
   label: string;
   /** Phaser texture key for the base surface image */
@@ -59,6 +64,11 @@ export interface CardDefinition {
   cooldownMode?: CooldownMode;
   /** Number of kills required to activate (only for kill-based cooldowns) */
   killsRequired?: number;
+  /**
+   * Whether this card needs the pointer (aim) when activated.
+   * Projectile cards (bolter) set this to true.
+   */
+  requiresPointer?: boolean;
   /**
    * The action to perform when this card is activated.
    * Receives the scene and pointer (for mouse-based cards).

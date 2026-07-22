@@ -9,15 +9,10 @@
  *   3. Add a new card definition below using `registerCard()`
  *   4. Equip it in a slot via `CardSlotManager.equipCard()`
  *
- * CARD IMAGES:
- *   - Base images: `assets/cards/base.png`, `assets/cards/rareBase.png`, etc.
- *   - Skill images: `assets/cards/skillCards/boltGun.png`, etc.
- *
  * SERVER MESSAGE TYPES:
- *   Each card's performAction sends the appropriate message type to the server:
- *   - Message 2: Shoot (bolter) — sends { x, y } mouse world position
- *   - Message 3: Pulse — no data needed
- *   - Add more as you add cards
+ *   - Message 5: Generic skill activation — sends { skillId, x?, y? }
+ *   The server looks up the skillId and activates it. This means any card
+ *   can go in any slot and still work correctly.
  */
 
 import { CardDefinition, CardActionContext } from "./CardTypes";
@@ -57,20 +52,23 @@ export function getAllCardIds(): string[] {
  * Bolt Gun Card
  * -------------
  * Fires a bolter round toward the mouse cursor.
- * Bound to Left Click by default.
- * Server message type: 2, payload: { x, y }
  */
 registerCard({
   id: "bolt_gun",
+  skillId: "boltershot",
   label: "Bolter",
   baseImageKey: "card_base",
   skillImageKey: "card_skill_boltgun",
   cooldownMs: 500,
+  requiresPointer: true,
   performAction: (context: CardActionContext): boolean => {
     const { pointer, room } = context;
     if (!pointer) return false;
-
-    room.send(2, { x: pointer.worldX, y: pointer.worldY });
+    room.send(5, {
+      skillId: "boltershot",
+      x: pointer.worldX,
+      y: pointer.worldY,
+    });
     return true;
   },
 });
@@ -79,16 +77,10 @@ registerCard({
  * Pulse Card
  * ----------
  * Close-combat AoE shockwave expanding from the player.
- * Bound to Right Click by default.
- * Server message type: 3
- *
- * CLIENT-SIDE VFX:
- *   - Skyblue expanding circle with fade
- *   - Slight camera shake for the local player
- *   - Ring effect at max radius
  */
 registerCard({
   id: "pulse",
+  skillId: "pulse",
   label: "Pulse",
   baseImageKey: "card_base",
   skillImageKey: "card_skill_pulse",
@@ -97,15 +89,13 @@ registerCard({
     const { scene, room, player } = context;
     if (!player) return false;
 
-    // Send pulse request to server
-    room.send(3);
+    room.send(5, { skillId: "pulse" });
 
     // ---- Client-side VFX ----
     const px = player.x;
     const py = player.y;
     const maxRadius = 100;
 
-    // Main expanding skyblue circle
     const pulseCircle = scene.add.circle(px, py, 4, 0x66ccff, 0.7).setDepth(6);
     scene.tweens.add({
       targets: pulseCircle,
@@ -117,7 +107,6 @@ registerCard({
       onComplete: () => pulseCircle.destroy(),
     });
 
-    // Outer ring effect
     const ring = scene.add.circle(px, py, 8, 0x66ccff, 0.0)
       .setStrokeStyle(2, 0x99eeff, 0.8)
       .setDepth(6);
@@ -131,8 +120,6 @@ registerCard({
       onComplete: () => ring.destroy(),
     });
 
-    // Subtle screen flash instead of camera shake
-    // (shake can desync physics body when camera has setBounds)
     const flash = scene.add.rectangle(
       scene.cameras.main.worldView.centerX,
       scene.cameras.main.worldView.centerY,
@@ -157,34 +144,27 @@ registerCard({
  * Heal Card
  * ---------
  * Restores 300 HP to the player.
- * Bound to Key "1" by default (slot 3).
- * Cooldown: Kill-based — must kill 6 enemies before reuse.
- * Server message type: 4
- *
- * CLIENT-SIDE VFX:
- *   - Green glow ring expanding from the player
- *   - Green flash overlay
+ * Kill-based cooldown: must kill 6 enemies before reuse.
  */
 registerCard({
   id: "heal",
+  skillId: "heal",
   label: "+300 HP",
   baseImageKey: "card_base",
   skillImageKey: "card_skill_heal",
-  cooldownMs: 0, // Not time-based
+  cooldownMs: 0,
   cooldownMode: "kills",
   killsRequired: 6,
   performAction: (context: CardActionContext): boolean => {
     const { scene, room, player } = context;
     if (!player) return false;
 
-    // Send heal request to server
-    room.send(4);
+    room.send(5, { skillId: "heal" });
 
     // ---- Client-side green heal VFX ----
     const px = player.x;
     const py = player.y;
 
-    // Green expanding circle (heal aura)
     const healCircle = scene.add.circle(px, py, 10, 0x00ff44, 0.6).setDepth(6);
     scene.tweens.add({
       targets: healCircle,
@@ -196,7 +176,6 @@ registerCard({
       onComplete: () => healCircle.destroy(),
     });
 
-    // Green glow ring
     const healRing = scene.add.circle(px, py, 12, 0x00ff44, 0.0)
       .setStrokeStyle(3, 0x44ff88, 0.9)
       .setDepth(6);
@@ -210,7 +189,6 @@ registerCard({
       onComplete: () => healRing.destroy(),
     });
 
-    // Green screen flash
     const flash = scene.add.rectangle(
       scene.cameras.main.worldView.centerX,
       scene.cameras.main.worldView.centerY,
@@ -231,8 +209,49 @@ registerCard({
   },
 });
 
+/**
+ * Vortex Card
+ * -----------
+ * Pulls all nearby enemies toward the player.
+ * Radius is 2x the Pulse skill.
+ */
+registerCard({
+  id: "vortex",
+  skillId: "vortex",
+  label: "Vortex",
+  baseImageKey: "card_base",
+  skillImageKey: "card_skill_vortex",
+  cooldownMs: 8000,
+  performAction: (context: CardActionContext): boolean => {
+    const { scene, room, player } = context;
+    if (!player) return false;
+
+    room.send(5, { skillId: "vortex" });
+
+    // ---- Client-side VFX ----
+    const px = player.x;
+    const py = player.y;
+    const maxRadius = 200;
+
+    const swirl = scene.add.graphics().setDepth(4);
+    swirl.fillStyle(0x9933ff, 0.15);
+    swirl.fillCircle(px, py, maxRadius);
+    swirl.lineStyle(3, 0xcc66ff, 0.8);
+    swirl.strokeCircle(px, py, maxRadius);
+
+    scene.tweens.add({
+      targets: swirl,
+      alpha: 0,
+      scale: 0.7,
+      duration: 1500,
+      ease: "Power2",
+      onComplete: () => swirl.destroy(),
+    });
+
+    return true;
+  },
+});
+
 // ============================================================
 // ADD MORE CARDS HERE
 // ============================================================
-// Copy the registerCard({ ... }) pattern above.
-// Each card needs: id, label, baseImageKey, skillImageKey, cooldownMs, performAction.
