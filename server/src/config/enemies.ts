@@ -13,6 +13,7 @@
  */
 
 import { EnemySpriteSheet } from "../schema/Enemy";
+import type { LootEntry } from "./loot";
 
 export interface EnemyConfig {
   /** Display name */
@@ -33,6 +34,8 @@ export interface EnemyConfig {
   /** Spritesheet config for the client */
   spritesheet: EnemySpriteSheet;
 
+  /** Loot ids this enemy can drop on death (rolled via dropChance) */
+  lootPool: string[];
   /** Spawning settings */
   spawn: {
     maxAlive: number;
@@ -72,6 +75,7 @@ export const TYRANID_CONFIG: EnemyConfig = {
     walkFrameRate: 8,
     attackFrameRate: 10,
   }),
+  lootPool: ["vortex"],
   spawn: {
     maxAlive: 5,
     intervalMs: 5000,

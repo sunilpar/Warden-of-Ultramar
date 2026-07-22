@@ -24,6 +24,8 @@ import { getEnemyConfig } from "../config/enemies";
 import { MapSystem } from "./MapSystem";
 import { SkillSystem } from "./SkillSystem";
 import { CasterInfo } from "../skills/ISkill";
+import { LootItem } from "../schema/LootItem";
+import { getLootEntry } from "../config/loot";
 
 export class EnemyAISystem {
   private state: RoomState;
@@ -32,6 +34,8 @@ export class EnemyAISystem {
 
   /** Runtime state per enemy, keyed by enemy ID */
   private enemyStates: Map<string, EnemyRuntimeState> = new Map();
+  /** Counter for unique loot IDs */
+  private lootCounter: number = 0;
 
   constructor(
     state: RoomState,
@@ -118,8 +122,12 @@ export class EnemyAISystem {
       }
     });
 
-    // Clean up dead enemies
+    // Clean up dead enemies (drop loot first, then remove)
     for (const enemyId of deadEnemyIds) {
+      const enemy = this.state.enemies.get(enemyId);
+      if (enemy) {
+        this.dropLoot(enemy);
+      }
       this.cleanupEnemy(enemyId);
     }
   }
@@ -156,6 +164,35 @@ export class EnemyAISystem {
   registerEnemy(enemyId: string, _type: string): void {
     if (!this.enemyStates.has(enemyId)) {
       this.enemyStates.set(enemyId, new EnemyRuntimeState());
+    }
+  }
+  /**
+   * Roll the enemy's loot pool and drop items at its death position.
+   * Each loot entry is rolled independently against its dropChance.
+   */
+  dropLoot(enemy: Enemy): void {
+    const cfg = getEnemyConfig(enemy.enemyType);
+    if (!cfg.lootPool || cfg.lootPool.length === 0) return;
+
+    for (const lootId of cfg.lootPool) {
+      const entry = getLootEntry(lootId);
+      if (!entry) continue;
+
+      // Roll the drop chance
+      if (Math.random() < entry.dropChance) {
+        const loot = new LootItem();
+        loot.x = enemy.x;
+        loot.y = enemy.y;
+        loot.itemType = entry.type;
+        loot.lootId = entry.lootId;
+        loot.category = entry.category;
+        loot.description = entry.description;
+        loot.label = entry.label;
+        loot.textureKey = entry.textureKey;
+
+        const id = `loot_${this.lootCounter++}`;
+        this.state.lootItems.set(id, loot);
+      }
     }
   }
 

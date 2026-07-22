@@ -75,6 +75,18 @@ interface SkillEffectEntity {
   skillId: string;
 }
 
+/**
+ * Visual tracker for a loot item dropped on the ground.
+ * Shows a label by default; reveals a detailed tooltip on hover.
+ */
+interface LootEntity {
+  /** Small background behind the label text */
+  bg: Phaser.GameObjects.Rectangle;
+  /** The loot label text shown on the ground */
+  label: Phaser.GameObjects.Text;
+  /** Container holding all tooltip objects (card image, texts, panel) */
+  tooltip: Phaser.GameObjects.Container;
+}
 interface PlayerEntity {
   sprite: Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
   hpBarBg: Phaser.GameObjects.Graphics;
@@ -96,6 +108,8 @@ export class GameScene extends Phaser.Scene {
   enemyEntities: { [enemyId: string]: EnemyEntity } = {};
   /** All active skill effects (claw slashes, bullets, pulse rings, heal auras) */
   skillEffectEntities: { [effectId: string]: SkillEffectEntity } = {};
+  /** All loot items on the ground (cards, etc.) */
+  lootEntities: { [lootId: string]: LootEntity } = {};
 
   // Debug HUD (fixed to screen, top-left)
   debugFPS!: Phaser.GameObjects.Text;
@@ -528,6 +542,28 @@ export class GameScene extends Phaser.Scene {
           break;
         }
 
+        case "vortex": {
+          // Swirling purple vortex ring — pulls targets inward
+          const swirl = this.add.graphics().setDepth(4);
+          const vortexRadius = effect.radius || 200;
+          swirl.fillStyle(0x9933ff, 0.15);
+          swirl.fillCircle(effect.x, effect.y, vortexRadius);
+          swirl.lineStyle(3, 0xcc66ff, 0.8);
+          swirl.strokeCircle(effect.x, effect.y, vortexRadius);
+          swirl.lineStyle(2, 0x9933ff, 0.5);
+          swirl.strokeCircle(effect.x, effect.y, vortexRadius * 0.6);
+
+          this.tweens.add({
+            targets: swirl,
+            alpha: 0,
+            scale: 0.7,
+            duration: 1500,
+            ease: "Power2",
+            onComplete: () => swirl.destroy(),
+          });
+          break;
+        }
+
         default:
           // Unknown skill — nothing to render
           break;
@@ -543,8 +579,137 @@ export class GameScene extends Phaser.Scene {
       // Note: instant effects (claw/pulse/heal) have no tracked entity;
       // their graphics are destroyed by their own tweens.
     });
+    // ============================================================
+    // LOOT ITEM HANDLERS
+    // ============================================================
 
-    // Camera bounds set when player joins (see player handler above)
+    callbacks.onAdd("lootItems", (loot, lootId) => {
+      // Ground label background
+      const bg = this.add
+        .rectangle(loot.x, loot.y, 80, 20, 0x000000, 0.6)
+        .setStrokeStyle(1, 0xefbf68, 0.8)
+        .setDepth(3);
+
+      // Label text (the loot title)
+      const label = this.add
+        .text(loot.x, loot.y, loot.label, {
+          color: "#efbf68",
+          fontSize: "12px",
+          fontFamily: "Georgia",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0.5)
+        .setDepth(4);
+
+      // ---- Build the hover tooltip (hidden by default) ----
+      const TOOLTIP_W = 200;
+      const TOOLTIP_H = 260;
+
+      // Tooltip background panel
+      const panel = this.add
+        .rectangle(0, 0, TOOLTIP_W, TOOLTIP_H, 0x000000, 0.85)
+        .setStrokeStyle(2, 0xefbf68, 1);
+
+      // Card image at top of tooltip
+      const cardImg = this.add
+        .image(0, -TOOLTIP_H / 2 + 65, loot.textureKey)
+        .setDisplaySize(90, 126);
+
+      // Category label (e.g. "Card")
+      const categoryText = this.add
+        .text(0, -TOOLTIP_H / 2 + 145, loot.category.toUpperCase(), {
+          color: "#99ccff",
+          fontSize: "10px",
+          fontFamily: "Georgia",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0.5);
+
+      // Title (the loot name)
+      const titleText = this.add
+        .text(0, -TOOLTIP_H / 2 + 165, loot.label, {
+          color: "#efbf68",
+          fontSize: "16px",
+          fontFamily: "Georgia",
+          fontStyle: "bold",
+          stroke: "#000000",
+          strokeThickness: 3,
+        })
+        .setOrigin(0.5);
+
+      // Description (wrapped)
+      const descText = this.add
+        .text(0, -TOOLTIP_H / 2 + 200, loot.description, {
+          color: "#cccccc",
+          fontSize: "10px",
+          fontFamily: "Georgia",
+          wordWrap: { width: TOOLTIP_W - 20 },
+          align: "center",
+          stroke: "#000000",
+          strokeThickness: 1,
+        })
+        .setOrigin(0.5, 0);
+
+      // Container positioned above the loot, hidden until hover
+      const tooltip = this.add
+        .container(loot.x, loot.y - TOOLTIP_H / 2 - 20, [
+          panel,
+          cardImg,
+          categoryText,
+          titleText,
+          descText,
+        ])
+        .setDepth(200)
+        .setVisible(false);
+
+      // Make the ground label and bg interactive for hover
+      bg.setInteractive(new Phaser.Geom.Rectangle(-40, -10, 80, 20), Phaser.Geom.Rectangle.Contains);
+      label.setInteractive(new Phaser.Geom.Rectangle(-40, -10, 80, 20), Phaser.Geom.Rectangle.Contains);
+
+      const showTooltip = () => {
+        tooltip.setVisible(true);
+        tooltip.setScale(0.8);
+        this.tweens.add({
+          targets: tooltip,
+          scale: 1,
+          duration: 150,
+          ease: "Back.easeOut",
+        });
+      };
+      const hideTooltip = () => {
+        this.tweens.add({
+          targets: tooltip,
+          scale: 0.8,
+          duration: 100,
+          onComplete: () => tooltip.setVisible(false),
+        });
+      };
+
+      bg.on("pointerover", showTooltip);
+      label.on("pointerover", showTooltip);
+      bg.on("pointerout", hideTooltip);
+      label.on("pointerout", hideTooltip);
+
+      this.lootEntities[lootId] = {
+        bg,
+        label,
+        tooltip,
+      };
+    });
+
+    callbacks.onRemove("lootItems", (loot, lootId) => {
+      const entity = this.lootEntities[lootId];
+      if (entity) {
+        entity.bg.destroy();
+        entity.label.destroy();
+        entity.tooltip.destroy();
+        delete this.lootEntities[lootId];
+      }
+    });
+
+        // Camera bounds set when player joins (see player handler above)
   }
 
   // ============================================================

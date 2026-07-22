@@ -23,6 +23,7 @@ import { Schema, type, MapSchema } from "@colyseus/schema";
 import { Player } from "./Player";
 import { Enemy } from "./Enemy";
 import { SkillEffect } from "./SkillEffect";
+import { LootItem } from "./LootItem";
 
 export class RoomState extends Schema {
   /** Map/world dimensions (sent so client knows boundaries) */
@@ -40,4 +41,10 @@ export class RoomState extends Schema {
    * keyed by effect ID. Managed by SkillSystem.
    */
   @type({ map: SkillEffect }) skillEffects = new MapSchema<SkillEffect>();
+
+  /**
+   * All loot items dropped on the ground (cards, etc.), keyed by loot ID.
+   * Managed by EnemyAISystem (spawned on enemy death).
+   */
+  @type({ map: LootItem }) lootItems = new MapSchema<LootItem>();
 }

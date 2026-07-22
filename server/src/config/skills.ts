@@ -174,6 +174,31 @@ export const SKILLS: Record<string, SkillConfig> = {
       frameRate: 10,
     },
     cardSprite: "assets/cards/skillCards/hpIncrease.png",
+
+  },
+  /**
+   * Vortex — pulls enemies/players toward the caster.
+   * Radius is 2x the pulse skill (200 vs 100).
+   * Tags: aoe, control.
+   */
+  vortex: {
+    id: "vortex",
+    name: "Vortex",
+    cooldown: 8000,
+    baseDamage: 0,
+    tags: ["aoe", "control"],
+    startFrom: "center",
+    type: "aoe",
+    radius: 200,
+    spritesheet: {
+      key: "vortex_effect",
+      path: "assets/cards/skillCards/vortex.png",
+      frameWidth: 64,
+      frameHeight: 64,
+      effectFrames: { start: 0, end: 3 },
+      frameRate: 12,
+    },
+    cardSprite: "assets/cards/skillCards/vortex.png",
   },
 };
 
