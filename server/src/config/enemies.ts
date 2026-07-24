@@ -75,7 +75,7 @@ export const TYRANID_CONFIG: EnemyConfig = {
     walkFrameRate: 8,
     attackFrameRate: 10,
   }),
-  lootPool: ["vortex"],
+  lootPool: ["claw_card"],
   spawn: {
     maxAlive: 5,
     intervalMs: 5000,
@@ -86,8 +86,64 @@ export const TYRANID_CONFIG: EnemyConfig = {
  * All enemy configs by type id.
  * Add new enemies here.
  */
+  /**
+   * Ork — tough melee fighter with high HP.
+   * Skills: claw. Drops bolter card.
+   */
+const ORK_CONFIG: EnemyConfig = {
+    name: "Ork",
+    hp: 100,
+    speed: 60,
+    collisionRadius: 18,
+    skills: ["boltershot"],
+    spritesheet: makeSpritesheet({
+    key: "tyranid_sheet",
+    displayWidth: 52,
+    displayHeight: 52,
+    frameWidth: 64,
+    frameHeight: 64,
+    walkStart: 0,
+    walkEnd: 3,
+    attackStart: 4,
+    attackEnd: 7,
+    walkFrameRate: 8,
+    attackFrameRate: 10,
+  }),
+    lootPool: ["bolter_card"],
+    spawn: { maxAlive: 3, intervalMs: 8000 },
+  };
+
+  /**
+   * Eldar — agile caster that uses vortex + claw.
+   * Drops blink card (5%) and vortex card (20%).
+   */
+const ELDAR_CONFIG: EnemyConfig = {
+    name: "Eldar",
+    hp: 80,
+    speed: 100,
+    collisionRadius: 14,
+    skills: ["vortex", "claw"],
+    spritesheet: makeSpritesheet({
+    key: "tyranid_sheet",
+    displayWidth: 52,
+    displayHeight: 52,
+    frameWidth: 64,
+    frameHeight: 64,
+    walkStart: 0,
+    walkEnd: 3,
+    attackStart: 4,
+    attackEnd: 7,
+    walkFrameRate: 8,
+    attackFrameRate: 10,
+  }),
+    lootPool: ["blink_card", "vortex"],
+    spawn: { maxAlive: 2, intervalMs: 10000 },
+  };
+
 export const ENEMIES: Record<string, EnemyConfig> = {
   tyranid: TYRANID_CONFIG,
+  ork: ORK_CONFIG,
+  elder: ELDAR_CONFIG,
 };
 
 /** Get an enemy config by type id (throws if missing). */

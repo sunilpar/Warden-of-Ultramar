@@ -30,6 +30,9 @@ export function applyDamage(
 ): void {
   if (!target || target.isDead) return;
 
+  // Invincibility check (blink skill grants temporary invincibility)
+  if (target.isInvincible) return;
+
   // Friendly fire: player-cast effects never damage players
   if (casterIsPlayer && target.killsSinceLastHeal !== undefined) {
     // target is a player (has killsSinceLastHeal) -> skip

@@ -37,6 +37,9 @@ export class EnemyAISystem {
   /** Counter for unique loot IDs */
   private lootCounter: number = 0;
 
+  /** Per-enemy AI-level skill cooldowns: `${enemyId}:${skillId}` -> readyAt (ms) */
+  private aiCooldowns: Map<string, number> = new Map();
+
   constructor(
     state: RoomState,
     mapSystem: MapSystem,
@@ -80,8 +83,14 @@ export class EnemyAISystem {
         currentTime,
       );
 
-      // Trigger the skill via SkillSystem (cooldown checked there)
+      // Trigger the skill via SkillSystem (with AI-level cooldown for enemies)
       if (result.skillId) {
+        // AI cooldown: orks shoot slower (1500ms between shots)
+        const aiCdKey = `${enemyId}:${result.skillId}`;
+        const aiReadyAt = this.aiCooldowns.get(aiCdKey) ?? 0;
+        if (currentTime < aiReadyAt) {
+          // Still on AI cooldown, skip this shot
+        } else {
         const caster: CasterInfo = {
           ownerId: enemyId,
           isPlayer: false,
@@ -90,7 +99,14 @@ export class EnemyAISystem {
           targetDirX: result.targetDirX,
           targetDirY: result.targetDirY,
         };
-        this.skillSystem.activate(result.skillId, caster, currentTime);
+          this.skillSystem.activate(result.skillId, caster, currentTime);
+          // Set AI cooldown based on skill type
+          let aiCd = 0;
+          if (result.skillId === "boltershot") aiCd = 1500;
+          else if (result.skillId === "claw") aiCd = 2000;
+          else if (result.skillId === "vortex") aiCd = 8000;
+          this.aiCooldowns.set(aiCdKey, currentTime + aiCd);
+        }
       }
 
       // Clamp enemy position to map bounds

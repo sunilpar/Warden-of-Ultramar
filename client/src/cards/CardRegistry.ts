@@ -77,6 +77,7 @@ registerCard({
  * Pulse Card
  * ----------
  * Close-combat AoE shockwave expanding from the player.
+ * VFX (electricity arcs) handled by skill effect handler in GameScene.
  */
 registerCard({
   id: "pulse",
@@ -91,47 +92,19 @@ registerCard({
 
     room.send(5, { skillId: "pulse" });
 
-    // ---- Client-side VFX ----
-    const px = player.x;
-    const py = player.y;
-    const maxRadius = 100;
-
-    const pulseCircle = scene.add.circle(px, py, 4, 0x66ccff, 0.7).setDepth(6);
-    scene.tweens.add({
-      targets: pulseCircle,
-      scaleX: maxRadius / 4,
-      scaleY: maxRadius / 4,
-      alpha: 0,
-      duration: 300,
-      ease: "Cubic.easeOut",
-      onComplete: () => pulseCircle.destroy(),
-    });
-
-    const ring = scene.add.circle(px, py, 8, 0x66ccff, 0.0)
-      .setStrokeStyle(2, 0x99eeff, 0.8)
-      .setDepth(6);
-    scene.tweens.add({
-      targets: ring,
-      scaleX: maxRadius / 8,
-      scaleY: maxRadius / 8,
-      alpha: 0,
-      duration: 400,
-      ease: "Cubic.easeOut",
-      onComplete: () => ring.destroy(),
-    });
-
+    // Subtle screen flash
     const flash = scene.add.rectangle(
       scene.cameras.main.worldView.centerX,
       scene.cameras.main.worldView.centerY,
       scene.cameras.main.width,
       scene.cameras.main.height,
       0x66ccff,
-      0.15,
+      0.1,
     ).setScrollFactor(0).setDepth(99);
     scene.tweens.add({
       targets: flash,
       alpha: 0,
-      duration: 150,
+      duration: 200,
       ease: "Quad.easeOut",
       onComplete: () => flash.destroy(),
     });
@@ -145,6 +118,7 @@ registerCard({
  * ---------
  * Restores 300 HP to the player.
  * Kill-based cooldown: must kill 6 enemies before reuse.
+ * VFX (green tint on sprite) handled by skill effect handler in GameScene.
  */
 registerCard({
   id: "heal",
@@ -156,55 +130,12 @@ registerCard({
   cooldownMode: "kills",
   killsRequired: 6,
   performAction: (context: CardActionContext): boolean => {
-    const { scene, room, player } = context;
+    const { room, player } = context;
     if (!player) return false;
 
     room.send(5, { skillId: "heal" });
 
-    // ---- Client-side green heal VFX ----
-    const px = player.x;
-    const py = player.y;
-
-    const healCircle = scene.add.circle(px, py, 10, 0x00ff44, 0.6).setDepth(6);
-    scene.tweens.add({
-      targets: healCircle,
-      scaleX: 8,
-      scaleY: 8,
-      alpha: 0,
-      duration: 500,
-      ease: "Cubic.easeOut",
-      onComplete: () => healCircle.destroy(),
-    });
-
-    const healRing = scene.add.circle(px, py, 12, 0x00ff44, 0.0)
-      .setStrokeStyle(3, 0x44ff88, 0.9)
-      .setDepth(6);
-    scene.tweens.add({
-      targets: healRing,
-      scaleX: 6,
-      scaleY: 6,
-      alpha: 0,
-      duration: 600,
-      ease: "Cubic.easeOut",
-      onComplete: () => healRing.destroy(),
-    });
-
-    const flash = scene.add.rectangle(
-      scene.cameras.main.worldView.centerX,
-      scene.cameras.main.worldView.centerY,
-      scene.cameras.main.width,
-      scene.cameras.main.height,
-      0x00ff44,
-      0.2,
-    ).setScrollFactor(0).setDepth(99);
-    scene.tweens.add({
-      targets: flash,
-      alpha: 0,
-      duration: 300,
-      ease: "Quad.easeOut",
-      onComplete: () => flash.destroy(),
-    });
-
+    // Heal VFX is handled by the skill effect handler (green tint on sprite)
     return true;
   },
 });
@@ -213,7 +144,7 @@ registerCard({
  * Vortex Card
  * -----------
  * Pulls all nearby enemies toward the player.
- * Radius is 2x the Pulse skill.
+ * VFX (hurricane animation) handled by skill effect handler in GameScene.
  */
 registerCard({
   id: "vortex",
@@ -223,31 +154,77 @@ registerCard({
   skillImageKey: "card_skill_vortex",
   cooldownMs: 8000,
   performAction: (context: CardActionContext): boolean => {
-    const { scene, room, player } = context;
+    const { room, player } = context;
     if (!player) return false;
 
     room.send(5, { skillId: "vortex" });
 
-    // ---- Client-side VFX ----
-    const px = player.x;
-    const py = player.y;
-    const maxRadius = 200;
+    // Vortex VFX is handled by the skill effect handler (hurricane animation)
+    return true;
+  },
+});
 
-    const swirl = scene.add.graphics().setDepth(4);
-    swirl.fillStyle(0x9933ff, 0.15);
-    swirl.fillCircle(px, py, maxRadius);
-    swirl.lineStyle(3, 0xcc66ff, 0.8);
-    swirl.strokeCircle(px, py, maxRadius);
+/**
+ * Claw Card
+ * ---------
+ * Melee cone attack. Damages all enemies in a cone in front of the player.
+ * Uses sword.png art.
+ */
+registerCard({
+  id: "claw",
+  skillId: "claw",
+  label: "Claw",
+  baseImageKey: "card_base",
+  skillImageKey: "card_skill_sword",
+  cooldownMs: 800,
+  requiresPointer: true,
+  performAction: (context: CardActionContext): boolean => {
+    const { pointer, room } = context;
+    if (!pointer) return false;
+    room.send(5, {
+      skillId: "claw",
+      x: pointer.worldX,
+      y: pointer.worldY,
+    });
+    return true;
+  },
+});
 
-    scene.tweens.add({
-      targets: swirl,
-      alpha: 0,
-      scale: 0.7,
-      duration: 1500,
-      ease: "Power2",
-      onComplete: () => swirl.destroy(),
+/**
+ * Blink Card
+ * ----------
+ * Teleport 100px in facing direction + brief invincibility.
+ * Uses ice.png art.
+ */
+registerCard({
+  id: "blink",
+  skillId: "blink",
+  label: "Blink",
+  baseImageKey: "card_base",
+  skillImageKey: "card_skill_blink",
+  cooldownMs: 6000,
+  performAction: (context: CardActionContext): boolean => {
+    const { room, player, facingDir } = context;
+    if (!player) return false;
+    // Send target position = player position + facing direction * 100
+    room.send(5, {
+      skillId: "blink",
+      x: player.x + (facingDir?.x ?? 1) * 100,
+      y: player.y + (facingDir?.y ?? 0) * 100,
     });
 
+    // Client-side VFX: brief ice flash at player position
+    const scene = context.scene;
+    const flash = scene.add.circle(player.x, player.y, 15, 0x99ddff, 0.6).setDepth(6);
+    scene.tweens.add({
+      targets: flash,
+      scaleX: 3,
+      scaleY: 3,
+      alpha: 0,
+      duration: 300,
+      ease: "Cubic.easeOut",
+      onComplete: () => flash.destroy(),
+    });
     return true;
   },
 });

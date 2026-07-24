@@ -107,8 +107,18 @@ export class SpawnSystem {
       enemy.skills.push(skillId);
     }
 
-    // Copy spritesheet config (not synced but used by client via the room object)
-    enemy.spritesheet = cfg.spritesheet;
+    // Copy spritesheet config field by field (Colyseus schema requires new instance)
+    enemy.spritesheet.key = cfg.spritesheet.key;
+    enemy.spritesheet.displayWidth = cfg.spritesheet.displayWidth;
+    enemy.spritesheet.displayHeight = cfg.spritesheet.displayHeight;
+    enemy.spritesheet.frameWidth = cfg.spritesheet.frameWidth;
+    enemy.spritesheet.frameHeight = cfg.spritesheet.frameHeight;
+    enemy.spritesheet.walkStart = cfg.spritesheet.walkStart;
+    enemy.spritesheet.walkEnd = cfg.spritesheet.walkEnd;
+    enemy.spritesheet.attackStart = cfg.spritesheet.attackStart;
+    enemy.spritesheet.attackEnd = cfg.spritesheet.attackEnd;
+    enemy.spritesheet.walkFrameRate = cfg.spritesheet.walkFrameRate;
+    enemy.spritesheet.attackFrameRate = cfg.spritesheet.attackFrameRate;
 
     // Spawn OUTSIDE the zone (adjacent to a random edge)
     const margin = cfg.collisionRadius + 2;

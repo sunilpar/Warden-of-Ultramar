@@ -70,4 +70,13 @@ export class Player extends Schema {
    * Synced so client can display kill-based cooldown progress.
    */
   @type("number") killsSinceLastHeal: number = 0;
+
+  /** Whether this player is currently invincible (blink skill) */
+  @type("boolean") isInvincible: boolean = false;
+
+  /**
+   * Game time (ms) when invincibility expires.
+   * NOT synced — server checks this each tick.
+   */
+  invincibleUntil: number = 0;
 }

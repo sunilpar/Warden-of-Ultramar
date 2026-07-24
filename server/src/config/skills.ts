@@ -86,7 +86,7 @@ export const SKILLS: Record<string, SkillConfig> = {
     tags: ["melee", "physical"],
     startFrom: "center",
     type: "melee",
-    range: 50,
+    range: 80,
     halfAngle: Math.PI / 4,
     spritesheet: {
       key: "claw_effect",
@@ -189,7 +189,7 @@ export const SKILLS: Record<string, SkillConfig> = {
     tags: ["aoe", "control"],
     startFrom: "center",
     type: "aoe",
-    radius: 200,
+    radius: 130,
     spritesheet: {
       key: "vortex_effect",
       path: "assets/cards/skillCards/vortex.png",
@@ -199,6 +199,31 @@ export const SKILLS: Record<string, SkillConfig> = {
       frameRate: 12,
     },
     cardSprite: "assets/cards/skillCards/vortex.png",
+  },
+
+  /**
+   * Blink — teleport in the facing direction + temporary invincibility.
+   * Distance: 100px. Invincibility duration: 500ms.
+   * Tags: mobility, utility.
+   */
+  blink: {
+    id: "blink",
+    name: "Blink",
+    cooldown: 6000,
+    baseDamage: 0,
+    tags: ["mobility", "utility"],
+    startFrom: "center",
+    type: "self",
+    spritesheet: {
+      key: "blink_effect",
+      path: "assets/cards/skillCards/ice.png",
+      frameWidth: 64,
+      frameHeight: 64,
+      effectFrames: { start: 0, end: 3 },
+      frameRate: 12,
+    },
+    cardSprite: "assets/cards/skillCards/ice.png",
+    radius: 100, // teleport distance
   },
 };
 

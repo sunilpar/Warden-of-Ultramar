@@ -94,4 +94,13 @@ export class Enemy extends Schema {
 
   /** Whether this enemy has died and should be cleaned up */
   @type("boolean") isDead: boolean = false;
+
+  /** Whether this enemy is currently invincible (blink skill) */
+  @type("boolean") isInvincible: boolean = false;
+
+  /**
+   * Game time (ms) when invincibility expires.
+   * NOT synced — server checks this each tick.
+   */
+  invincibleUntil: number = 0;
 }

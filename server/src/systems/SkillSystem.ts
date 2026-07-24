@@ -30,6 +30,7 @@ import { BolterShotSkill } from "../skills/BolterShotSkill";
 import { PulseSkill } from "../skills/PulseSkill";
 import { HealSkill } from "../skills/HealSkill";
 import { VortexSkill } from "../skills/VortexSkill";
+import { BlinkSkill } from "../skills/BlinkSkill";
 import { GAME_CONFIG } from "../config/game";
 
 export class SkillSystem {
@@ -56,6 +57,7 @@ export class SkillSystem {
     this.register(new PulseSkill());
     this.register(new HealSkill());
     this.register(new VortexSkill());
+    this.register(new BlinkSkill());
   }
 
   private register(skill: ISkill) {

@@ -56,6 +56,33 @@ export const LOOT_ENTRIES: Record<string, LootEntry> = {
     textureKey: "card_skill_vortex",
     dropChance: 0.2, // 20% drop chance
   },
+  claw_card: {
+    type: "card",
+    lootId: "claw",
+    category: "Card",
+    label: "Claw",
+    description: "Melee cone attack. Damages all enemies in front of you.",
+    textureKey: "card_skill_sword",
+    dropChance: 0.2,
+  },
+  bolter_card: {
+    type: "card",
+    lootId: "bolt_gun",
+    category: "Card",
+    label: "Bolter",
+    description: "Fires a bolter round toward the mouse cursor.",
+    textureKey: "card_skill_boltgun",
+    dropChance: 0.2,
+  },
+  blink_card: {
+    type: "card",
+    lootId: "blink",
+    category: "Card",
+    label: "Blink",
+    description: "Teleport 100px in facing direction. Brief invincibility.",
+    textureKey: "card_skill_blink",
+    dropChance: 0.05,
+  },
 };
 
 /** Get a loot entry by id. */

@@ -6,7 +6,6 @@
   "tileSize": 64,
   "tiles": "generated",
   "nextMapId": null,
-
   "spriteSheets": {
     "tiles": {
       "path": "assets/maps/map1/MapTilesSpriteSheet64.png",
@@ -23,7 +22,6 @@
       "rows": 4
     }
   },
-
   "tileTypes": {
     "empty": 0,
     "playerSpawn": 1,
@@ -35,12 +33,28 @@
     "special3": 7,
     "special4": 8
   },
-
-  "obstacleSpriteFrames": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-  "enemySpawnSpriteFrames": [12, 13, 14, 15],
+  "obstacleSpriteFrames": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "enemySpawnSpriteFrames": [
+    12,
+    13,
+    14,
+    15
+  ],
   "playerSpawnTileFrame": 0,
   "exitTileFrame": 3,
-
   "obstacles": [
     {
       "name": "obs_1",
@@ -49,7 +63,10 @@
       "width": 128,
       "height": 128,
       "spriteFrame": 0,
-      "hitbox": { "width": 90, "height": 105 }
+      "hitbox": {
+        "width": 90,
+        "height": 105
+      }
     },
     {
       "name": "obs_2",
@@ -58,7 +75,10 @@
       "width": 128,
       "height": 128,
       "spriteFrame": 1,
-      "hitbox": { "width": 95, "height": 100 }
+      "hitbox": {
+        "width": 95,
+        "height": 100
+      }
     },
     {
       "name": "obs_3",
@@ -67,7 +87,10 @@
       "width": 128,
       "height": 128,
       "spriteFrame": 2,
-      "hitbox": { "width": 90, "height": 110 }
+      "hitbox": {
+        "width": 90,
+        "height": 110
+      }
     },
     {
       "name": "obs_4",
@@ -76,7 +99,10 @@
       "width": 128,
       "height": 128,
       "spriteFrame": 3,
-      "hitbox": { "width": 85, "height": 108 }
+      "hitbox": {
+        "width": 85,
+        "height": 108
+      }
     },
     {
       "name": "obs_5",
@@ -85,7 +111,10 @@
       "width": 128,
       "height": 128,
       "spriteFrame": 4,
-      "hitbox": { "width": 93, "height": 103 }
+      "hitbox": {
+        "width": 93,
+        "height": 103
+      }
     },
     {
       "name": "obs_6",
@@ -94,7 +123,10 @@
       "width": 128,
       "height": 128,
       "spriteFrame": 5,
-      "hitbox": { "width": 88, "height": 105 }
+      "hitbox": {
+        "width": 88,
+        "height": 105
+      }
     },
     {
       "name": "obs_7",
@@ -103,7 +135,10 @@
       "width": 128,
       "height": 128,
       "spriteFrame": 6,
-      "hitbox": { "width": 90, "height": 100 }
+      "hitbox": {
+        "width": 90,
+        "height": 100
+      }
     },
     {
       "name": "obs_8",
@@ -112,14 +147,20 @@
       "width": 128,
       "height": 128,
       "spriteFrame": 7,
-      "hitbox": { "width": 95, "height": 108 }
+      "hitbox": {
+        "width": 95,
+        "height": 108
+      }
     }
   ],
-
   "playerSpawns": [
-    { "name": "spawn_start", "x": 320, "y": 320, "visualSize": 64 }
+    {
+      "name": "spawn_start",
+      "x": 320,
+      "y": 320,
+      "visualSize": 64
+    }
   ],
-
   "enemySpawnZones": [
     {
       "name": "enemy_zone_1",
@@ -128,10 +169,17 @@
       "width": 256,
       "height": 256,
       "spriteFrame": 12,
-      "enemyTypes": ["tyranid"],
+      "enemyTypes": [
+        "tyranid",
+        "ork",
+        "elder"
+      ],
       "maxAlive": 4,
       "intervalMs": 3000,
-      "hitbox": { "width": 200, "height": 210 }
+      "hitbox": {
+        "width": 200,
+        "height": 210
+      }
     },
     {
       "name": "enemy_zone_2",
@@ -140,10 +188,17 @@
       "width": 256,
       "height": 256,
       "spriteFrame": 13,
-      "enemyTypes": ["tyranid"],
+      "enemyTypes": [
+        "tyranid",
+        "ork",
+        "elder"
+      ],
       "maxAlive": 4,
       "intervalMs": 3500,
-      "hitbox": { "width": 190, "height": 220 }
+      "hitbox": {
+        "width": 190,
+        "height": 220
+      }
     },
     {
       "name": "enemy_zone_3",
@@ -152,10 +207,17 @@
       "width": 256,
       "height": 256,
       "spriteFrame": 14,
-      "enemyTypes": ["tyranid"],
+      "enemyTypes": [
+        "tyranid",
+        "ork",
+        "elder"
+      ],
       "maxAlive": 4,
       "intervalMs": 3000,
-      "hitbox": { "width": 210, "height": 200 }
+      "hitbox": {
+        "width": 210,
+        "height": 200
+      }
     },
     {
       "name": "enemy_zone_4",
@@ -164,19 +226,28 @@
       "width": 256,
       "height": 256,
       "spriteFrame": 15,
-      "enemyTypes": ["tyranid"],
+      "enemyTypes": [
+        "tyranid",
+        "ork",
+        "elder"
+      ],
       "maxAlive": 5,
       "intervalMs": 2500,
-      "hitbox": { "width": 200, "height": 216 }
+      "hitbox": {
+        "width": 200,
+        "height": 216
+      }
     }
   ],
-
   "exitPoint": {
     "name": "exit_south",
     "x": 3456,
     "y": 4032,
     "width": 256,
     "height": 128,
-    "hitbox": { "width": 200, "height": 90 }
+    "hitbox": {
+      "width": 200,
+      "height": 90
+    }
   }
 }

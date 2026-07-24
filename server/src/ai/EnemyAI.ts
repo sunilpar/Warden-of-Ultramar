@@ -43,12 +43,20 @@ export function updateEnemyAI(
   state: EnemyRuntimeState,
   findNearestPlayer: (x: number, y: number) => { player: Player; distSq: number } | null,
   dt: number,
-  _currentTime: number,
+  currentTime: number,
 ): { skillId: string | null; targetDirX: number; targetDirY: number } {
   if (enemy.isDead) return { skillId: null, targetDirX: 0, targetDirY: 0 };
 
   // No skills -> can't attack, but still chase
-  const primarySkillId = enemy.skills[0];
+  if (enemy.skills.length === 0) {
+    return { skillId: null, targetDirX: 0, targetDirY: 0 };
+  }
+
+  // Cycle through skills so multi-skill enemies (e.g. elder with vortex+claw)
+  // use all their abilities, not just the first one.
+  // Switch skill every 3 seconds.
+  const skillSlot = Math.floor(currentTime / 3000) % enemy.skills.length;
+  const primarySkillId = enemy.skills[skillSlot];
   if (!primarySkillId) {
     return { skillId: null, targetDirX: 0, targetDirY: 0 };
   }

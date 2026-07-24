@@ -219,7 +219,9 @@ export class GameScene extends Phaser.Scene {
     this.cardSlotManager = new CardSlotManager();
     this.cardSlotManager.equipCard(0, "bolt_gun"); // Slot 0 = Left Click
     this.cardSlotManager.equipCard(1, "pulse"); // Slot 1 = Right Click
+    this.cardSlotManager.equipCard(2, "blink"); // Slot 2 = Space
     this.cardSlotManager.equipCard(3, "heal"); // Slot 3 = Key "1"
+    this.cardSlotManager.equipCard(4, "vortex"); // Slot 4 = Key "2"
     this.cardHUD = new CardHUD(this, this.cardSlotManager);
 
     // When a card is dragged out of the HUD, drop it to the ground
@@ -260,6 +262,12 @@ export class GameScene extends Phaser.Scene {
       two: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.TWO),
     };
 
+    // ESC key to toggle pause menu
+    this.input.keyboard.on("keydown-ESC", () => {
+      this.scene.pause();
+      this.scene.launch("PauseMenu");
+    });
+
     // ---- Card input: Left Click (slot 0) ----
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       if (this.isGameOver || !this.currentPlayer) return;
@@ -277,6 +285,7 @@ export class GameScene extends Phaser.Scene {
         pointer: { worldX: pointer.worldX, worldY: pointer.worldY },
         room: this.room,
         player: this.currentPlayer,
+        facingDir: this.getFacingDir(),
       });
     });
 
@@ -408,9 +417,10 @@ export class GameScene extends Phaser.Scene {
       } else {
         // Ork or Elder: static image
         const spriteKey = enemy.enemyType === "ork" ? "orck" : "elder";
+        const size = enemy.enemyType === "ork" ? 56 : 44;
         sprite = this.add
           .image(enemy.x, enemy.y, spriteKey)
-          .setDisplaySize(32, 32)
+          .setDisplaySize(size, size)
           .setDepth(2);
       }
 
@@ -486,17 +496,33 @@ export class GameScene extends Phaser.Scene {
             effect.ownerId,
           );
 
-          // Trigger tyranid attack animation for the owner (if it's an enemy)
+          // Trigger attack animation/visual for the owner (if it's an enemy)
           const enemyEntity = this.enemyEntities[effect.ownerId];
-          if (enemyEntity && enemyEntity.enemyType === "tyranid") {
-            const sprite = enemyEntity.sprite as Phaser.GameObjects.Sprite;
-            sprite.anims.play("tyranid_attack_left", true);
-            enemyEntity.facing = effect.directionX > 0 ? "right" : "left";
-            sprite.setFlipX(enemyEntity.facing === "right");
-            enemyEntity.isAttacking = true;
-            this.time.delayedCall(500, () => {
-              if (enemyEntity) enemyEntity.isAttacking = false;
-            });
+          if (enemyEntity) {
+            if (enemyEntity.enemyType === "tyranid") {
+              // Tyranid: play attack animation
+              const sprite = enemyEntity.sprite as Phaser.GameObjects.Sprite;
+              sprite.anims.play("tyranid_attack_left", true);
+              enemyEntity.facing = effect.directionX > 0 ? "right" : "left";
+              sprite.setFlipX(enemyEntity.facing === "right");
+              enemyEntity.isAttacking = true;
+              this.time.delayedCall(500, () => {
+                if (enemyEntity) enemyEntity.isAttacking = false;
+              });
+            } else {
+              // Ork/Elder: simple scale punch effect on static image
+              const sprite = enemyEntity.sprite;
+              enemyEntity.facing = effect.directionX > 0 ? "right" : "left";
+              sprite.setFlipX(enemyEntity.facing === "right");
+              this.tweens.add({
+                targets: sprite,
+                scaleX: sprite.scaleX * 1.3,
+                scaleY: sprite.scaleY * 1.3,
+                duration: 100,
+                yoyo: true,
+                ease: "Quad.easeOut",
+              });
+            }
           }
           // No tracked entity — the cone graphics self-destructs via tween.
           break;
@@ -535,63 +561,177 @@ export class GameScene extends Phaser.Scene {
         }
 
         case "pulse": {
-          // Expanding ring AoE visual (short-lived, tween handles cleanup)
-          const ring = this.add.graphics().setDepth(4);
-          const ringRadius = effect.radius;
-          ring.lineStyle(2, 0x66ffff, 0.9);
-          ring.strokeCircle(effect.x, effect.y, ringRadius);
-          ring.fillStyle(0x66ffff, 0.2);
-          ring.fillCircle(effect.x, effect.y, ringRadius);
+          // Electricity arcs from center to edge of circle
+          const pulseRadius = effect.radius || 100;
+          const cx = effect.x;
+          const cy = effect.y;
 
-          this.tweens.add({
-            targets: ring,
-            alpha: 0,
-            scale: 1.4,
-            duration: 300,
-            ease: "Power2",
-            onComplete: () => ring.destroy(),
+          // Static faint circle outline
+          const circle = this.add.graphics().setDepth(3);
+          circle.fillStyle(0x004466, 0.15);
+          circle.fillCircle(cx, cy, pulseRadius);
+          circle.lineStyle(2, 0x66ffff, 0.5);
+          circle.strokeCircle(cx, cy, pulseRadius);
+
+          // Electric arcs (jagged lines from center to edge)
+          const arcs: Phaser.GameObjects.Graphics[] = [];
+          const numArcs = 12;
+          for (let i = 0; i < numArcs; i++) {
+            arcs.push(this.add.graphics().setDepth(5));
+          }
+
+          let pulseTick = 0;
+          const pulseTimer = this.time.addEvent({
+            delay: 40,
+            repeat: -1,
+            callback: () => {
+              pulseTick++;
+              for (let i = 0; i < numArcs; i++) {
+                const arc = arcs[i];
+                arc.clear();
+
+                const baseAngle = (i / numArcs) * Math.PI * 2 + pulseTick * 0.02;
+                // Draw a jagged lightning bolt from center to edge
+                const segments = 6;
+                const points: { x: number; y: number }[] = [];
+                for (let s = 0; s <= segments; s++) {
+                  const t = s / segments;
+                  const r = t * pulseRadius;
+                  // Add jaggedness perpendicular to the bolt direction
+                  const jitter = (Math.random() - 0.5) * 12 * (1 - t);
+                  const px = cx + Math.cos(baseAngle) * r + Math.cos(baseAngle + Math.PI / 2) * jitter;
+                  const py = cy + Math.sin(baseAngle) * r + Math.sin(baseAngle + Math.PI / 2) * jitter;
+                  points.push({ x: px, y: py });
+                }
+
+                arc.lineStyle(2, 0x99eeff, 0.8);
+                arc.beginPath();
+                arc.moveTo(points[0].x, points[0].y);
+                for (let p = 1; p < points.length; p++) {
+                  arc.lineTo(points[p].x, points[p].y);
+                }
+                arc.strokePath();
+
+                // Bright core at center
+                arc.fillStyle(0xccffff, 0.4);
+                arc.fillCircle(cx, cy, 5);
+              }
+            },
           });
-          // No tracked entity needed
+
+          this.time.delayedCall(300, () => {
+            pulseTimer.remove();
+            for (const arc of arcs) arc.destroy();
+            this.tweens.add({
+              targets: circle,
+              alpha: 0,
+              duration: 200,
+              onComplete: () => circle.destroy(),
+            });
+          });
           break;
         }
 
         case "heal": {
-          // Green aura flash around the caster
-          const aura = this.add.graphics().setDepth(4);
-          aura.fillStyle(0x00ff66, 0.4);
-          aura.fillCircle(effect.x, effect.y, 30);
-          aura.lineStyle(2, 0x00ff66, 0.9);
-          aura.strokeCircle(effect.x, effect.y, 30);
-
-          this.tweens.add({
-            targets: aura,
-            alpha: 0,
-            scale: 1.5,
-            duration: 500,
-            ease: "Power2",
-            onComplete: () => aura.destroy(),
-          });
+          // Green tint on the player sprite instead of a circle
+          const ownerEntity = effect.isPlayer
+            ? this.playerEntities[effect.ownerId]
+            : this.enemyEntities[effect.ownerId];
+          if (ownerEntity && ownerEntity.sprite) {
+            const sprite = ownerEntity.sprite;
+            const origTint = sprite.tintTopLeft;
+            sprite.setTintFill(0x00ff44);
+            sprite.alpha = 0.8;
+            this.tweens.add({
+              targets: sprite,
+              alpha: 1,
+              duration: 600,
+              ease: "Quad.easeOut",
+              onComplete: () => {
+                sprite.clearTint();
+                sprite.alpha = 1;
+              },
+            });
+          }
           break;
         }
 
         case "vortex": {
-          // Swirling purple vortex ring — pulls targets inward
-          const swirl = this.add.graphics().setDepth(4);
+          // Hurricane animation: multiple rotating spiral arms in purple
+          // Lasts for the full pull duration (1500ms)
           const vortexRadius = effect.radius || 200;
-          swirl.fillStyle(0x9933ff, 0.15);
-          swirl.fillCircle(effect.x, effect.y, vortexRadius);
-          swirl.lineStyle(3, 0xcc66ff, 0.8);
-          swirl.strokeCircle(effect.x, effect.y, vortexRadius);
-          swirl.lineStyle(2, 0x9933ff, 0.5);
-          swirl.strokeCircle(effect.x, effect.y, vortexRadius * 0.6);
+          const cx = effect.x;
+          const cy = effect.y;
 
+          // Outer faint fill
+          const fill = this.add.graphics().setDepth(3);
+          fill.fillStyle(0x9933ff, 0.08);
+          fill.fillCircle(cx, cy, vortexRadius);
+          fill.lineStyle(2, 0xcc66ff, 0.4);
+          fill.strokeCircle(cx, cy, vortexRadius);
+
+          // Hurricane arms (3 spiral arcs that rotate)
+          const arms: Phaser.GameObjects.Graphics[] = [];
+          for (let a = 0; a < 3; a++) {
+            const arm = this.add.graphics().setDepth(4);
+            arms.push(arm);
+          }
+
+          let vortexTick = 0;
+          const vortexTimer = this.time.addEvent({
+            delay: 30,
+            repeat: -1,
+            callback: () => {
+              vortexTick++;
+              const rotOffset = vortexTick * 0.08;
+
+              for (let a = 0; a < arms.length; a++) {
+                const arm = arms[a];
+                arm.clear();
+                const baseAngle = (a / arms.length) * Math.PI * 2 + rotOffset;
+
+                // Draw a spiral arm from center outward
+                for (let r = 10; r < vortexRadius; r += 4) {
+                  const spiralAngle = baseAngle + (r / vortexRadius) * 2.5;
+                  const px = cx + Math.cos(spiralAngle) * r;
+                  const py = cy + Math.sin(spiralAngle) * r;
+                  const alpha = 0.6 * (1 - r / vortexRadius);
+                  arm.fillStyle(0xcc66ff, alpha);
+                  arm.fillCircle(px, py, 3);
+                }
+              }
+            },
+          });
+
+          // Fade out near the end
+          this.time.delayedCall(1200, () => {
+            fill.alpha = 0.5;
+          });
+
+          this.time.delayedCall(1500, () => {
+            vortexTimer.remove();
+            for (const arm of arms) arm.destroy();
+            this.tweens.add({
+              targets: fill,
+              alpha: 0,
+              duration: 200,
+              onComplete: () => fill.destroy(),
+            });
+          });
+          break;
+        }
+
+        case "blink": {
+          // Ice-blue flash at the blink destination
+          const blinkFlash = this.add.circle(effect.x, effect.y, 20, 0x99ddff, 0.7).setDepth(6);
           this.tweens.add({
-            targets: swirl,
+            targets: blinkFlash,
+            scaleX: 4,
+            scaleY: 4,
             alpha: 0,
-            scale: 0.7,
-            duration: 1500,
-            ease: "Power2",
-            onComplete: () => swirl.destroy(),
+            duration: 300,
+            ease: "Cubic.easeOut",
+            onComplete: () => blinkFlash.destroy(),
           });
           break;
         }
@@ -1144,6 +1284,19 @@ export class GameScene extends Phaser.Scene {
    * Update the local player's animation based on current input direction.
    * Plays walk animation when moving, idle animation when standing still.
    */
+  /**
+   * Get the player's facing direction as a unit vector based on lastDirection.
+   */
+  private getFacingDir(): { x: number; y: number } {
+    switch (this.lastDirection) {
+      case "up": return { x: 0, y: -1 };
+      case "down": return { x: 0, y: 1 };
+      case "left": return { x: -1, y: 0 };
+      case "right": return { x: 1, y: 0 };
+      default: return { x: 1, y: 0 };
+    }
+  }
+
   private updatePlayerAnimation(): void {
     if (!this.currentPlayer) return;
 
@@ -1657,6 +1810,7 @@ export class GameScene extends Phaser.Scene {
         scene: this,
         room: this.room,
         player: this.currentPlayer,
+        facingDir: this.getFacingDir(),
       };
 
       if (Phaser.Input.Keyboard.JustDown(this.cardKeys.space)) {
@@ -1685,6 +1839,12 @@ export class GameScene extends Phaser.Scene {
         );
 
         this.cardHUD.update(ps.hp, ps.maxHp);
+
+      // Apply invincibility opacity to local player sprite
+      const localEntity = this.playerEntities[this.room.sessionId];
+      if (localEntity && localEntity.sprite) {
+        localEntity.sprite.setAlpha(ps.isInvincible ? 0.4 : 1);
+      }
       }
     }
 

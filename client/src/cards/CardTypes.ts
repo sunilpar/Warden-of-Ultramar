@@ -90,6 +90,8 @@ export interface CardActionContext {
   room: any;
   /** The local player's entity */
   player?: any;
+  /** The player's current facing direction as a unit vector */
+  facingDir?: { x: number; y: number };
 }
 
 /**

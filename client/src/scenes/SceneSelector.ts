@@ -29,6 +29,8 @@ export class SceneSelector extends Phaser.Scene {
     this.load.image("card_skill_pulse", "assets/cards/skillCards/pulse.png");
     this.load.image("card_skill_heal", "assets/cards/skillCards/hpIncrease.png");
     this.load.image("card_skill_vortex", "assets/cards/skillCards/vortex.png");
+    this.load.image("card_skill_sword", "assets/cards/skillCards/sword.png");
+    this.load.image("card_skill_blink", "assets/cards/skillCards/ice.png");
 
     // ---- Map 1 sprite sheets (JSON-driven) ----
     // Tile sprite sheet: 2 rows x 4 cols, 64x64 each
