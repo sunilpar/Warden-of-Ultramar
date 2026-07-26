@@ -1840,10 +1840,17 @@ export class GameScene extends Phaser.Scene {
 
         this.cardHUD.update(ps.hp, ps.maxHp);
 
-      // Apply invincibility opacity to local player sprite
+      // Apply invincibility opacity + slow tint to local player sprite
       const localEntity = this.playerEntities[this.room.sessionId];
       if (localEntity && localEntity.sprite) {
         localEntity.sprite.setAlpha(ps.isInvincible ? 0.4 : 1);
+        // Slow effect: blue tint
+        const hasSlow = ps.statusEffects && ps.statusEffects.has("slow");
+        if (hasSlow) {
+          localEntity.sprite.setTint(0x66aaff);
+        } else if (!ps.isInvincible) {
+          localEntity.sprite.clearTint();
+        }
       }
       }
     }

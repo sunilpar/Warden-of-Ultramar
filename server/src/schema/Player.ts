@@ -12,6 +12,7 @@
  */
 
 import { Schema, type } from "@colyseus/schema";
+import { StatusEffect } from "./StatusEffect";
 
 /** Input data sent from client to server */
 export interface InputData {
@@ -73,6 +74,9 @@ export class Player extends Schema {
 
   /** Whether this player is currently invincible (blink skill) */
   @type("boolean") isInvincible: boolean = false;
+
+  /** Active status effects on this player */
+  statusEffects: Map<string, StatusEffect> = new Map();
 
   /**
    * Game time (ms) when invincibility expires.

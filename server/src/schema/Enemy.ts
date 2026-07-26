@@ -17,6 +17,7 @@
  */
 
 import { Schema, type, ArraySchema } from "@colyseus/schema";
+import { StatusEffect } from "./StatusEffect";
 
 /**
  * Spritesheet descriptor for an enemy.
@@ -97,6 +98,9 @@ export class Enemy extends Schema {
 
   /** Whether this enemy is currently invincible (blink skill) */
   @type("boolean") isInvincible: boolean = false;
+
+  /** Active status effects on this enemy */
+  statusEffects: Map<string, StatusEffect> = new Map();
 
   /**
    * Game time (ms) when invincibility expires.

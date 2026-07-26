@@ -19,6 +19,7 @@ import { SkillEffect } from "../schema/SkillEffect";
 import { coneCollision } from "../utils/collision";
 import { ISkill, SkillActivationResult, SkillContext, CasterInfo } from "./ISkill";
 import { applyDamage } from "./damage";
+import { StatusSystem } from "../systems/StatusSystem";
 
 /** How long the slash visual stays in the world (ms). */
 const CLAW_LIFETIME_MS = 500;

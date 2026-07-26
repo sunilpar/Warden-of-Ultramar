@@ -175,6 +175,13 @@ export class SkillSystem {
   // CONTEXT BUILDER
   // ============================================================
 
+  /**
+   * Get a SkillContext for use by other systems (e.g. StatusSystem).
+   */
+  getContext(): SkillContext {
+    return this.buildContext();
+  }
+
   private buildContext(): SkillContext {
     return {
       spawn: (effect: SkillEffect) => this.spawn(effect),

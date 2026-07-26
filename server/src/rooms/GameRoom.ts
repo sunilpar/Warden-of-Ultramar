@@ -31,6 +31,7 @@ import { GAME_CONFIG } from "../config/game";
 import { PlayerSystem } from "../systems/PlayerSystem";
 import { EnemyAISystem } from "../systems/EnemyAISystem";
 import { SkillSystem } from "../systems/SkillSystem";
+import { StatusSystem } from "../systems/StatusSystem";
 import { SpawnSystem } from "../systems/SpawnSystem";
 import { MapSystem } from "../systems/MapSystem";
 import { getDefaultMap } from "../config/maps";
@@ -52,6 +53,7 @@ export class GameRoom extends Room {
   playerSystem!: PlayerSystem;
   enemyAISystem!: EnemyAISystem;
   skillSystem!: SkillSystem;
+  statusSystem!: StatusSystem;
   spawnSystem!: SpawnSystem;
   mapSystem!: MapSystem;
 
@@ -74,6 +76,7 @@ export class GameRoom extends Room {
     // Initialize systems.
     // SkillSystem must be created before EnemyAISystem (enemy AI calls it).
     this.skillSystem = new SkillSystem(this.state, this.mapSystem);
+    this.statusSystem = new StatusSystem(this.state, this.skillSystem.getContext());
     this.playerSystem = new PlayerSystem(this.state, this.mapSystem);
     this.enemyAISystem = new EnemyAISystem(this.state, this.mapSystem, this.skillSystem);
     this.spawnSystem = new SpawnSystem(this.state, this.enemyAISystem, this.mapSystem);
@@ -110,6 +113,7 @@ export class GameRoom extends Room {
 
     // 4. Update all skill effects (move bullets, apply cone/aoe damage, despawn)
     this.skillSystem.update(dt, this.gameTime);
+      this.statusSystem.update(this.gameTime);
 
     // 5. Check exit zone (teleport players who reach the exit)
     this.state.players.forEach((player) => {

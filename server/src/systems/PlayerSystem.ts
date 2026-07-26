@@ -24,6 +24,7 @@ import { Player, InputData } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
 import { inputToMovement, clampToMap } from "../utils/movement";
 import { MapSystem } from "./MapSystem";
+import { StatusSystem } from "./StatusSystem";
 
 export class PlayerSystem {
   /** Reference to the shared game state */
@@ -51,8 +52,16 @@ export class PlayerSystem {
    */
   update(dt: number): void {
     this.state.players.forEach((player) => {
-      // Skip dead players
+      // Skip dead or stunned players
       if (player.isDead) return;
+      if (StatusSystem.isStunned(player)) {
+        player.inputQueue.length = 0;
+        return;
+      }
+
+      // Apply slow effect to speed for this tick
+      const slowMultiplier = StatusSystem.getSlowMultiplier(player);
+      const effectiveSpeed = player.speed * slowMultiplier;
 
       // Process limited inputs per tick
       // WHY: A lagging client might queue 100+ inputs.
@@ -72,7 +81,7 @@ export class PlayerSystem {
           input.right,
           input.up,
           input.down,
-          player.speed,
+          effectiveSpeed,
           dt,
         );
 
