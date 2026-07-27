@@ -47,4 +47,7 @@ export class RoomState extends Schema {
    * Managed by EnemyAISystem (spawned on enemy death).
    */
   @type({ map: LootItem }) lootItems = new MapSchema<LootItem>();
+
+  /** Current map id — clients watch this to trigger map transitions */
+  @type("string") currentMapId: string = "";
 }

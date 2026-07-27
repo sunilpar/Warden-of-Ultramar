@@ -167,7 +167,7 @@ const MAP1_JSON = {
   exitTileFrame: 3,
   obstacleSpriteFrames: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
   enemySpawnSpriteFrames: [12, 13, 14, 15],
-  nextMapId: null,
+  nextMapId: "map_2_orange_hall",
 
   obstacles: [
     { name: "obs_1", x: 896, y: 320, width: 128, height: 128, spriteFrame: 0, hitbox: { width: 90, height: 105 } },
@@ -209,3 +209,92 @@ export const MAP_1: MapDefinition = {
   ...MAP1_JSON,
   tiles: generateFloorTiles(rows, cols),
 } as MapDefinition;
+
+// ============================================================
+// MAP 2 DEFINITION (hardcoded from map2.json)
+// ============================================================
+// Same assets as MAP_1 but with rearranged obstacles.
+// The orange hue is applied at render time in GameScene.
+
+const MAP2_JSON = {
+  id: "map_2_orange_hall",
+  name: "The Orange Hall",
+  widthPx: 4320,
+  heightPx: 4320,
+  tileSize: 64,
+  spriteSheets: {
+    tiles: {
+      path: "assets/maps/map1/MapTilesSpriteSheet64.png",
+      frameWidth: 64,
+      frameHeight: 64,
+      columns: 4,
+      rows: 2,
+    },
+    obstacles: {
+      path: "assets/maps/map1/MapObsSpriteSheet128.png",
+      frameWidth: 128,
+      frameHeight: 128,
+      columns: 4,
+      rows: 4,
+    },
+  },
+  playerSpawnTileFrame: 0,
+  exitTileFrame: 3,
+  obstacleSpriteFrames: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+  enemySpawnSpriteFrames: [12, 13, 14, 15],
+  nextMapId: "map_1_first_hall",
+
+  obstacles: [
+    { name: "obs_1", x: 448, y: 896, width: 128, height: 128, spriteFrame: 3, hitbox: { width: 85, height: 108 } },
+    { name: "obs_2", x: 1216, y: 448, width: 128, height: 128, spriteFrame: 4, hitbox: { width: 93, height: 103 } },
+    { name: "obs_3", x: 2048, y: 896, width: 128, height: 128, spriteFrame: 5, hitbox: { width: 88, height: 105 } },
+    { name: "obs_4", x: 2880, y: 448, width: 128, height: 128, spriteFrame: 6, hitbox: { width: 90, height: 100 } },
+    { name: "obs_5", x: 3712, y: 896, width: 128, height: 128, spriteFrame: 7, hitbox: { width: 95, height: 108 } },
+    { name: "obs_6", x: 832, y: 2496, width: 128, height: 128, spriteFrame: 8, hitbox: { width: 90, height: 105 } },
+    { name: "obs_7", x: 1728, y: 2048, width: 128, height: 128, spriteFrame: 9, hitbox: { width: 85, height: 100 } },
+    { name: "obs_8", x: 2624, y: 2496, width: 128, height: 128, spriteFrame: 10, hitbox: { width: 93, height: 108 } },
+    { name: "obs_9", x: 3520, y: 2048, width: 128, height: 128, spriteFrame: 11, hitbox: { width: 88, height: 105 } },
+    { name: "obs_10", x: 1280, y: 3456, width: 128, height: 128, spriteFrame: 0, hitbox: { width: 90, height: 105 } },
+    { name: "obs_11", x: 2496, y: 3456, width: 128, height: 128, spriteFrame: 1, hitbox: { width: 95, height: 100 } },
+  ],
+
+  playerSpawns: [
+    { name: "spawn_start", x: 320, y: 320, visualSize: 64 },
+  ],
+
+  enemySpawnZones: [
+    { name: "enemy_zone_1", x: 640, y: 1408, width: 256, height: 256, spriteFrame: 13, enemyTypes: ["tyranid", "ork", "elder"], maxAlive: 4, intervalMs: 3000, hitbox: { width: 200, height: 210 } },
+    { name: "enemy_zone_2", x: 2240, y: 1408, width: 256, height: 256, spriteFrame: 14, enemyTypes: ["tyranid", "ork", "elder"], maxAlive: 4, intervalMs: 3500, hitbox: { width: 190, height: 220 } },
+    { name: "enemy_zone_3", x: 384, y: 3008, width: 256, height: 256, spriteFrame: 15, enemyTypes: ["tyranid", "ork", "elder"], maxAlive: 4, intervalMs: 3000, hitbox: { width: 210, height: 200 } },
+    { name: "enemy_zone_4", x: 3072, y: 3008, width: 256, height: 256, spriteFrame: 12, enemyTypes: ["tyranid", "ork", "elder"], maxAlive: 5, intervalMs: 2500, hitbox: { width: 200, height: 216 } },
+  ],
+
+  exitPoint: {
+    name: "exit_north",
+    x: 3456,
+    y: 4032,
+    width: 256,
+    height: 128,
+    hitbox: { width: 200, height: 90 },
+  },
+};
+
+const rows2 = Math.ceil(MAP2_JSON.heightPx / MAP2_JSON.tileSize);
+const cols2 = Math.ceil(MAP2_JSON.widthPx / MAP2_JSON.tileSize);
+
+export const MAP_2: MapDefinition = {
+  ...MAP2_JSON,
+  tiles: generateFloorTiles(rows2, cols2),
+} as MapDefinition;
+
+// ============================================================
+// MAP REGISTRY (client-side lookup by id)
+// ============================================================
+
+const clientMapRegistry: Map<string, MapDefinition> = new Map();
+clientMapRegistry.set(MAP_1.id, MAP_1);
+clientMapRegistry.set(MAP_2.id, MAP_2);
+
+export function getClientMap(id: string): MapDefinition | undefined {
+  return clientMapRegistry.get(id);
+}

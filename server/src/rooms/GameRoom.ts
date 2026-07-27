@@ -34,7 +34,7 @@ import { SkillSystem } from "../systems/SkillSystem";
 import { StatusSystem } from "../systems/StatusSystem";
 import { SpawnSystem } from "../systems/SpawnSystem";
 import { MapSystem } from "../systems/MapSystem";
-import { getDefaultMap } from "../config/maps";
+import { getDefaultMap, getMap } from "../config/maps";
 import { CasterInfo } from "../skills/ISkill";
 import { LootItem } from "../schema/LootItem";
 
@@ -72,6 +72,7 @@ export class GameRoom extends Room {
 
     this.state.mapWidth = this.mapSystem.mapWidth;
     this.state.mapHeight = this.mapSystem.mapHeight;
+    this.state.currentMapId = mapDef.id;
 
     // Initialize systems.
     // SkillSystem must be created before EnemyAISystem (enemy AI calls it).
@@ -115,14 +116,25 @@ export class GameRoom extends Room {
     this.skillSystem.update(dt, this.gameTime);
       this.statusSystem.update(this.gameTime);
 
-    // 5. Check exit zone (teleport players who reach the exit)
+    // 5. Check exit zone (map transition)
     this.state.players.forEach((player) => {
       if (player.isDead) return;
       if (this.mapSystem.isInExitZone(player.x, player.y)) {
-        const spawn = this.mapSystem.getInitialSpawnPoint();
-        player.x = spawn.x;
-        player.y = spawn.y;
-        console.log(`Player reached exit, teleported to spawn`);
+        const currentMap = this.mapSystem.getMap();
+        const nextMapId = currentMap.nextMapId;
+        if (nextMapId) {
+          const nextMap = getMap(nextMapId);
+          if (nextMap) {
+            this.mapSystem.setMap(nextMap);
+            this.state.currentMapId = nextMap.id;
+            this.state.enemies.clear();
+            this.state.skillEffects.clear();
+            const spawn = this.mapSystem.getInitialSpawnPoint();
+            player.x = spawn.x;
+            player.y = spawn.y;
+            console.log(`Player reached exit, transitioning to map: ${nextMap.name}`);
+          }
+        }
       }
     });
   }

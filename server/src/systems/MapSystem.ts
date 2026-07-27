@@ -69,6 +69,13 @@ export class MapSystem {
   }
 
   /**
+   * Swap to a new map at runtime (for map transitions).
+   */
+  setMap(map: MapDefinition): void {
+    this.map = map;
+  }
+
+  /**
    * Get the map width in pixels.
    */
   get mapWidth(): number {

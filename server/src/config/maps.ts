@@ -29,6 +29,10 @@ const map1Data = JSON.parse(
   fs.readFileSync(path.join(__dirname, "maps", "map1.json"), "utf-8")
 );
 
+const map2Data = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "maps", "map2.json"), "utf-8")
+);
+
 // ============================================================
 // TYPE DEFINITIONS
 // ============================================================
@@ -170,6 +174,7 @@ export function getDefaultMap(): MapDefinition | undefined {
 
 // Register all maps (load from JSON)
 registerMap(loadMapFromJSON(map1Data));
+registerMap(loadMapFromJSON(map2Data));
 
 // ============================================================
 // HELPER FUNCTIONS

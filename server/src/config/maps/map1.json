@@ -5,7 +5,7 @@
   "heightPx": 4320,
   "tileSize": 64,
   "tiles": "generated",
-  "nextMapId": null,
+  "nextMapId": "map_2_orange_hall",
   "spriteSheets": {
     "tiles": {
       "path": "assets/maps/map1/MapTilesSpriteSheet64.png",

@@ -43,7 +43,7 @@ import { CardActionContext } from "../cards/CardTypes";
 import { getCard } from "../cards/CardRegistry";
 
 // Map system
-import { MAP_1, getHitboxRect } from "../maps/mapData";
+import { MAP_1, getClientMap, getHitboxRect } from "../maps/mapData";
 
 // ============================================================
 // Entity interfaces â€” track visual objects for each entity
@@ -138,6 +138,10 @@ export class GameScene extends Phaser.Scene {
 
   // Map rendering
   private currentMap = MAP_1;
+  /** All map-rendered game objects (tiles, obstacles, spawns, exit) — destroyed on map transition */
+  private mapObjects: Phaser.GameObjects.GameObject[] = [];
+  /** Floor canvas texture key (regenerated on map transition) */
+  private mapFloorKey = "map_floor_canvas";
   private debugHitboxes: Phaser.GameObjects.Graphics | null = null;
 
   // Card input keys (space, 1, 2)
@@ -296,6 +300,14 @@ export class GameScene extends Phaser.Scene {
     await this.connect();
 
     const callbacks = Callbacks.get(this.room);
+
+    // ============================================================
+    // MAP TRANSITION WATCHER
+    // ============================================================
+    // When the server changes currentMapId, swap the rendered map.
+    callbacks.listen("currentMapId", (currentValue: string) => {
+      this.transitionToMap(currentValue);
+    });
 
     // ============================================================
     // PLAYER HANDLERS
@@ -978,8 +990,13 @@ export class GameScene extends Phaser.Scene {
     const cols = tiles[0].length;
     const ss = map.spriteSheets.tiles; // sprite sheet config
 
+    // Remove old floor canvas texture if it exists (on map transition)
+    if (this.textures.exists(this.mapFloorKey)) {
+      this.textures.remove(this.mapFloorKey);
+    }
+
     const canvas = this.textures.createCanvas(
-      "map_floor_canvas",
+      this.mapFloorKey,
       cols * tileSize,
       rows * tileSize,
     );
@@ -1021,7 +1038,13 @@ export class GameScene extends Phaser.Scene {
     }
     canvas.refresh();
 
-    this.add.image(0, 0, "map_floor_canvas").setOrigin(0, 0).setDepth(0);
+    const floorImg = this.add.image(0, 0, this.mapFloorKey).setOrigin(0, 0).setDepth(0);
+    this.mapObjects.push(floorImg);
+
+    // Apply orange hue tint for map 2
+    if (map.id === "map_2_orange_hall") {
+      floorImg.setTint(0xff9944);
+    }
   }
 
   /**
@@ -1037,38 +1060,97 @@ export class GameScene extends Phaser.Scene {
    */
   private renderMapEntities(): void {
     const map = this.currentMap;
+    const isOrange = map.id === "map_2_orange_hall";
+    const tint = isOrange ? 0xff9944 : 0xffffff;
 
-    // Obstacles â€” use spriteFrame from map data
+    // Obstacles — use spriteFrame from map data
     for (const obs of map.obstacles) {
-      this.add
+      const img = this.add
         .image(obs.x + obs.width / 2, obs.y + obs.height / 2, "map1_obstacles", obs.spriteFrame)
         .setDepth(1)
         .setDisplaySize(obs.width, obs.height);
+      if (isOrange) img.setTint(tint);
+      this.mapObjects.push(img);
     }
 
-    // Player spawns â€” use player spawn tile frame
+    // Player spawns — use player spawn tile frame
     for (const spawn of map.playerSpawns) {
       const size = spawn.visualSize ?? 64;
-      this.add
+      const img = this.add
         .image(spawn.x, spawn.y, "map1_tiles", map.playerSpawnTileFrame)
         .setDepth(1)
         .setDisplaySize(size, size);
+      if (isOrange) img.setTint(tint);
+      this.mapObjects.push(img);
     }
 
-    // Enemy spawn zones â€” use spriteFrame from map data
+    // Enemy spawn zones — use spriteFrame from map data
     for (const zone of map.enemySpawnZones) {
-      this.add
+      const img = this.add
         .image(zone.x + zone.width / 2, zone.y + zone.height / 2, "map1_obstacles", zone.spriteFrame)
         .setDepth(1)
         .setDisplaySize(zone.width, zone.height);
+      if (isOrange) img.setTint(tint);
+      this.mapObjects.push(img);
     }
 
-    // Exit point â€” use exit tile frame
+    // Exit point — use exit tile frame
     const exit = map.exitPoint;
-    this.add
+    const exitImg = this.add
       .image(exit.x + exit.width / 2, exit.y + exit.height / 2, "map1_tiles", map.exitTileFrame)
       .setDepth(1)
       .setDisplaySize(exit.width, exit.height);
+    if (isOrange) exitImg.setTint(tint);
+    this.mapObjects.push(exitImg);
+  }
+
+  /**
+   * Transition to a new map when the server changes currentMapId.
+   * Destroys old map objects, swaps currentMap, re-renders tiles/entities,
+   * and updates camera bounds.
+   */
+  private transitionToMap(mapId: string): void {
+    const newMap = getClientMap(mapId);
+    if (!newMap) {
+      console.warn(`Unknown map id: ${mapId}, cannot transition`);
+      return;
+    }
+
+    // Skip if already on this map
+    if (this.currentMap.id === mapId) return;
+
+    console.log(`Transitioning from "${this.currentMap.name}" to "${newMap.name}"`);
+
+    // 1. Destroy all old map objects
+    for (const obj of this.mapObjects) {
+      obj.destroy();
+    }
+    this.mapObjects = [];
+
+    // 2. Swap the current map reference
+    this.currentMap = newMap;
+
+    // 3. Re-render the new map (tiles + entities, with orange hue if map2)
+    this.renderMapTiles();
+    this.renderMapEntities();
+
+    // 4. Update camera bounds for the new map
+    this.cameras.main.setBounds(
+      0,
+      0,
+      this.currentMap.widthPx,
+      this.currentMap.heightPx,
+    );
+
+    // 5. Re-render debug hitboxes for the new map layout
+    if (this.debugHitboxes) {
+      this.debugHitboxes.destroy();
+      this.debugHitboxes = null;
+    }
+    this.renderDebugHitboxes();
+    if (this.debugHitboxes) {
+      this.debugHitboxes.setVisible(this.showHitboxes);
+    }
   }
 
   /**
