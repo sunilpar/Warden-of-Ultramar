@@ -1,32 +1,31 @@
 /**
- * Game Room — The Main Multiplayer Room
- * ======================================
- * This is the Colyseus room that manages the game session.
+ * Game Room — Per-Player Maps + Modifiers
+ * =======================================
  *
- * ARCHITECTURE OVERVIEW:
- *   The room is a thin orchestrator. It:
- *     1. Receives client connections/disconnections
- *     2. Receives client inputs
- *     3. Runs the fixed timestep simulation loop
- *     4. Delegates all logic to systems
+ * PER-PLAYER MAPS:
+ *   Each player has their OWN map instance (MapSystem is per-player).
+ *   When a player reaches the exit zone:
+ *     a. isChoosingMod=true (player frozen)
+ *     b. 2 random mods sent in pendingModChoices
+ *     c. Client shows ModifierSelect popup
+ *     d. Player picks one (message 8)
+ *     e. Mod added to activeMods, map swapped, old enemies purged
+ *     f. isChoosingMod=false
+ *   Other players are completely unaffected.
  *
- * REFACTOR — SKILL SYSTEM:
- *   Player abilities (shoot/pulse/heal) and enemy attacks (claw) now all
- *   flow through ONE SkillSystem. The room no longer creates Bullet or
- *   ClawSlash objects directly. It just calls skillSystem.activate() with
- *   a CasterInfo and the skill handles everything (effects, damage, memory).
- *
- * TICK ORDER:
- *   1. SpawnSystem    — create new enemies
- *   2. PlayerSystem   — process player inputs & move players
- *   3. EnemyAISystem  — update enemy AI, move enemies, trigger skills
- *   4. SkillSystem    — update all active skill effects (move/damage/despawn)
- *   5. MapSystem      — check exit zones
+ * MESSAGE TYPES:
+ *   0: Movement input
+ *   1: Respawn request
+ *   5: Generic skill activation
+ *   6: Pickup loot
+ *   7: Drop card to ground
+ *   8: Choose a modifier (map transition)
  */
 
 import { Room, Client } from "colyseus";
 import { RoomState } from "../schema/RoomState";
 import { Player, InputData } from "../schema/Player";
+import { ModifierData } from "../schema/ModifierData";
 import { GAME_CONFIG } from "../config/game";
 import { PlayerSystem } from "../systems/PlayerSystem";
 import { EnemyAISystem } from "../systems/EnemyAISystem";
@@ -37,18 +36,11 @@ import { MapSystem } from "../systems/MapSystem";
 import { getDefaultMap, getMap } from "../config/maps";
 import { CasterInfo } from "../skills/ISkill";
 import { LootItem } from "../schema/LootItem";
+import { pickRandomMods } from "../config/modifiers";
 
 export class GameRoom extends Room {
-  // ============================================================
-  // STATE & CONFIG
-  // ============================================================
-
   state = new RoomState();
   fixedTimeStep = GAME_CONFIG.FIXED_TIME_STEP_MS;
-
-  // ============================================================
-  // SYSTEMS (initialized in onCreate)
-  // ============================================================
 
   playerSystem!: PlayerSystem;
   enemyAISystem!: EnemyAISystem;
@@ -57,32 +49,22 @@ export class GameRoom extends Room {
   spawnSystem!: SpawnSystem;
   mapSystem!: MapSystem;
 
-  /** Running game time accumulator in milliseconds */
   gameTime = 0;
 
-  // ============================================================
-  // LIFECYCLE
-  // ============================================================
-
-  onCreate(options: any) {
-    // ---- Load the map ----
+  onCreate(_options: any) {
     const mapDef = getDefaultMap();
     if (!mapDef) throw new Error("No maps registered!");
     this.mapSystem = new MapSystem(mapDef);
-
-    this.state.mapWidth = this.mapSystem.mapWidth;
-    this.state.mapHeight = this.mapSystem.mapHeight;
+    this.state.mapWidth = mapDef.widthPx;
+    this.state.mapHeight = mapDef.heightPx;
     this.state.currentMapId = mapDef.id;
 
-    // Initialize systems.
-    // SkillSystem must be created before EnemyAISystem (enemy AI calls it).
     this.skillSystem = new SkillSystem(this.state, this.mapSystem);
     this.statusSystem = new StatusSystem(this.state, this.skillSystem.getContext());
     this.playerSystem = new PlayerSystem(this.state, this.mapSystem);
     this.enemyAISystem = new EnemyAISystem(this.state, this.mapSystem, this.skillSystem);
     this.spawnSystem = new SpawnSystem(this.state, this.enemyAISystem, this.mapSystem);
 
-    // Start the fixed timestep simulation
     let elapsedTime = 0;
     this.setSimulationInterval((deltaTime) => {
       elapsedTime += deltaTime;
@@ -95,149 +77,130 @@ export class GameRoom extends Room {
     console.log("GameRoom created with map:", mapDef.name);
   }
 
-  /**
-   * The main simulation tick. Runs 60 times per second.
-   * All game logic is delegated to systems.
-   */
   fixedTick(timeStepMs: number) {
     const dt = timeStepMs / 1000;
     this.gameTime += timeStepMs;
 
-    // 1. Spawn new enemies
     this.spawnSystem.update(timeStepMs, this.gameTime);
-
-    // 2. Process player inputs & move players
     this.playerSystem.update(dt);
-
-    // 3. Update enemy AI (movement + triggering skills)
     this.enemyAISystem.update(dt, this.gameTime);
-
-    // 4. Update all skill effects (move bullets, apply cone/aoe damage, despawn)
     this.skillSystem.update(dt, this.gameTime);
-      this.statusSystem.update(this.gameTime);
+    this.statusSystem.update(this.gameTime);
+    this.checkExitZones();
+  }
 
-    // 5. Check exit zone (map transition)
-    this.state.players.forEach((player) => {
-      if (player.isDead) return;
-      if (this.mapSystem.isInExitZone(player.x, player.y)) {
-        const currentMap = this.mapSystem.getMap();
-        const nextMapId = currentMap.nextMapId;
-        if (nextMapId) {
-          const nextMap = getMap(nextMapId);
-          if (nextMap) {
-            this.mapSystem.setMap(nextMap);
-            this.state.currentMapId = nextMap.id;
-            this.state.enemies.clear();
-            this.state.skillEffects.clear();
-            const spawn = this.mapSystem.getInitialSpawnPoint();
-            player.x = spawn.x;
-            player.y = spawn.y;
-            console.log(`Player reached exit, transitioning to map: ${nextMap.name}`);
-          }
-        }
+  private checkExitZones(): void {
+    this.state.players.forEach((player, sessionId) => {
+      if (player.isDead || player.isChoosingMod) return;
+      if (this.mapSystem.isInExitZone(sessionId, player.x, player.y)) {
+        this.presentModifierChoice(sessionId);
       }
     });
   }
 
+  private presentModifierChoice(sessionId: string): void {
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+
+    const currentMap = this.mapSystem.getMap(sessionId);
+    if (!currentMap.nextMapId) return;
+    const nextMap = getMap(currentMap.nextMapId);
+    if (!nextMap) return;
+
+    const choices = pickRandomMods(2);
+
+    player.isChoosingMod = true;
+    player.inputQueue.length = 0;
+
+    player.pendingModChoices.clear();
+    for (const mod of choices) {
+      const md = new ModifierData();
+      md.id = mod.id;
+      md.label = mod.label;
+      md.description = mod.description;
+      player.pendingModChoices.push(md);
+    }
+
+    console.log("Player", sessionId, "reached exit; presenting mod choices");
+  }
+
+  private transitionMapWithMod(sessionId: string, modId: string): void {
+    const player = this.state.players.get(sessionId);
+    if (!player || !player.isChoosingMod) return;
+
+    const offered = player.pendingModChoices.find((m) => m.id === modId);
+    if (!offered) {
+      console.warn("Player", sessionId, "chose invalid mod", modId);
+      return;
+    }
+
+    // Add chosen mod to active mods
+    const chosen = new ModifierData();
+    chosen.id = offered.id;
+    chosen.label = offered.label;
+    chosen.description = offered.description;
+    player.activeMods.push(chosen);
+
+    player.pendingModChoices.clear();
+
+    // Swap to next map
+    const currentMap = this.mapSystem.getMap(sessionId);
+    const nextMap = getMap(currentMap.nextMapId!);
+    if (!nextMap) {
+      console.error("Next map not found for player", sessionId);
+      player.isChoosingMod = false;
+      return;
+    }
+
+    this.mapSystem.setPlayerMap(sessionId, nextMap);
+
+    // Memory cleanup
+    this.spawnSystem.removeEnemiesForPlayer(sessionId);
+    this.spawnSystem.removeSkillEffectsForPlayer(sessionId);
+
+    // Reposition to new map's spawn
+    const spawn = this.mapSystem.getInitialSpawnPoint(sessionId);
+    player.x = spawn.x;
+    player.y = spawn.y;
+
+    // Update synced per-player map id
+    player.currentMapId = nextMap.id;
+
+    // Re-register spawn zones for new map
+    this.spawnSystem.unregisterPlayer(sessionId);
+    this.spawnSystem.registerPlayer(sessionId);
+
+    // Unfreeze player
+    player.isChoosingMod = false;
+
+    console.log("Player", sessionId, 'transitioned to "' + nextMap.name + '" with mod "' + chosen.label + '"');
+  }
+
   // ============================================================
-  // CLIENT CONNECTION HANDLERS
+  // MESSAGE HANDLERS
   // ============================================================
 
-  /**
-   * Handle message types from clients.
-   *
-   * Message 0: Movement input (WASD state)
-   * Message 1: Respawn request
-   * Message 2: Shoot (mouse world position)  -> skill "boltershot"
-   * Message 3: Pulse (AoE)                    -> skill "pulse"
-   * Message 4: Heal                           -> skill "heal"
-   *
-   * Each skill message builds a CasterInfo and hands it to SkillSystem.
-   * Cooldowns/damage/visuals are all handled by the skill implementation.
-   */
   messages = {
-    // Movement input
     0: (client: Client, input: InputData) => {
       const player = this.state.players.get(client.sessionId);
-      if (player) {
-        player.inputQueue.push(input);
-      }
+      if (player) player.inputQueue.push(input);
     },
 
-    // Respawn request
     1: (client: Client) => {
       const player = this.state.players.get(client.sessionId);
       if (player && player.isDead) {
         player.hp = GAME_CONFIG.PLAYER.RESPAWN_HP;
         player.isDead = false;
-        const spawn = this.mapSystem.getNearestSpawnPoint(player.x, player.y);
+        const spawn = this.mapSystem.getNearestSpawnPoint(client.sessionId, player.x, player.y);
         player.x = spawn.x;
         player.y = spawn.y;
         player.inputQueue = [];
       }
     },
 
-    // Shoot (bolter) -> skill "boltershot"
-    2: (client: Client, data: { x: number; y: number }) => {
-      const player = this.state.players.get(client.sessionId);
-      if (!player || player.isDead) return;
-
-      // Direction from player to mouse
-      const dx = data.x - player.x;
-      const dy = data.y - player.y;
-      const length = Math.sqrt(dx * dx + dy * dy);
-      if (length === 0) return; // mouse on top of player
-      const dirX = dx / length;
-      const dirY = dy / length;
-
-      const caster: CasterInfo = {
-        ownerId: client.sessionId,
-        isPlayer: true,
-        x: player.x,
-        y: player.y,
-        targetDirX: dirX,
-        targetDirY: dirY,
-      };
-      this.skillSystem.activate("boltershot", caster, this.gameTime);
-    },
-
-    // Pulse (AoE) -> skill "pulse"
-    3: (client: Client) => {
-      const player = this.state.players.get(client.sessionId);
-      if (!player || player.isDead) return;
-
-      const caster: CasterInfo = {
-        ownerId: client.sessionId,
-        isPlayer: true,
-        x: player.x,
-        y: player.y,
-        targetDirX: 0,
-        targetDirY: 0,
-      };
-      this.skillSystem.activate("pulse", caster, this.gameTime);
-    },
-
-    // Heal -> skill "heal"
-    4: (client: Client) => {
-      const player = this.state.players.get(client.sessionId);
-      if (!player || player.isDead) return;
-
-      const caster: CasterInfo = {
-        ownerId: client.sessionId,
-        isPlayer: true,
-        x: player.x,
-        y: player.y,
-        targetDirX: 0,
-        targetDirY: 0,
-      };
-      this.skillSystem.activate("heal", caster, this.gameTime);
-    },
-
-    // Generic skill activation — works for any card in any slot
-    // Message 5: { skillId: string, x?: number, y?: number }
     5: (client: Client, data: { skillId: string; x?: number; y?: number }) => {
       const player = this.state.players.get(client.sessionId);
-      if (!player || player.isDead) return;
+      if (!player || player.isDead || player.isChoosingMod) return;
 
       let dirX = 0;
       let dirY = 0;
@@ -262,17 +225,11 @@ export class GameRoom extends Room {
       this.skillSystem.activate(data.skillId, caster, this.gameTime);
     },
 
-    // Pickup loot — removes loot from world (client adds to inventory)
-    // Message 6: { lootId: string }
     6: (client: Client, data: { lootId: string }) => {
       const loot = this.state.lootItems.get(data.lootId);
-      if (loot) {
-        this.state.lootItems.delete(data.lootId);
-      }
+      if (loot) this.state.lootItems.delete(data.lootId);
     },
 
-    // Drop card to ground — creates loot at player position
-    // Message 7: { cardId: string, skillId: string, label: string }
     7: (client: Client, data: { cardId: string; skillId: string; label: string }) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
@@ -286,40 +243,45 @@ export class GameRoom extends Room {
       loot.label = data.label;
       loot.description = "";
       loot.textureKey = "card_skill_" + data.skillId;
-
-      const id = `loot_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+      const id = "loot_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
       this.state.lootItems.set(id, loot);
+    },
+
+    8: (client: Client, data: { modId: string }) => {
+      this.transitionMapWithMod(client.sessionId, data.modId);
     },
   };
 
-  /**
-   * Called when a new client connects.
-   */
-  onJoin(client: Client, options: any) {
+  // ============================================================
+  // CONNECTION LIFECYCLE
+  // ============================================================
+
+  onJoin(client: Client, _options: any) {
     console.log("Player joined:", client.sessionId);
 
     const player = new Player();
-    const spawn = this.mapSystem.getInitialSpawnPoint();
+    this.mapSystem.registerPlayer(client.sessionId);
+    const spawn = this.mapSystem.getInitialSpawnPoint(client.sessionId);
     player.x = spawn.x;
     player.y = spawn.y;
     player.hp = GAME_CONFIG.PLAYER.HP;
     player.maxHp = GAME_CONFIG.PLAYER.HP;
     player.speed = GAME_CONFIG.PLAYER.SPEED;
+    player.currentMapId = this.mapSystem.getMap(client.sessionId).id;
 
     this.state.players.set(client.sessionId, player);
+    this.spawnSystem.registerPlayer(client.sessionId);
   }
 
-  /**
-   * Called when a client disconnects.
-   */
-  onLeave(client: Client, code: number) {
+  onLeave(client: Client, _code: number) {
     console.log("Player left:", client.sessionId);
+    this.spawnSystem.removeEnemiesForPlayer(client.sessionId);
+    this.spawnSystem.removeSkillEffectsForPlayer(client.sessionId);
+    this.spawnSystem.unregisterPlayer(client.sessionId);
+    this.mapSystem.unregisterPlayer(client.sessionId);
     this.state.players.delete(client.sessionId);
   }
 
-  /**
-   * Called when the room is disposed.
-   */
   onDispose() {
     console.log("GameRoom disposed:", this.roomId);
   }

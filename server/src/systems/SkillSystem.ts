@@ -1,26 +1,12 @@
 /**
- * Skill System
- * ============
- * The single orchestrator for ALL skills in the game.
- *
- * RESPONSIBILITIES:
- *   1. Hold the registry of skill instances (claw, boltershot, ...).
- *   2. Enforce per-caster cooldowns (time-based AND kill-based for heal).
- *   3. Spawn / despawn SkillEffect objects in RoomState (memory management).
- *   4. Dispatch update() to the correct skill for each active effect.
- *   5. Build the SkillContext handed to skills (safe access to state).
- *
- * WHY ONE SYSTEM: The room only talks to this system. It never needs to
- * know whether "claw" is a cone, "bolter" is a projectile, or "heal" is
- * instant. Adding a new skill = register it here + add its config + class.
- *
- * COOLDOWN MODEL:
- *   - Time-based: cooldowns map keyed by `${ownerId}:${skillId}` -> ms.
- *   - Kill-based (heal): SkillSystem checks caster.killsSinceLastHeal
- *     against the skill's killsRequired before allowing activation.
+ * Skill System (Per-Player Aware)
+ * ===============================
+ * Builds per-caster SkillContext that filters entities by map ownership:
+ *   - Player-cast skill only hits enemies whose ownerId matches.
+ *   - Enemy-cast skill only hits the player whose sessionId matches the enemy's ownerId.
+ * Applies playerSkillDamageMult and enemyAtkMult from mods.
  */
 
-import { MapSchema } from "@colyseus/schema";
 import { SkillEffect } from "../schema/SkillEffect";
 import { RoomState } from "../schema/RoomState";
 import { MapSystem } from "./MapSystem";
@@ -32,26 +18,22 @@ import { HealSkill } from "../skills/HealSkill";
 import { VortexSkill } from "../skills/VortexSkill";
 import { BlinkSkill } from "../skills/BlinkSkill";
 import { GAME_CONFIG } from "../config/game";
+import { MODIFIER_POOL } from "../config/modifiers";
+
+const ALL_MODS_BY_ID: Record<string, typeof MODIFIER_POOL[number]> = {};
+for (const m of MODIFIER_POOL) ALL_MODS_BY_ID[m.id] = m;
 
 export class SkillSystem {
   private state: RoomState;
   private mapSystem: MapSystem;
-
-  /** skillId -> skill instance */
   private skills: Map<string, ISkill> = new Map();
-
-  /** Per-caster time cooldowns: `${ownerId}:${skillId}` -> readyAt (ms) */
   private cooldowns: Map<string, number> = new Map();
-
-  /** Effect id -> skillId (so update() dispatches to the right skill) */
   private effectOwners: Map<string, string> = new Map();
+  private effectIdCounter: number = 0;
 
   constructor(state: RoomState, mapSystem: MapSystem) {
     this.state = state;
     this.mapSystem = mapSystem;
-
-    // Register the four skills
-    // NOTE : here setup a invetory system and load only equip cards only
     this.register(new ClawSkill());
     this.register(new BolterShotSkill());
     this.register(new PulseSkill());
@@ -68,99 +50,79 @@ export class SkillSystem {
     return this.skills.get(id);
   }
 
-  // ============================================================
-  // ACTIVATION (called by room / AI when a caster triggers a skill)
-  // ============================================================
-
-  /**
-   * Attempt to trigger a skill for a caster.
-   * Checks cooldown, then calls the skill's activate().
-   *
-   * @returns true if the skill fired
-   */
   activate(skillId: string, caster: CasterInfo, gameTime: number): boolean {
     const skill = this.skills.get(skillId);
-    if (!skill) {
-      console.warn(`SkillSystem: unknown skill "${skillId}"`);
-      return false;
-    }
+    if (!skill) return false;
 
     const cfg = skill.config;
+    const mapOwner = this.resolveMapOwner(caster);
 
-    // ---- Kill-based cooldown (heal) ----
+    // Cooldown check
     if (cfg.killsRequired && cfg.killsRequired > 0) {
       const casterPlayer = this.state.players.get(caster.ownerId);
       if (casterPlayer) {
-        if (casterPlayer.killsSinceLastHeal < cfg.killsRequired) {
-          return false; // not enough kills yet
-        }
+        if (casterPlayer.killsSinceLastHeal < cfg.killsRequired) return false;
       }
     } else {
-      // ---- Time-based cooldown ----
-      const cdKey = `${caster.ownerId}:${skillId}`;
+      const cdKey = caster.ownerId + ":" + skillId;
       const readyAt = this.cooldowns.get(cdKey) ?? 0;
       if (gameTime < readyAt) return false;
     }
 
-    // Build context & activate
-    // NOTE: understand this
-    const ctx = this.buildContext();
+    const ctx = this.buildContext(mapOwner, caster);
     const result = skill.activate(caster, ctx);
     if (!result.triggered) return false;
 
     // Start cooldown
-    if (cfg.killsRequired && cfg.killsRequired > 0) {
-      // Kill-based: cooldown is "paid" by the skill itself (heal resets kills)
-    } else {
-      const cdKey = `${caster.ownerId}:${skillId}`;
+    if (!(cfg.killsRequired && cfg.killsRequired > 0)) {
+      const cdKey = caster.ownerId + ":" + skillId;
       this.cooldowns.set(cdKey, gameTime + cfg.cooldown);
     }
 
     return true;
   }
 
-  // ============================================================
-  // UPDATE (called every tick)
-  // ============================================================
+  private resolveMapOwner(caster: CasterInfo): string {
+    if (caster.isPlayer) return caster.ownerId;
+    const enemy = this.state.enemies.get(caster.ownerId);
+    return enemy ? enemy.ownerId : caster.ownerId;
+  }
 
-  /**
-   * Update all active skill effects. Dispatches to each effect's skill.
-   * Despawns effects whose update() returns true.
-   *
-   * @param dt - delta time in SECONDS
-   * @param gameTime - current game time in ms
-   */
   update(dt: number, gameTime: number): void {
-    const ctx = this.buildContext();
-
-    // Collect ids to despawn (can't mutate MapSchema during iteration)
     const toDespawn: string[] = [];
 
     this.state.skillEffects.forEach((effect, effectId) => {
-      const skillId = effect.skillId;
-      const skill = this.skills.get(skillId);
+      const skill = this.skills.get(effect.skillId);
       if (!skill) {
         toDespawn.push(effectId);
         return;
       }
 
+      const mapOwner = this.resolveEffectMapOwner(effect);
+      const ctx = this.buildContext(mapOwner, {
+        ownerId: effect.ownerId,
+        isPlayer: effect.isPlayer,
+        x: effect.x,
+        y: effect.y,
+        targetDirX: effect.directionX,
+        targetDirY: effect.directionY,
+      });
+
       const shouldDespawn = skill.update(effectId, effect, dt, gameTime, ctx);
-      if (shouldDespawn) {
-        toDespawn.push(effectId);
-      }
+      if (shouldDespawn) toDespawn.push(effectId);
     });
 
-    for (const id of toDespawn) {
-      this.despawn(id);
-    }
+    for (const id of toDespawn) this.despawn(id);
   }
 
-  // ============================================================
-  // SPAWN / DESPAWN (memory management)
-  // ============================================================
+  private resolveEffectMapOwner(effect: SkillEffect): string {
+    if (effect.isPlayer) return effect.ownerId;
+    const enemy = this.state.enemies.get(effect.ownerId);
+    return enemy ? enemy.ownerId : effect.ownerId;
+  }
 
   private spawn(effect: SkillEffect): string {
-    const id = `fx_${this.state.skillEffects.size}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    const id = "fx_" + this.effectIdCounter++;
     this.state.skillEffects.set(id, effect);
     this.effectOwners.set(id, effect.skillId);
     return id;
@@ -171,44 +133,70 @@ export class SkillSystem {
     this.effectOwners.delete(effectId);
   }
 
-  // ============================================================
-  // CONTEXT BUILDER
-  // ============================================================
-
-  /**
-   * Get a SkillContext for use by other systems (e.g. StatusSystem).
-   */
+  /** Global context for StatusSystem (not per-player scoped). */
   getContext(): SkillContext {
-    return this.buildContext();
-  }
-
-  private buildContext(): SkillContext {
+    const firstId = this.mapSystem.getPlayerIds()[0];
+    const mw = firstId ? this.mapSystem.getMapWidth(firstId) : GAME_CONFIG.MAP_WIDTH;
+    const mh = firstId ? this.mapSystem.getMapHeight(firstId) : GAME_CONFIG.MAP_HEIGHT;
     return {
       spawn: (effect: SkillEffect) => this.spawn(effect),
       despawn: (id: string) => this.despawn(id),
+      forEachPlayer: (cb) => { this.state.players.forEach((p, id) => cb(p, id)); },
+      forEachEnemy: (cb) => { this.state.enemies.forEach((e, id) => cb(e, id)); },
+      getPlayer: (id) => this.state.players.get(id),
+      getEnemy: (id) => this.state.enemies.get(id),
+      mapWidth: mw,
+      mapHeight: mh,
+      pointBlocked: (x, y) => {
+        if (!firstId) return false;
+        return this.mapSystem.checkAllBlockingCollision(firstId, x, y, GAME_CONFIG.PLAYER.COLLISION_RADIUS) !== null;
+      },
+    };
+  }
 
+  /** Per-caster context scoped to a specific player's map instance. */
+  private buildContext(mapOwner: string, caster: CasterInfo): SkillContext {
+    const mapWidth = this.mapSystem.getMapWidth(mapOwner);
+    const mapHeight = this.mapSystem.getMapHeight(mapOwner);
+
+    let skillDmgMult = 1;
+    let enemySkillDmgMult = 1;
+    if (caster.isPlayer) {
+      const p = this.state.players.get(caster.ownerId);
+      if (p) {
+        for (const md of p.activeMods) {
+          const mod = ALL_MODS_BY_ID[md.id];
+          if (mod && mod.playerSkillDamageMult) skillDmgMult *= mod.playerSkillDamageMult;
+        }
+      }
+    } else {
+      const enemy = this.state.enemies.get(caster.ownerId);
+      if (enemy && enemy.atkMult) enemySkillDmgMult = enemy.atkMult;
+    }
+
+    const ctx: SkillContext = {
+      spawn: (effect: SkillEffect) => this.spawn(effect),
+      despawn: (id: string) => this.despawn(id),
       forEachPlayer: (cb) => {
-        this.state.players.forEach((p, id) => {
-          cb(p, id);
-        });
+        const p = this.state.players.get(mapOwner);
+        if (p && !p.isDead) cb(p, mapOwner);
       },
       forEachEnemy: (cb) => {
         this.state.enemies.forEach((e, id) => {
-          cb(e, id);
+          if (!e.isDead && e.ownerId === mapOwner) cb(e, id);
         });
       },
-
       getPlayer: (id) => this.state.players.get(id),
       getEnemy: (id) => this.state.enemies.get(id),
-
-      mapWidth: this.mapSystem.mapWidth,
-      mapHeight: this.mapSystem.mapHeight,
+      mapWidth,
+      mapHeight,
       pointBlocked: (x, y) =>
-        this.mapSystem.checkAllBlockingCollision(
-          x,
-          y,
-          GAME_CONFIG.PLAYER.COLLISION_RADIUS,
-        ) !== null,
+        this.mapSystem.checkAllBlockingCollision(mapOwner, x, y, GAME_CONFIG.PLAYER.COLLISION_RADIUS) !== null,
     };
+
+    if (skillDmgMult !== 1) ctx._playerSkillDamageMult = skillDmgMult;
+    if (enemySkillDmgMult !== 1) ctx._enemySkillDamageMult = enemySkillDmgMult;
+
+    return ctx;
   }
 }

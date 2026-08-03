@@ -3,6 +3,8 @@ import Phaser from "phaser";
 import { SceneSelector } from "./scenes/SceneSelector";
 import { GameScene } from "./scenes/GameScene";
 import { PauseMenu } from "./scenes/PauseMenu";
+import { LoadingScreen } from "./scenes/LoadingScreen";
+import { ModifierSelect } from "./scenes/ModifierSelect";
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
@@ -19,7 +21,7 @@ const config: Phaser.Types.Core.GameConfig = {
     default: "arcade",
   },
   pixelArt: true,
-  scene: [SceneSelector, GameScene, PauseMenu],
+  scene: [SceneSelector, GameScene, PauseMenu, LoadingScreen, ModifierSelect],
 };
 
 const game = new Phaser.Game(config);

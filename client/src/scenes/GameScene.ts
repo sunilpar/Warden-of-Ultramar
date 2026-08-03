@@ -138,11 +138,18 @@ export class GameScene extends Phaser.Scene {
 
   // Map rendering
   private currentMap = MAP_1;
-  /** All map-rendered game objects (tiles, obstacles, spawns, exit) — destroyed on map transition */
+  /** All map-rendered game objects (tiles, obstacles, spawns, exit) ï¿½ destroyed on map transition */
   private mapObjects: Phaser.GameObjects.GameObject[] = [];
   /** Floor canvas texture key (regenerated on map transition) */
   private mapFloorKey = "map_floor_canvas";
   private debugHitboxes: Phaser.GameObjects.Graphics | null = null;
+
+  /** Pending map id to swap to when loading screen is fully black */
+  private pendingMapId: string | null = null;
+  /** True while ModifierSelect popup is open */
+  private modSelectOpen: boolean = false;
+  /** True while LoadingScreen overlay is active */
+  private loadingActive: boolean = false;
 
   // Card input keys (space, 1, 2)
   cardKeys!: {
@@ -302,12 +309,9 @@ export class GameScene extends Phaser.Scene {
     const callbacks = Callbacks.get(this.room);
 
     // ============================================================
-    // MAP TRANSITION WATCHER
+    // PER-PLAYER MAP / MODIFIER FLOW
     // ============================================================
-    // When the server changes currentMapId, swap the rendered map.
-    callbacks.listen("currentMapId", (currentValue: string) => {
-      this.transitionToMap(currentValue);
-    });
+    // Per-player watchers are attached inside onAdd("players") below.
 
     // ============================================================
     // PLAYER HANDLERS
@@ -387,6 +391,34 @@ export class GameScene extends Phaser.Scene {
             }
           }
         });
+        // ---- PER-PLAYER MODIFIER + MAP FLOW ----
+        let lastMapId = player.currentMapId;
+        let wasChoosingMod = false;
+        callbacks.onChange(player, () => {
+          if (player.isChoosingMod && !this.modSelectOpen) {
+            console.log("[MOD-FLOW] Opening ModifierSelect popup");
+            this.modSelectOpen = true;
+            wasChoosingMod = true;
+            this.scene.launch("ModifierSelect", {
+              room: this.room,
+              sessionId: this.room.sessionId,
+            });
+          }
+          if (!player.isChoosingMod && wasChoosingMod) {
+            console.log("[MOD-FLOW] Mod chosen! currentMapId=" + player.currentMapId);
+            wasChoosingMod = false;
+            this.modSelectOpen = false;
+            if (this.scene.isActive("ModifierSelect")) {
+              this.scene.stop("ModifierSelect");
+            }
+            if (player.currentMapId !== lastMapId) {
+              lastMapId = player.currentMapId;
+              this.pendingMapId = player.currentMapId;
+            }
+            this.startLoadingScreen();
+          }
+        });
+
       } else {
         // ---- REMOTE PLAYER ----
         // Store server position for interpolation
@@ -1001,8 +1033,9 @@ export class GameScene extends Phaser.Scene {
       rows * tileSize,
     );
 
+    const tilesKey = map.id === "map_2_orange_hall" ? "map2_tiles" : "map1_tiles";
     const tilesetImg = this.textures
-      .get("map1_tiles")
+      .get(tilesKey)
       .getSourceImage() as HTMLImageElement;
 
     const ctx = canvas.getContext();
@@ -1062,46 +1095,70 @@ export class GameScene extends Phaser.Scene {
     const map = this.currentMap;
     const isOrange = map.id === "map_2_orange_hall";
     const tint = isOrange ? 0xff9944 : 0xffffff;
+    const obsKey = isOrange ? "map2_obstacles" : "map1_obstacles";
+    const tilesKey = isOrange ? "map2_tiles" : "map1_tiles";
 
-    // Obstacles — use spriteFrame from map data
+    // Obstacles ï¿½ use spriteFrame from map data
     for (const obs of map.obstacles) {
       const img = this.add
-        .image(obs.x + obs.width / 2, obs.y + obs.height / 2, "map1_obstacles", obs.spriteFrame)
+        .image(obs.x + obs.width / 2, obs.y + obs.height / 2, obsKey, obs.spriteFrame)
         .setDepth(1)
         .setDisplaySize(obs.width, obs.height);
       if (isOrange) img.setTint(tint);
       this.mapObjects.push(img);
     }
 
-    // Player spawns — use player spawn tile frame
+    // Player spawns ï¿½ use player spawn tile frame
     for (const spawn of map.playerSpawns) {
       const size = spawn.visualSize ?? 64;
       const img = this.add
-        .image(spawn.x, spawn.y, "map1_tiles", map.playerSpawnTileFrame)
+        .image(spawn.x, spawn.y, tilesKey, map.playerSpawnTileFrame)
         .setDepth(1)
         .setDisplaySize(size, size);
       if (isOrange) img.setTint(tint);
       this.mapObjects.push(img);
     }
 
-    // Enemy spawn zones — use spriteFrame from map data
+    // Enemy spawn zones ï¿½ use spriteFrame from map data
     for (const zone of map.enemySpawnZones) {
       const img = this.add
-        .image(zone.x + zone.width / 2, zone.y + zone.height / 2, "map1_obstacles", zone.spriteFrame)
+        .image(zone.x + zone.width / 2, zone.y + zone.height / 2, obsKey, zone.spriteFrame)
         .setDepth(1)
         .setDisplaySize(zone.width, zone.height);
       if (isOrange) img.setTint(tint);
       this.mapObjects.push(img);
     }
 
-    // Exit point — use exit tile frame
+    // Exit point ï¿½ use exit tile frame
     const exit = map.exitPoint;
     const exitImg = this.add
-      .image(exit.x + exit.width / 2, exit.y + exit.height / 2, "map1_tiles", map.exitTileFrame)
+      .image(exit.x + exit.width / 2, exit.y + exit.height / 2, tilesKey, map.exitTileFrame)
       .setDepth(1)
       .setDisplaySize(exit.width, exit.height);
     if (isOrange) exitImg.setTint(tint);
     this.mapObjects.push(exitImg);
+  }
+
+  /**
+   * Launch the loading screen overlay scene.
+   */
+  startLoadingScreen(): void {
+    if (this.loadingActive) return;
+    console.log("[MOD-FLOW] startLoadingScreen, pendingMapId=" + this.pendingMapId);
+    this.loadingActive = true;
+    this.scene.launch("LoadingScreen");
+  }
+
+  /**
+   * Called by LoadingScreen scene when screen is fully black.
+   */
+  onLoadingScreenReady(): void {
+    console.log("[MOD-FLOW] onLoadingScreenReady, pendingMapId=" + this.pendingMapId);
+    if (this.pendingMapId) {
+      this.transitionToMap(this.pendingMapId);
+      this.pendingMapId = null;
+    }
+    this.loadingActive = false;
   }
 
   /**

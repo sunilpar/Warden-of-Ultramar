@@ -224,14 +224,14 @@ const MAP2_JSON = {
   tileSize: 64,
   spriteSheets: {
     tiles: {
-      path: "assets/maps/map1/MapTilesSpriteSheet64.png",
+      path: "assets/maps/map2/MapTilesSpriteSheet64Map2.png",
       frameWidth: 64,
       frameHeight: 64,
       columns: 4,
       rows: 2,
     },
     obstacles: {
-      path: "assets/maps/map1/MapObsSpriteSheet128.png",
+      path: "assets/maps/map2/MapObsSpriteSheet128Map2.png",
       frameWidth: 128,
       frameHeight: 128,
       columns: 4,

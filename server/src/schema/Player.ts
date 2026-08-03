@@ -1,20 +1,12 @@
 /**
  * Player Schema
  * =============
- * Defines what player data gets synchronized to all clients.
- *
- * IMPORTANT: Only fields decorated with @type() are synced over the network.
- * Everything else stays server-side only.
- *
- * SERVER AUTHORITY: The server owns all of these values.
- * Clients can only SEND INPUT — the server decides position, HP, etc.
- * This prevents cheating (god mode, teleportation, etc.)
  */
 
-import { Schema, type } from "@colyseus/schema";
+import { Schema, type, ArraySchema } from "@colyseus/schema";
 import { StatusEffect } from "./StatusEffect";
+import { ModifierData } from "./ModifierData";
 
-/** Input data sent from client to server */
 export interface InputData {
   left: boolean;
   right: boolean;
@@ -24,63 +16,33 @@ export interface InputData {
 }
 
 export class Player extends Schema {
-  /** Current X position (server-authoritative) */
   @type("number") x: number = 0;
-
-  /** Current Y position (server-authoritative) */
   @type("number") y: number = 0;
-
-  /** Last processed input tick (used for client-side prediction) */
   @type("number") tick: number = 0;
-
-  /** Current health points */
   @type("number") hp: number = 1000;
-
-  /** Maximum health points */
   @type("number") maxHp: number = 1000;
-
-  /** Movement speed in pixels per second */
   @type("number") speed: number = 120;
-
-  /** Whether this player is dead */
   @type("boolean") isDead: boolean = false;
 
-  /**
-   * Input queue — NOT synced to clients.
-   * The server processes these inputs and updates position.
-   * This is how the server stays authoritative.
-   */
   inputQueue: InputData[] = [];
-
-  /**
-   * Last shoot time — NOT synced to clients.
-   * Used by the server to enforce shoot cooldown (0.5s).
-   * Stored in milliseconds (game time).
-   */
   lastShootTime: number = 0;
-
-  /**
-   * Last pulse time — NOT synced to clients.
-   * Used by the server to enforce pulse cooldown (3s).
-   * Stored in milliseconds (game time).
-   */
   lastPulseTime: number = 0;
 
-  /**
-   * Number of enemies killed since last heal card use.
-   * Synced so client can display kill-based cooldown progress.
-   */
   @type("number") killsSinceLastHeal: number = 0;
-
-  /** Whether this player is currently invincible (blink skill) */
   @type("boolean") isInvincible: boolean = false;
 
-  /** Active status effects on this player */
-  statusEffects: Map<string, StatusEffect> = new Map();
+  /** The map this player is currently on (per-player map instances). */
+  @type("string") currentMapId: string = "map_1_first_hall";
 
-  /**
-   * Game time (ms) when invincibility expires.
-   * NOT synced — server checks this each tick.
-   */
+  /** Whether this player is currently choosing a modifier (pauses their game). */
+  @type("boolean") isChoosingMod: boolean = false;
+
+  /** 2 modifier choices presented to the player at map exit. */
+  @type({ array: ModifierData }) pendingModChoices = new ArraySchema<ModifierData>();
+
+  /** Active modifiers applied to this player's current map. */
+  @type({ array: ModifierData }) activeMods = new ArraySchema<ModifierData>();
+
+  statusEffects: Map<string, StatusEffect> = new Map();
   invincibleUntil: number = 0;
 }

@@ -20,6 +20,17 @@ export class SceneSelector extends Phaser.Scene {
     this.load.image("elder", "assets/eldar.png");
     this.load.image("deathbox", "assets/deathbox_lowres.png");
     this.load.image("orck", "assets/orck.png");
+    this.load.image("loading_screen", "assets/loadingScreen.png");
+
+    // ---- Map 2 sprite sheets (new art) ----
+    this.load.spritesheet("map2_tiles", "assets/maps/map2/MapTilesSpriteSheet64Map2.png", {
+      frameWidth: 64,
+      frameHeight: 64,
+    });
+    this.load.spritesheet("map2_obstacles", "assets/maps/map2/MapObsSpriteSheet128Map2.png", {
+      frameWidth: 128,
+      frameHeight: 128,
+    });
 
     // Card system assets
     this.load.image("hud_bg", "assets/hud.png");

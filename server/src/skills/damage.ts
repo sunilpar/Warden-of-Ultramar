@@ -1,26 +1,14 @@
 /**
  * Skill Damage Helpers
  * ====================
- * Shared logic used by multiple skills to apply damage consistently:
- *   - friendly fire prevention (player effects hit enemies, not players)
- *   - death handling (clamp hp, set isDead, award kills to the caster)
- *
- * Keeping this here means every skill applies death/kill logic the
- * exact same way, so we never get "this skill kills but doesn't count".
+ * Shared logic used by skills to apply damage consistently:
+ *   - friendly fire prevention
+ *   - death handling
+ *   - modifier damage scaling
  */
 
 import type { SkillContext } from "./ISkill";
 
-/**
- * Apply damage to a single target respecting death state.
- * Caller has ALREADY decided this target should be hit (collision passed).
- *
- * @param target - schema object (player or enemy) with hp/maxHp/isDead
- * @param amount - damage to subtract
- * @param casterIsPlayer - if true and target is a player, ignore (no friendly fire)
- * @param casterOwnerId  - used to award kills
- * @param ctx            - for kill tracking
- */
 export function applyDamage(
   target: any,
   amount: number,
@@ -29,22 +17,25 @@ export function applyDamage(
   ctx: SkillContext,
 ): void {
   if (!target || target.isDead) return;
-
-  // Invincibility check (blink skill grants temporary invincibility)
   if (target.isInvincible) return;
 
   // Friendly fire: player-cast effects never damage players
   if (casterIsPlayer && target.killsSinceLastHeal !== undefined) {
-    // target is a player (has killsSinceLastHeal) -> skip
     return;
   }
 
-  target.hp -= amount;
+  // Modifier damage scaling
+  let scaledAmount = amount;
+  if (casterIsPlayer && ctx._playerSkillDamageMult) {
+    scaledAmount = amount * ctx._playerSkillDamageMult;
+  } else if (!casterIsPlayer && ctx._enemySkillDamageMult) {
+    scaledAmount = amount * ctx._enemySkillDamageMult;
+  }
+
+  target.hp -= scaledAmount;
   if (target.hp <= 0) {
     target.hp = 0;
     target.isDead = true;
-
-    // Award kill to the casting player (for heal-card cooldown)
     if (casterIsPlayer) {
       const caster = ctx.getPlayer(casterOwnerId);
       if (caster) caster.killsSinceLastHeal++;
@@ -52,9 +43,6 @@ export function applyDamage(
   }
 }
 
-/**
- * Convenience: apply damage to many targets in one call.
- */
 export function applyDamageToMany(
   targets: { target: any }[],
   amount: number,

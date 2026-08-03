@@ -1,35 +1,21 @@
 /**
- * Player System
- * ==============
- * Handles all player-related logic each tick:
- *   - Processing queued inputs
- *   - Normalized movement (fixes diagonal speed)
- *   - Delta-time based movement
- *   - Input rate limiting (prevents lag exploits)
- *   - Map boundary clamping
- *   - Obstacle collision resolution
- *
- * SERVER AUTHORITY: This system is the ONLY thing that moves players.
- * The client sends inputs, but this system decides the actual position.
- * This prevents speed hacks, teleportation, and wall clipping.
- *
- * WHY A SEPARATE SYSTEM: Keeping player logic isolated means:
- *   - Easy to modify movement without touching other code
- *   - Easy to test (just feed inputs, check positions)
- *   - Clear single responsibility
+ * Player System (Per-Player)
+ * ===========================
+ * Handles player movement, collision, and modifier-based speed.
  */
 
 import { RoomState } from "../schema/RoomState";
 import { Player, InputData } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
-import { inputToMovement, clampToMap } from "../utils/movement";
 import { MapSystem } from "./MapSystem";
 import { StatusSystem } from "./StatusSystem";
+import { MODIFIER_POOL } from "../config/modifiers";
+
+const ALL_MODS_BY_ID: Record<string, typeof MODIFIER_POOL[number]> = {};
+for (const m of MODIFIER_POOL) ALL_MODS_BY_ID[m.id] = m;
 
 export class PlayerSystem {
-  /** Reference to the shared game state */
   private state: RoomState;
-  /** Reference to the map system (for obstacle collision + dynamic bounds) */
   private mapSystem: MapSystem;
 
   constructor(state: RoomState, mapSystem: MapSystem) {
@@ -37,79 +23,58 @@ export class PlayerSystem {
     this.mapSystem = mapSystem;
   }
 
-  /**
-   * Process all player inputs for this tick.
-   *
-   * HOW IT WORKS:
-   *   1. For each player, grab their queued inputs
-   *   2. Limit how many we process (prevents lag exploit)
-   *   3. Convert input to normalized movement vector
-   *   4. Apply movement with delta time
-   *   5. Clamp to map boundaries
-   *   6. Resolve obstacle collisions (push out of walls)
-   *
-   * @param dt - Delta time in seconds (fixed timestep / 1000)
-   */
   update(dt: number): void {
-    this.state.players.forEach((player) => {
-      // Skip dead or stunned players
+    this.state.players.forEach((player, sessionId) => {
       if (player.isDead) return;
+      if (player.isChoosingMod) {
+        player.inputQueue.length = 0;
+        return;
+      }
       if (StatusSystem.isStunned(player)) {
         player.inputQueue.length = 0;
         return;
       }
 
-      // Apply slow effect to speed for this tick
       const slowMultiplier = StatusSystem.getSlowMultiplier(player);
-      const effectiveSpeed = player.speed * slowMultiplier;
+      const modSpeedMult = this.getPlayerSpeedMult(player);
+      const effectiveSpeed = player.speed * slowMultiplier * modSpeedMult;
 
-      // Process limited inputs per tick
-      // WHY: A lagging client might queue 100+ inputs.
-      // Without limiting, they'd teleport when lag clears.
       let inputsProcessed = 0;
-
       let input: InputData | undefined;
       while ((input = player.inputQueue.shift()) !== undefined) {
-        // Rate limit: stop processing if we've hit the cap
-        if (inputsProcessed >= GAME_CONFIG.MAX_INPUTS_PER_TICK) {
-          break;
+        if (inputsProcessed >= GAME_CONFIG.MAX_INPUTS_PER_TICK) break;
+
+        let dirX = 0;
+        let dirY = 0;
+        if (input.left) dirX -= 1;
+        if (input.right) dirX += 1;
+        if (input.up) dirY -= 1;
+        if (input.down) dirY += 1;
+        const length = Math.sqrt(dirX * dirX + dirY * dirY);
+        if (length > 0) {
+          dirX /= length;
+          dirY /= length;
         }
 
-        // Convert input to normalized movement and apply
-        const movement = inputToMovement(
-          input.left,
-          input.right,
-          input.up,
-          input.down,
-          effectiveSpeed,
-          dt,
-        );
+        player.x += dirX * effectiveSpeed * dt;
+        player.y += dirY * effectiveSpeed * dt;
 
-        // Apply movement
-        player.x += movement.x;
-        player.y += movement.y;
+        // Clamp to this player's map boundaries
+        const mapW = this.mapSystem.getMapWidth(sessionId);
+        const mapH = this.mapSystem.getMapHeight(sessionId);
+        player.x = Math.max(0, Math.min(mapW, player.x));
+        player.y = Math.max(0, Math.min(mapH, player.y));
 
-        // Clamp to map boundaries (use actual map size from MapSystem)
-        // dont move the player if the player cord is on the edge
-        const clamped = clampToMap(
-          player.x,
-          player.y,
-          this.mapSystem.mapWidth,
-          this.mapSystem.mapHeight,
-        );
-        player.x = clamped.x;
-        player.y = clamped.y;
-
-        // Resolve obstacle + enemy spawn zone collisions
-        // WHY: After movement + clamp, the player might be inside an obstacle
-        // or enemy spawn zone. We push them out along the shortest axis.
+        // Resolve obstacle collisions on this player's map
         const hitBlocker = this.mapSystem.checkAllBlockingCollision(
+          sessionId,
           player.x,
           player.y,
           GAME_CONFIG.PLAYER.COLLISION_RADIUS,
         );
         if (hitBlocker) {
           const resolved = this.mapSystem.resolveBlockingCollision(
+            sessionId,
             player.x,
             player.y,
             GAME_CONFIG.PLAYER.COLLISION_RADIUS,
@@ -119,21 +84,21 @@ export class PlayerSystem {
           player.y = resolved.y;
         }
 
-        // Store last processed tick (for client prediction)
         if (input.tick !== undefined) {
           player.tick = input.tick;
         }
-
         inputsProcessed++;
       }
-
-      // IMPORTANT: Clear any remaining inputs beyond the cap.
-      // WHY: If we don't, old inputs accumulate and cause delayed movement.
-      // The player loses those inputs, but that's the price of lag.
-      if (player.inputQueue.length > 0) {
-        player.inputQueue.length = 0;
-      }
+      player.inputQueue.length = 0;
     });
   }
-}
 
+  private getPlayerSpeedMult(player: Player): number {
+    let mult = 1;
+    for (const md of player.activeMods) {
+      const mod = ALL_MODS_BY_ID[md.id];
+      if (mod && mod.playerSpeedMult) mult *= mod.playerSpeedMult;
+    }
+    return mult;
+  }
+}
