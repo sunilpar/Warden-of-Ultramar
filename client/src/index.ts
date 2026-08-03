@@ -1,18 +1,17 @@
-import Phaser from "phaser";
+/**
+ * Phaser Game Entry Point
+ * =======================
+ * Creates the Phaser game with two scenes:
+ *   - SceneSelector: the start screen with "Start Game" button
+ *   - GameScene: the main game where you control a character on map1
+ */
 
+import Phaser from "phaser";
 import { SceneSelector } from "./scenes/SceneSelector";
 import { GameScene } from "./scenes/GameScene";
-import { PauseMenu } from "./scenes/PauseMenu";
-import { LoadingScreen } from "./scenes/LoadingScreen";
-import { ModifierSelect } from "./scenes/ModifierSelect";
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
-  fps: {
-    target: 60,
-    forceSetTimeOut: true,
-    smoothStep: false,
-  },
   width: 1080,
   height: 720,
   backgroundColor: "#117c13",
@@ -21,34 +20,7 @@ const config: Phaser.Types.Core.GameConfig = {
     default: "arcade",
   },
   pixelArt: true,
-  scene: [SceneSelector, GameScene, PauseMenu, LoadingScreen, ModifierSelect],
+  scene: [SceneSelector, GameScene],
 };
 
 const game = new Phaser.Game(config);
-
-/**
- * Create FPS selector
- */
-
-// current fps label
-const fpsInput = document.querySelector<HTMLInputElement>("input#fps");
-const fpsValueLabel = document.querySelector<HTMLSpanElement>("#fps-value");
-fpsValueLabel.innerText = fpsInput.value;
-
-fpsInput.oninput = function (event: InputEvent) {
-  const value = (event.target as HTMLInputElement).value;
-  fpsValueLabel.innerText = value;
-
-  // destroy previous loop
-  game.loop.destroy();
-
-  // create new loop
-  game.loop = new Phaser.Core.TimeStep(game, {
-    target: parseInt(value),
-    forceSetTimeOut: true,
-    smoothStep: false,
-  });
-
-  // start new loop
-  game.loop.start(game.step.bind(game));
-};

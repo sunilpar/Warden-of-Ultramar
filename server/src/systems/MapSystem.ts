@@ -1,19 +1,13 @@
 /**
- * Map System (Per-Player)
- * ========================
- * Each player has their OWN map instance. All collision, boundary,
- * spawn-zone, and exit-zone queries are scoped per sessionId.
- *
- * The system holds a Map<sessionId, MapDefinition> so different players
- * can be on different maps simultaneously without affecting each other.
+ * Map System
+ * ==========
+ * Handles collision detection against map obstacles and boundary clamping.
+ * This is a simple single-map system (no per-player map instances).
  */
 
-import { MapDefinition, MapObstacle, EnemySpawnZone, HitboxOverride } from "../config/maps";
-import { GAME_CONFIG } from "../config/game";
+import { MapDefinition, MapObstacle, HitboxOverride } from "../config/maps";
 
-/**
- * Compute the effective collision rect from a visual rect + optional hitbox override.
- */
+/** Compute the effective collision rect from a visual rect + optional hitbox override. */
 function getHitboxRect(
   x: number,
   y: number,
@@ -28,79 +22,32 @@ function getHitboxRect(
 }
 
 export class MapSystem {
-  /** Per-player map instances */
-  private playerMaps: Map<string, MapDefinition> = new Map();
-  /** The default map assigned to new players */
-  private defaultMap: MapDefinition;
+  private map: MapDefinition;
 
-  constructor(defaultMap: MapDefinition) {
-    this.defaultMap = defaultMap;
+  constructor(map: MapDefinition) {
+    this.map = map;
   }
 
-  /** Register a new player with the default map. */
-  registerPlayer(sessionId: string): void {
-    this.playerMaps.set(sessionId, this.defaultMap);
+  get width(): number { return this.map.widthPx; }
+  get height(): number { return this.map.heightPx; }
+
+  getSpawnPoint(): { x: number; y: number } {
+    const spawn = this.map.playerSpawns[0];
+    return { x: spawn.x, y: spawn.y };
   }
 
-  /** Remove a player's map entry. */
-  unregisterPlayer(sessionId: string): void {
-    this.playerMaps.delete(sessionId);
+  getObstacles(): MapObstacle[] {
+    return this.map.obstacles;
   }
 
-  /** Get all registered player session IDs. */
-  getPlayerIds(): string[] {
-    return Array.from(this.playerMaps.keys());
-  }
-
-  /** Get the map for a specific player. */
-  getMap(sessionId: string): MapDefinition {
-    const map = this.playerMaps.get(sessionId);
-    if (!map) {
-      // Fallback: register with default and return it
-      this.registerPlayer(sessionId);
-      return this.defaultMap;
-    }
-    return map;
-  }
-
-  /** Set a specific map for a player (used during map transitions). */
-  setPlayerMap(sessionId: string, map: MapDefinition): void {
-    this.playerMaps.set(sessionId, map);
-  }
-
-  getMapWidth(sessionId: string): number {
-    return this.getMap(sessionId).widthPx;
-  }
-
-  getMapHeight(sessionId: string): number {
-    return this.getMap(sessionId).heightPx;
-  }
-
-  getObstacles(sessionId: string): MapObstacle[] {
-    return this.getMap(sessionId).obstacles;
-  }
-
-  getEnemySpawnZones(sessionId: string): EnemySpawnZone[] {
-    return this.getMap(sessionId).enemySpawnZones;
-  }
-
-  // ============================================================
-  // COLLISION
-  // ============================================================
-
-  checkObstacleCollision(
-    sessionId: string,
-    x: number,
-    y: number,
-    radius: number,
-  ): MapObstacle | null {
-    for (const obstacle of this.getObstacles(sessionId)) {
+  /**
+   * Check if a circle (at x,y with given radius) collides with any obstacle.
+   * Returns the first colliding obstacle, or null.
+   */
+  checkObstacleCollision(x: number, y: number, radius: number): MapObstacle | null {
+    for (const obstacle of this.map.obstacles) {
       const hb = getHitboxRect(
-        obstacle.x,
-        obstacle.y,
-        obstacle.width,
-        obstacle.height,
-        obstacle.hitbox,
+        obstacle.x, obstacle.y, obstacle.width, obstacle.height, obstacle.hitbox,
       );
       const closestX = Math.max(hb.x, Math.min(x, hb.x + hb.width));
       const closestY = Math.max(hb.y, Math.min(y, hb.y + hb.height));
@@ -113,27 +60,23 @@ export class MapSystem {
     return null;
   }
 
+  /**
+   * Push a circle out of an obstacle so they no longer overlap.
+   */
   resolveObstacleCollision(
-    sessionId: string,
-    x: number,
-    y: number,
-    radius: number,
-    obstacle: MapObstacle,
+    x: number, y: number, radius: number, obstacle: MapObstacle,
   ): { x: number; y: number } {
     const hb = getHitboxRect(
-      obstacle.x,
-      obstacle.y,
-      obstacle.width,
-      obstacle.height,
-      obstacle.hitbox,
+      obstacle.x, obstacle.y, obstacle.width, obstacle.height, obstacle.hitbox,
     );
     const closestX = Math.max(hb.x, Math.min(x, hb.x + hb.width));
     const closestY = Math.max(hb.y, Math.min(y, hb.y + hb.height));
     const dx = x - closestX;
     const dy = y - closestY;
     const dist = Math.sqrt(dx * dx + dy * dy);
+
     if (dist === 0) {
-      // Push out along nearest edge
+      // Center is inside the obstacle — push out along nearest edge
       const leftDist = Math.abs(x - hb.x);
       const rightDist = Math.abs(hb.x + hb.width - x);
       const topDist = Math.abs(y - hb.y);
@@ -144,74 +87,11 @@ export class MapSystem {
       if (minDist === topDist) return { x, y: hb.y - radius };
       return { x, y: hb.y + hb.height + radius };
     }
+
     const overlap = radius - dist;
     return {
       x: x + (dx / dist) * overlap,
       y: y + (dy / dist) * overlap,
     };
-  }
-
-  checkBulletObstacleCollision(
-    sessionId: string,
-    x: number,
-    y: number,
-    radius: number,
-  ): boolean {
-    return this.checkObstacleCollision(sessionId, x, y, radius) !== null;
-  }
-
-  /** Alias used by SkillSystem */
-  checkAllBlockingCollision(
-    sessionId: string,
-    x: number,
-    y: number,
-    radius: number,
-  ): MapObstacle | null {
-    return this.checkObstacleCollision(sessionId, x, y, radius);
-  }
-
-  resolveBlockingCollision(
-    sessionId: string,
-    x: number,
-    y: number,
-    radius: number,
-    blocker: MapObstacle,
-  ): { x: number; y: number } {
-    return this.resolveObstacleCollision(sessionId, x, y, radius, blocker);
-  }
-
-  // ============================================================
-  // ZONES
-  // ============================================================
-
-  isInExitZone(sessionId: string, x: number, y: number): boolean {
-    const exit = this.getMap(sessionId).exitPoint;
-    const hb = getHitboxRect(
-      exit.x,
-      exit.y,
-      exit.width,
-      exit.height,
-      exit.hitbox,
-    );
-    return (
-      x >= hb.x &&
-      x <= hb.x + hb.width &&
-      y >= hb.y &&
-      y <= hb.y + hb.height
-    );
-  }
-
-  getNearestSpawnPoint(
-    sessionId: string,
-    _x: number,
-    _y: number,
-  ): { x: number; y: number } {
-    const spawns = this.getMap(sessionId).playerSpawns;
-    return { x: spawns[0].x, y: spawns[0].y };
-  }
-
-  getInitialSpawnPoint(sessionId: string): { x: number; y: number } {
-    const spawn = this.getMap(sessionId).playerSpawns[0];
-    return { x: spawn.x, y: spawn.y };
   }
 }

@@ -1,10 +1,10 @@
 /**
- * Client-Side Map Data (JSON-driven)
- * ====================================
- * Mirror of the server's map configuration.
- * Map definitions are loaded from shared JSON files.
+ * Client-Side Map Data
+ * ====================
+ * Mirror of the server's map1.json definition.
+ * The client needs this to render the map (tiles, obstacles, spawn points, exit).
  *
- * KEEP IN SYNC with server/src/config/maps.ts types!
+ * KEEP IN SYNC with server/src/config/maps/map1.json!
  */
 
 // ============================================================
@@ -22,22 +22,7 @@ export interface MapObstacle {
   y: number;
   width: number;
   height: number;
-  /** Frame index in the obstacle sprite sheet */
   spriteFrame: number;
-  hitbox?: HitboxOverride;
-}
-
-export interface EnemySpawnZone {
-  name: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  /** Frame index in the obstacle sprite sheet */
-  spriteFrame: number;
-  enemyTypes: string[];
-  maxAlive: number;
-  intervalMs: number;
   hitbox?: HitboxOverride;
 }
 
@@ -74,7 +59,6 @@ export interface MapDefinition {
   tiles: number[][];
   obstacles: MapObstacle[];
   playerSpawns: PlayerSpawnPoint[];
-  enemySpawnZones: EnemySpawnZone[];
   exitPoint: MapExitPoint;
   spriteSheets: {
     tiles: SpriteSheetConfig;
@@ -82,15 +66,13 @@ export interface MapDefinition {
   };
   playerSpawnTileFrame: number;
   exitTileFrame: number;
-  obstacleSpriteFrames: number[];
-  enemySpawnSpriteFrames: number[];
-  nextMapId: string | null;
 }
 
 // ============================================================
-// HELPER: Compute centered hitbox rect from visual rect + hitbox override
+// HELPERS
 // ============================================================
 
+/** Compute the effective collision rect (centered, smaller if hitbox defined). */
 export function getHitboxRect(
   x: number,
   y: number,
@@ -98,9 +80,7 @@ export function getHitboxRect(
   height: number,
   hitbox?: HitboxOverride,
 ): { x: number; y: number; width: number; height: number } {
-  if (!hitbox) {
-    return { x, y, width, height };
-  }
+  if (!hitbox) return { x, y, width, height };
   const offsetX = (width - hitbox.width) / 2;
   const offsetY = (height - hitbox.height) / 2;
   return {
@@ -111,10 +91,7 @@ export function getHitboxRect(
   };
 }
 
-// ============================================================
-// TILE GRID GENERATOR (matches server logic)
-// ============================================================
-
+/** Generate the floor tile grid (matches server logic). */
 function generateFloorTiles(rows: number, cols: number): number[][] {
   const tiles: number[][] = [];
   for (let row = 0; row < rows; row++) {
@@ -122,11 +99,11 @@ function generateFloorTiles(rows: number, cols: number): number[][] {
     for (let col = 0; col < cols; col++) {
       const rand = Math.random();
       if (rand < 0.45) {
-        tileRow.push(2); // basicTile1
+        tileRow.push(2);
       } else if (rand < 0.90) {
-        tileRow.push(3); // basicTile2
+        tileRow.push(3);
       } else {
-        tileRow.push(5 + Math.floor(Math.random() * 4)); // special tiles 5-8
+        tileRow.push(5 + Math.floor(Math.random() * 4));
       }
     }
     tiles.push(tileRow);
@@ -135,11 +112,8 @@ function generateFloorTiles(rows: number, cols: number): number[][] {
 }
 
 // ============================================================
-// MAP 1 DEFINITION (hardcoded from map1.json)
+// MAP 1 DEFINITION (from map1.json)
 // ============================================================
-// NOTE: The client duplicates this data because it can't import
-// from the server directory at build time. To add a new map,
-// update both server/src/config/maps/map1.json AND this section.
 
 const MAP1_JSON = {
   id: "map_1_first_hall",
@@ -165,10 +139,6 @@ const MAP1_JSON = {
   },
   playerSpawnTileFrame: 0,
   exitTileFrame: 3,
-  obstacleSpriteFrames: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-  enemySpawnSpriteFrames: [12, 13, 14, 15],
-  nextMapId: "map_2_orange_hall",
-
   obstacles: [
     { name: "obs_1", x: 896, y: 320, width: 128, height: 128, spriteFrame: 0, hitbox: { width: 90, height: 105 } },
     { name: "obs_2", x: 2560, y: 320, width: 128, height: 128, spriteFrame: 1, hitbox: { width: 95, height: 100 } },
@@ -179,18 +149,9 @@ const MAP1_JSON = {
     { name: "obs_7", x: 448, y: 3328, width: 128, height: 128, spriteFrame: 6, hitbox: { width: 90, height: 100 } },
     { name: "obs_8", x: 2176, y: 3648, width: 128, height: 128, spriteFrame: 7, hitbox: { width: 95, height: 108 } },
   ],
-
   playerSpawns: [
     { name: "spawn_start", x: 320, y: 320, visualSize: 64 },
   ],
-
-  enemySpawnZones: [
-    { name: "enemy_zone_1", x: 1728, y: 640, width: 256, height: 256, spriteFrame: 12, enemyTypes: ["tyranid"], maxAlive: 4, intervalMs: 3000, hitbox: { width: 200, height: 210 } },
-    { name: "enemy_zone_2", x: 128, y: 2048, width: 256, height: 256, spriteFrame: 13, enemyTypes: ["tyranid", "ork"], maxAlive: 4, intervalMs: 3500, hitbox: { width: 190, height: 220 } },
-    { name: "enemy_zone_3", x: 2496, y: 2048, width: 256, height: 256, spriteFrame: 14, enemyTypes: ["ork", "tyranid"], maxAlive: 4, intervalMs: 3000, hitbox: { width: 210, height: 200 } },
-    { name: "enemy_zone_4", x: 1280, y: 3008, width: 256, height: 256, spriteFrame: 15, enemyTypes: ["tyranid", "ork"], maxAlive: 5, intervalMs: 2500, hitbox: { width: 200, height: 216 } },
-  ],
-
   exitPoint: {
     name: "exit_south",
     x: 3456,
@@ -201,7 +162,6 @@ const MAP1_JSON = {
   },
 };
 
-// Generate tile grid
 const rows = Math.ceil(MAP1_JSON.heightPx / MAP1_JSON.tileSize);
 const cols = Math.ceil(MAP1_JSON.widthPx / MAP1_JSON.tileSize);
 
@@ -209,92 +169,3 @@ export const MAP_1: MapDefinition = {
   ...MAP1_JSON,
   tiles: generateFloorTiles(rows, cols),
 } as MapDefinition;
-
-// ============================================================
-// MAP 2 DEFINITION (hardcoded from map2.json)
-// ============================================================
-// Same assets as MAP_1 but with rearranged obstacles.
-// The orange hue is applied at render time in GameScene.
-
-const MAP2_JSON = {
-  id: "map_2_orange_hall",
-  name: "The Orange Hall",
-  widthPx: 4320,
-  heightPx: 4320,
-  tileSize: 64,
-  spriteSheets: {
-    tiles: {
-      path: "assets/maps/map2/MapTilesSpriteSheet64Map2.png",
-      frameWidth: 64,
-      frameHeight: 64,
-      columns: 4,
-      rows: 2,
-    },
-    obstacles: {
-      path: "assets/maps/map2/MapObsSpriteSheet128Map2.png",
-      frameWidth: 128,
-      frameHeight: 128,
-      columns: 4,
-      rows: 4,
-    },
-  },
-  playerSpawnTileFrame: 0,
-  exitTileFrame: 3,
-  obstacleSpriteFrames: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-  enemySpawnSpriteFrames: [12, 13, 14, 15],
-  nextMapId: "map_1_first_hall",
-
-  obstacles: [
-    { name: "obs_1", x: 448, y: 896, width: 128, height: 128, spriteFrame: 3, hitbox: { width: 85, height: 108 } },
-    { name: "obs_2", x: 1216, y: 448, width: 128, height: 128, spriteFrame: 4, hitbox: { width: 93, height: 103 } },
-    { name: "obs_3", x: 2048, y: 896, width: 128, height: 128, spriteFrame: 5, hitbox: { width: 88, height: 105 } },
-    { name: "obs_4", x: 2880, y: 448, width: 128, height: 128, spriteFrame: 6, hitbox: { width: 90, height: 100 } },
-    { name: "obs_5", x: 3712, y: 896, width: 128, height: 128, spriteFrame: 7, hitbox: { width: 95, height: 108 } },
-    { name: "obs_6", x: 832, y: 2496, width: 128, height: 128, spriteFrame: 8, hitbox: { width: 90, height: 105 } },
-    { name: "obs_7", x: 1728, y: 2048, width: 128, height: 128, spriteFrame: 9, hitbox: { width: 85, height: 100 } },
-    { name: "obs_8", x: 2624, y: 2496, width: 128, height: 128, spriteFrame: 10, hitbox: { width: 93, height: 108 } },
-    { name: "obs_9", x: 3520, y: 2048, width: 128, height: 128, spriteFrame: 11, hitbox: { width: 88, height: 105 } },
-    { name: "obs_10", x: 1280, y: 3456, width: 128, height: 128, spriteFrame: 0, hitbox: { width: 90, height: 105 } },
-    { name: "obs_11", x: 2496, y: 3456, width: 128, height: 128, spriteFrame: 1, hitbox: { width: 95, height: 100 } },
-  ],
-
-  playerSpawns: [
-    { name: "spawn_start", x: 320, y: 320, visualSize: 64 },
-  ],
-
-  enemySpawnZones: [
-    { name: "enemy_zone_1", x: 640, y: 1408, width: 256, height: 256, spriteFrame: 13, enemyTypes: ["tyranid", "ork", "elder"], maxAlive: 4, intervalMs: 3000, hitbox: { width: 200, height: 210 } },
-    { name: "enemy_zone_2", x: 2240, y: 1408, width: 256, height: 256, spriteFrame: 14, enemyTypes: ["tyranid", "ork", "elder"], maxAlive: 4, intervalMs: 3500, hitbox: { width: 190, height: 220 } },
-    { name: "enemy_zone_3", x: 384, y: 3008, width: 256, height: 256, spriteFrame: 15, enemyTypes: ["tyranid", "ork", "elder"], maxAlive: 4, intervalMs: 3000, hitbox: { width: 210, height: 200 } },
-    { name: "enemy_zone_4", x: 3072, y: 3008, width: 256, height: 256, spriteFrame: 12, enemyTypes: ["tyranid", "ork", "elder"], maxAlive: 5, intervalMs: 2500, hitbox: { width: 200, height: 216 } },
-  ],
-
-  exitPoint: {
-    name: "exit_north",
-    x: 3456,
-    y: 4032,
-    width: 256,
-    height: 128,
-    hitbox: { width: 200, height: 90 },
-  },
-};
-
-const rows2 = Math.ceil(MAP2_JSON.heightPx / MAP2_JSON.tileSize);
-const cols2 = Math.ceil(MAP2_JSON.widthPx / MAP2_JSON.tileSize);
-
-export const MAP_2: MapDefinition = {
-  ...MAP2_JSON,
-  tiles: generateFloorTiles(rows2, cols2),
-} as MapDefinition;
-
-// ============================================================
-// MAP REGISTRY (client-side lookup by id)
-// ============================================================
-
-const clientMapRegistry: Map<string, MapDefinition> = new Map();
-clientMapRegistry.set(MAP_1.id, MAP_1);
-clientMapRegistry.set(MAP_2.id, MAP_2);
-
-export function getClientMap(id: string): MapDefinition | undefined {
-  return clientMapRegistry.get(id);
-}
