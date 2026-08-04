@@ -45,6 +45,16 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 128,
       },
     );
+
+    // Tiled-export tileset for map1 (ALLNEWMAP64.png — 7 cols x 6 rows, 64px each)
+    this.load.spritesheet(
+      "map1_tiled_tiles",
+      "assets/maps/map1/ALLNEWMAP64.png",
+      {
+        frameWidth: 64,
+        frameHeight: 64,
+      },
+    );
   }
 
   create() {

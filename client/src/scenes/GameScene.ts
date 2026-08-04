@@ -31,7 +31,7 @@ import Phaser from "phaser";
 import { Client, Callbacks } from "@colyseus/sdk";
 import { BACKEND_URL } from "../backend";
 
-import { MAP_1, getHitboxRect } from "../maps/mapData";
+import { MAP_1, MAP_1_TILED, getHitboxRect } from "../maps/mapData";
 
 // ============================================================
 // Game Scene
@@ -84,6 +84,20 @@ export class GameScene extends Phaser.Scene {
   private currentMap = MAP_1;
   private mapObjects: Phaser.GameObjects.GameObject[] = [];
 
+  // ---- Tiled-export map (built from map1cvs.js / ALLNEWMAP32.png) ----
+  // Toggle to switch between the hand-built MAP_1 and the Tiled export.
+  private useTiledMap = true;
+  private tiledMap = MAP_1_TILED;
+
+  /** Active map pixel width (camera bounds + clamping). */
+  private get activeWidthPx(): number {
+    return this.useTiledMap ? this.tiledMap.widthPx : this.currentMap.widthPx;
+  }
+  /** Active map pixel height (camera bounds + clamping). */
+  private get activeHeightPx(): number {
+    return this.useTiledMap ? this.tiledMap.heightPx : this.currentMap.heightPx;
+  }
+
   // ---- Debug HUD (fixed to screen) ----
   private debugFPS!: Phaser.GameObjects.Text;
   private showHitboxes: boolean = false;
@@ -109,8 +123,14 @@ export class GameScene extends Phaser.Scene {
     }) as any;
 
     // ---- Render the map (tiles + obstacles + spawn + exit) ----
-    this.renderMapTiles();
-    this.renderMapEntities();
+    if (this.useTiledMap) {
+      // Map built from the Tiled editor export (map1cvs.js)
+      this.renderTiledMap();
+    } else {
+      // Original hand-built map style (kept intact)
+      this.renderMapTiles();
+      this.renderMapEntities();
+    }
     this.renderDebugHitboxes();
 
     // ---- Debug HUD (FPS + hitbox toggle button) ----
@@ -153,12 +173,7 @@ export class GameScene extends Phaser.Scene {
 
         // Camera follows the local player
         this.cameras.main.startFollow(sprite, true, 0.1, 0.1);
-        this.cameras.main.setBounds(
-          0,
-          0,
-          this.currentMap.widthPx,
-          this.currentMap.heightPx,
-        );
+        this.cameras.main.setBounds(0, 0, this.activeWidthPx, this.activeHeightPx);
 
         // When the server sends a new position, reconcile if needed
         callbacks.onChange(player, () => {
@@ -292,6 +307,76 @@ export class GameScene extends Phaser.Scene {
   // ============================================================
 
   /**
+   * Render the Tiled-export map (map1cvs.js -> MAP_1_TILED).
+   *
+   * The Tiled layer data is a 2D grid of tile ids. We blit every non-empty
+   * tile onto a single canvas texture (one draw call) using the
+   * 'map1_tiled_tiles' spritesheet (ALLNEWMAP32.png, 7 cols x 6 rows, 32px).
+   *
+   * Tile ids are Tiled global ids (firstgid=1). Sprite frame = id - 1.
+   * Special tiles (spawn=1, exit=4) ARE drawn as art so the map matches the
+   * editor exactly; their logic lives in playerSpawns / exitPoint.
+   *
+   * Obstacles are intentionally empty for now — hand-authored hitboxes are
+   * added later (see notes at bottom of mapData.ts).
+   */
+  private renderTiledMap(): void {
+    const map = this.tiledMap;
+    const { tileSize, tiles, tilesetKey, tilesetColumns } = map;
+    const rows = tiles.length;
+    const cols = tiles[0].length;
+
+    // ---- 1) Blit all tiles to one canvas texture ----
+    const canvasKey = "map1_tiled_floor";
+    if (this.textures.exists(canvasKey)) this.textures.remove(canvasKey);
+
+    const canvas = this.textures.createCanvas(
+      canvasKey,
+      cols * tileSize,
+      rows * tileSize,
+    );
+    const tilesetImg = this.textures
+      .get(tilesetKey)
+      .getSourceImage() as HTMLImageElement;
+    const ctx = canvas.getContext();
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const tileId = tiles[row][col];
+        if (tileId === 0) continue; // empty
+
+        const frameIndex = tileId - 1; // Tiled firstgid = 1
+        const frameCol = frameIndex % tilesetColumns;
+        const frameRow = Math.floor(frameIndex / tilesetColumns);
+
+        ctx.drawImage(
+          tilesetImg,
+          frameCol * tileSize,
+          frameRow * tileSize, // source
+          tileSize,
+          tileSize,
+          col * tileSize,
+          row * tileSize, // dest
+          tileSize,
+          tileSize,
+        );
+      }
+    }
+    canvas.refresh();
+    this.add.image(0, 0, canvasKey).setOrigin(0, 0).setDepth(0);
+
+    // ---- 2) Markers (optional, tiny) ----
+    // Spawn tile id 1 is already drawn as art by the loop above.
+    // Exit tile id 4 is already drawn as art by the loop above.
+    // The colored debug overlay in renderDebugHitboxes() shows their bounds.
+
+    // NOTE: obstacles (map.obstacles) start empty. When you author hitboxes
+    // in Tiled as an Object Layer (rectangles), export them and paste the
+    // resulting {x,y,width,height} list into MAP_1_TILED.obstacles. They will
+    // then render + collide automatically via the shared code paths.
+  }
+
+  /**
    * Render the floor tiles onto a canvas texture.
    * Tiles are drawn from the tile sprite sheet based on tile ID.
    */
@@ -407,8 +492,41 @@ export class GameScene extends Phaser.Scene {
    *   WHITE (thin)  = map boundary
    */
   private renderDebugHitboxes(): void {
-    const map = this.currentMap;
     const gfx = this.add.graphics().setDepth(10);
+
+    // Branch between hand-built MAP_1 and the Tiled-export MAP_1_TILED.
+    if (this.useTiledMap) {
+      const m = this.tiledMap;
+
+      // Obstacle collision hitboxes (RED thick) — empty until authored.
+      gfx.lineStyle(3, 0xff0000, 0.9);
+      for (const obs of m.obstacles) {
+        const hb = getHitboxRect(obs.x, obs.y, obs.width, obs.height, obs.hitbox);
+        gfx.strokeRect(hb.x, hb.y, hb.width, hb.height);
+      }
+
+      // Player spawn bounds (YELLOW) — tile id 1 at (col 1, row 1).
+      gfx.lineStyle(2, 0xffff00, 0.8);
+      for (const sp of m.playerSpawns) {
+        const sz = sp.visualSize ?? m.tileSize;
+        gfx.strokeRect(sp.x - sz / 2, sp.y - sz / 2, sz, sz);
+      }
+
+      // Exit zone bounds (CYAN) — tile id 4 at (col 38, row 18).
+      gfx.lineStyle(2, 0x00ffff, 0.8);
+      const ex = m.exitPoint;
+      gfx.strokeRect(ex.x, ex.y, ex.width, ex.height);
+
+      // Map boundary (WHITE)
+      gfx.lineStyle(1, 0xffffff, 0.3);
+      gfx.strokeRect(0, 0, m.widthPx, m.heightPx);
+
+      gfx.setVisible(this.showHitboxes);
+      this.debugHitboxes = gfx;
+      return;
+    }
+
+    const map = this.currentMap;
 
     // Obstacle collision hitboxes (RED thick)
     gfx.lineStyle(3, 0xff0000, 0.9);
@@ -550,17 +668,20 @@ export class GameScene extends Phaser.Scene {
     this.currentPlayer.x = Phaser.Math.Clamp(
       this.currentPlayer.x,
       0,
-      this.currentMap.widthPx,
+      this.activeWidthPx,
     );
     this.currentPlayer.y = Phaser.Math.Clamp(
       this.currentPlayer.y,
       0,
-      this.currentMap.heightPx,
+      this.activeHeightPx,
     );
 
     // ---- Client-side obstacle collision (match server) ----
     const PLAYER_RADIUS = this.PLAYER_COLLISION_RADIUS;
-    for (const obs of this.currentMap.obstacles) {
+    const activeObstacles = this.useTiledMap
+      ? this.tiledMap.obstacles
+      : this.currentMap.obstacles;
+    for (const obs of activeObstacles) {
       const hb = getHitboxRect(obs.x, obs.y, obs.width, obs.height, obs.hitbox);
 
       const closestX = Phaser.Math.Clamp(
