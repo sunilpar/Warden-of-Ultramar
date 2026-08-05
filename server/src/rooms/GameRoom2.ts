@@ -1,33 +1,26 @@
 /**
- * Game Room
- * =========
- * The authoritative server room. Handles:
- *   - Player join/leave
- *   - Receiving movement input (message type 0)
- *   - Fixed timestep simulation (60 ticks/sec)
- *
- * MESSAGE TYPES:
- *   0: Movement input { left, right, up, down, tick }
+ * Game Room 2 (Map2)
+ * ==================
+ * Same as GameRoom but uses the Map2 layered map for authoritative
+ * collision and spawn. Registered as "game_room_2".
  */
-
 import { Room, Client } from "colyseus";
 import { RoomState } from "../schema/RoomState";
 import { Player, InputData } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
-import { MapSystem } from "../systems/MapSystem";
+import { MapSystem2 } from "../systems/MapSystem2";
 import { PlayerSystem } from "../systems/PlayerSystem";
-import { LAYERED_MAP } from "../config/layeredMap";
 
-export class GameRoom extends Room {
+export class GameRoom2 extends Room {
   state = new RoomState();
   fixedTimeStep = GAME_CONFIG.FIXED_TIME_STEP_MS;
 
-  private mapSystem!: MapSystem;
+  private mapSystem!: MapSystem2;
   private playerSystem!: PlayerSystem;
 
   onCreate(_options: any) {
-    this.mapSystem = new MapSystem();
-    this.playerSystem = new PlayerSystem(this.state, this.mapSystem);
+    this.mapSystem = new MapSystem2();
+    this.playerSystem = new PlayerSystem(this.state, this.mapSystem as any);
 
     // Fixed timestep simulation loop
     let elapsedTime = 0;
@@ -39,21 +32,13 @@ export class GameRoom extends Room {
       }
     });
 
-    console.log(
-      "GameRoom created with layered map:",
-      `${LAYERED_MAP.cols}x${LAYERED_MAP.rows} tiles`,
-    );
+    console.log("GameRoom2 created with Map2");
   }
 
-  //core cycle
   fixedTick(timeStepMs: number) {
     const dt = timeStepMs / 1000;
     this.playerSystem.update(dt);
   }
-
-  // ============================================================
-  // MESSAGE HANDLERS
-  // ============================================================
 
   messages = {
     0: (client: Client, input: InputData) => {
@@ -62,27 +47,21 @@ export class GameRoom extends Room {
     },
   };
 
-  // ============================================================
-  // CONNECTION LIFECYCLE
-  // ============================================================
-
   onJoin(client: Client, _options: any) {
-    console.log("Player joined:", client.sessionId);
-
+    console.log("Player joined GameRoom2:", client.sessionId);
     const player = new Player();
     const spawn = this.mapSystem.getSpawnPoint();
     player.x = spawn.x;
     player.y = spawn.y;
-
     this.state.players.set(client.sessionId, player);
   }
 
   onLeave(client: Client, _code: number) {
-    console.log("Player left:", client.sessionId);
+    console.log("Player left GameRoom2:", client.sessionId);
     this.state.players.delete(client.sessionId);
   }
 
   onDispose() {
-    console.log("GameRoom disposed:", this.roomId);
+    console.log("GameRoom2 disposed:", this.roomId);
   }
 }

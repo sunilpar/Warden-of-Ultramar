@@ -20,7 +20,7 @@ const config: Phaser.Types.Core.GameConfig = {
     default: "arcade",
   },
   pixelArt: true,
-  scene: [SceneSelector, GameScene],
+  scene: [SceneSelector, new GameScene({ key: "game" }), new GameScene({ key: "game2" })],
 };
 
 const game = new Phaser.Game(config);

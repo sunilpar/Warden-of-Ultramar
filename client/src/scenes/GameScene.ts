@@ -37,6 +37,8 @@ import {
   LAYERED_MAP,
   resolveTileCollision,
 } from "../maps/layeredMapData";
+import type { LayeredMapData } from "../maps/layeredMapData";
+import { LAYERED_MAP_2 } from "../maps/layeredMap2Data";
 
 // ============================================================
 // Game Scene
@@ -92,8 +94,37 @@ export class GameScene extends Phaser.Scene {
   private hitboxToggleKey!: Phaser.Input.Keyboard.Key;
   private hitboxToggleButton!: Phaser.GameObjects.Text;
 
-  constructor() {
-    super({ key: "game" });
+  /**
+   * Per-scene config: which Colyseus room to join, which map to render,
+   * and (optionally) which scene to switch to when the player reaches the
+   * exit tile of this map.
+   */
+  static readonly CONFIGS: Record<
+    string,
+    {
+      roomName: string;
+      mapData: LayeredMapData;
+      nextSceneKey?: string;
+    }
+  > = {
+    game: {
+      roomName: "game_room",
+      mapData: LAYERED_MAP,
+      nextSceneKey: "game2",
+    },
+    game2: {
+      roomName: "game_room_2",
+      mapData: LAYERED_MAP_2,
+    },
+  };
+
+  private mapData!: LayeredMapData;
+  private roomName: string = "game_room";
+  private nextSceneKey?: string;
+  private transitioning: boolean = false;
+
+  constructor(config: Phaser.Types.Scenes.SettingsConfig) {
+    super(config);
   }
 
   // ============================================================
@@ -108,6 +139,36 @@ export class GameScene extends Phaser.Scene {
       up: Phaser.Input.Keyboard.KeyCodes.W,
       down: Phaser.Input.Keyboard.KeyCodes.S,
     }) as any;
+
+    // ---- Resolve this scene's map + room config from its scene key ----
+    const cfg =
+      GameScene.CONFIGS[this.sys.settings.key] ?? GameScene.CONFIGS["game"];
+    this.mapData = cfg.mapData;
+    this.roomName = cfg.roomName;
+    this.nextSceneKey = cfg.nextSceneKey;
+    this.transitioning = false;
+
+    // ---- Transition intro: if launched with { fadeIn }, this scene is
+    //      the destination of a map transition. Cover the screen with a
+    //      black rectangle + the loading image while the room connects,
+    //      then fade them out to reveal the loaded map. ----
+    const startData = this.sys.settings.data as { fadeIn?: boolean } | undefined;
+    const isFadeIn = !!startData?.fadeIn;
+
+    let cover: Phaser.GameObjects.Rectangle | null = null;
+    let loadingImg: Phaser.GameObjects.Image | null = null;
+    if (isFadeIn) {
+      const { width, height } = this.scale;
+      cover = this.add
+        .rectangle(0, 0, width, height, 0x000000)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(1000);
+      loadingImg = this.add
+        .image(this.cameras.main.centerX, this.cameras.main.centerY, "loading_screen")
+        .setScrollFactor(0)
+        .setDepth(1001);
+    }
 
     // ---- Render the layered map (baselayer + interactive + zones) ----
     this.renderLayeredMap();
@@ -124,7 +185,28 @@ export class GameScene extends Phaser.Scene {
     // ---- Connect to the Colyseus server ----
     await this.connect();
 
-    if (!this.room) return;
+    if (!this.room) {
+      // Connection failed — still drop the cover so the player isn't stuck.
+      if (cover) cover.destroy();
+      if (loadingImg) loadingImg.destroy();
+      return;
+    }
+
+    // ---- If this was a map transition, fade the black cover + loading
+    //      image out to reveal the freshly loaded map. ----
+    if (isFadeIn && cover && loadingImg) {
+      const FADE_MS = 400;
+      this.tweens.add({
+        targets: [cover, loadingImg],
+        alpha: { from: 1, to: 0 },
+        duration: FADE_MS,
+        ease: "Linear",
+        onComplete: () => {
+          cover?.destroy();
+          loadingImg?.destroy();
+        },
+      });
+    }
 
     // ============================================================
     // COLYSEUS STATE LISTENERS (v0.17 API — use Callbacks.get())
@@ -156,8 +238,8 @@ export class GameScene extends Phaser.Scene {
         this.cameras.main.setBounds(
           0,
           0,
-          LAYERED_MAP.widthPx,
-          LAYERED_MAP.heightPx,
+          this.mapData.widthPx,
+          this.mapData.heightPx,
         );
 
         // When the server sends a new position, reconcile if needed
@@ -198,7 +280,7 @@ export class GameScene extends Phaser.Scene {
 
   async connect() {
     try {
-      this.room = await this.client.joinOrCreate("game_room");
+      this.room = await this.client.joinOrCreate(this.roomName);
     } catch (e) {
       console.error("Failed to connect:", e);
     }
@@ -303,7 +385,7 @@ export class GameScene extends Phaser.Scene {
    * Tile ids are Tiled global ids (firstgid=1); frame index = id - firstgid.
    */
   private renderLayeredMap(): void {
-    const map = LAYERED_MAP;
+    const map = this.mapData;
     const { tileSize, tilesetColumns, tilesetKey, firstgid, cols, rows } = map;
 
     const tilesetImg = this.textures
@@ -396,7 +478,7 @@ export class GameScene extends Phaser.Scene {
    */
   private renderDebugHitboxes(): void {
     const gfx = this.add.graphics().setDepth(10);
-    const map = LAYERED_MAP;
+    const map = this.mapData;
     const { tileSize, cols, rows } = map;
 
     // Collision tiles (RED)
@@ -550,12 +632,12 @@ export class GameScene extends Phaser.Scene {
     this.currentPlayer.x = Phaser.Math.Clamp(
       this.currentPlayer.x,
       0,
-      LAYERED_MAP.widthPx,
+      this.mapData.widthPx,
     );
     this.currentPlayer.y = Phaser.Math.Clamp(
       this.currentPlayer.y,
       0,
-      LAYERED_MAP.heightPx,
+      this.mapData.heightPx,
     );
 
     // ---- Resolve tile collisions (O(1) — matches server) ----
@@ -563,13 +645,21 @@ export class GameScene extends Phaser.Scene {
       this.currentPlayer.x,
       this.currentPlayer.y,
       this.PLAYER_COLLISION_RADIUS,
-      LAYERED_MAP.collisionGrid,
-      LAYERED_MAP.cols,
-      LAYERED_MAP.rows,
-      LAYERED_MAP.tileSize,
+      this.mapData.collisionGrid,
+      this.mapData.cols,
+      this.mapData.rows,
+      this.mapData.tileSize,
     );
     this.currentPlayer.x = resolved.x;
     this.currentPlayer.y = resolved.y;
+
+    // ---- Map exit transition ----
+    // When the player steps onto this map's exit tile, move them to the
+    // next room/scene. `transitioning` guards against re-entry.
+    if (!this.transitioning && this.nextSceneKey && this.isOnExitTile()) {
+      this.transitionToScene(this.nextSceneKey);
+      return;
+    }
 
     // ---- Interpolate remote players toward server position ----
     for (const sessionId in this.playerEntities) {
@@ -580,10 +670,100 @@ export class GameScene extends Phaser.Scene {
       const serverY = entity.data.get("serverY") as number;
 
       if (serverX !== undefined && serverY !== undefined) {
+        // Distance to server target - used to detect movement and direction
+        const dx = serverX - entity.x;
+        const dy = serverY - entity.y;
+        const dist = Math.hypot(dx, dy);
+
         entity.x = Phaser.Math.Linear(entity.x, serverX, 0.2);
         entity.y = Phaser.Math.Linear(entity.y, serverY, 0.2);
+
+        // ---- Animation driving for remote players ----
+        // Direction is derived client-side from the position delta
+        // because the Player schema does not sync facing direction.
+        const moving = dist > 1.5; // small threshold to ignore jitter
+        let direction = entity.data.get("lastDirection") as string;
+        if (!direction) direction = "down";
+
+        if (moving) {
+          // Dominant axis wins (mirrors local diagonal handling)
+          if (Math.abs(dx) > Math.abs(dy)) {
+            direction = dx > 0 ? "right" : "left";
+          } else {
+            direction = dy > 0 ? "down" : "up";
+          }
+        }
+        entity.setData("lastDirection", direction);
+
+        const animKey = moving
+          ? `char_walk_${direction}`
+          : `char_idle_${direction}`;
+
+        // Only switch animation if it changed (avoids restarting every tick)
+        const currentAnim = entity.anims.currentAnim;
+        if (!currentAnim || currentAnim.key !== animKey) {
+          entity.anims.play(animKey);
+        }
       }
     }
+  }
+
+  /**
+   * Returns true if the local player's center is inside this map's exit zone.
+   */
+  private isOnExitTile(): boolean {
+    if (!this.currentPlayer) return false;
+    const ex = this.mapData.exitPoint;
+    return (
+      this.currentPlayer.x >= ex.x &&
+      this.currentPlayer.x <= ex.x + ex.width &&
+      this.currentPlayer.y >= ex.y &&
+      this.currentPlayer.y <= ex.y + ex.height
+    );
+  }
+
+  /**
+   * Fade to black, show the loading screen image, then switch to the next
+   * Phaser scene. The destination scene fades in from black once its room
+   * has finished connecting (see create()).
+   *
+   * The old Colyseus room is left during the dark phase and is
+   * auto-disposed by Colyseus once it has no clients.
+   */
+  private transitionToScene(sceneKey: string): void {
+    if (this.transitioning) return;
+    this.transitioning = true;
+
+    const cam = this.cameras.main;
+    // Duration of each fade half (ms). Total dark time ~= 2 * FADE_MS
+    // plus the room-connect wait in the destination scene.
+    const FADE_MS = 400;
+
+    // Once the camera has fully faded to black, swap scenes.
+    cam.once("camerafadeoutcomplete", () => {
+      // Leave the old room (it auto-disposes when empty).
+      try {
+        this.room?.leave();
+      } catch (_e) {
+        // ignore
+      }
+      this.room = null;
+
+      // Tear down local entity sprites.
+      for (const id in this.playerEntities) {
+        const e = this.playerEntities[id];
+        if (e) e.destroy();
+        delete this.playerEntities[id];
+      }
+      this.playerEntities = {};
+
+      // Start the destination scene under a black cover so the player
+      // never sees the unloaded map.
+      this.scene.launch(sceneKey, { fadeIn: true });
+      this.scene.stop();
+    });
+
+    cam.fadeOut(FADE_MS, 0, 0, 0);
   }
 
   // ============================================================

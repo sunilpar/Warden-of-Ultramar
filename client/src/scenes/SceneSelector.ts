@@ -15,6 +15,8 @@ export class SceneSelector extends Phaser.Scene {
   preload() {
     // Start screen background
     this.load.image("game_menu", "assets/menu_final.png");
+    // Loading screen shown during map transitions
+    this.load.image("loading_screen", "assets/loading_up.png");
 
     // Character sprite sheet (4x4 grid, each frame 64x64)
     this.load.spritesheet(

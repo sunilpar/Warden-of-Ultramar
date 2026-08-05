@@ -4,10 +4,12 @@ import { defineServer, defineRoom, monitor, playground } from "colyseus";
  * Import your Room files
  */
 import { GameRoom } from "./rooms/GameRoom";
+import { GameRoom2 } from "./rooms/GameRoom2";
 
 const server = defineServer({
     rooms: {
         game_room: defineRoom(GameRoom),
+        game_room_2: defineRoom(GameRoom2),
     },
 
     express: (app) => {
