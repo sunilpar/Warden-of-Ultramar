@@ -55,6 +55,16 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 64,
       },
     );
+
+    // Layered Tiled map tileset (BIGOBS64sym.png — 7 cols x 6 rows, 64px each)
+    this.load.spritesheet(
+      "bigobs_tiles",
+      "assets/maps/map1/BIGOBS64sym.png",
+      {
+        frameWidth: 64,
+        frameHeight: 64,
+      },
+    );
   }
 
   create() {

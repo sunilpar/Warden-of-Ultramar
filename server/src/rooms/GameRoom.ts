@@ -14,9 +14,9 @@ import { Room, Client } from "colyseus";
 import { RoomState } from "../schema/RoomState";
 import { Player, InputData } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
-import { getDefaultMap } from "../config/maps";
 import { MapSystem } from "../systems/MapSystem";
 import { PlayerSystem } from "../systems/PlayerSystem";
+import { LAYERED_MAP } from "../config/layeredMap";
 
 export class GameRoom extends Room {
   state = new RoomState();
@@ -26,10 +26,7 @@ export class GameRoom extends Room {
   private playerSystem!: PlayerSystem;
 
   onCreate(_options: any) {
-    const mapDef = getDefaultMap();
-    if (!mapDef) throw new Error("No maps registered!");
-
-    this.mapSystem = new MapSystem(mapDef);
+    this.mapSystem = new MapSystem();
     this.playerSystem = new PlayerSystem(this.state, this.mapSystem);
 
     // Fixed timestep simulation loop
@@ -42,7 +39,10 @@ export class GameRoom extends Room {
       }
     });
 
-    console.log("GameRoom created with map:", mapDef.name);
+    console.log(
+      "GameRoom created with layered map:",
+      `${LAYERED_MAP.cols}x${LAYERED_MAP.rows} tiles`,
+    );
   }
 
   fixedTick(timeStepMs: number) {

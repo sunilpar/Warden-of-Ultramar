@@ -1,97 +1,83 @@
 /**
- * Map System
- * ==========
- * Handles collision detection against map obstacles and boundary clamping.
- * This is a simple single-map system (no per-player map instances).
+ * Map System (Layered / Grid-Based)
+ * ==================================
+ * Authoritative collision against the layered Tiled map.
+ *
+ * Collision is O(1): the player circle (radius < tileSize/2) overlaps at most
+ * 4 grid cells, so we check a 3×3 neighborhood around the player's cell.
+ *
+ * MUST match the client's resolveTileCollision() exactly.
  */
 
-import { MapDefinition, MapObstacle, HitboxOverride } from "../config/maps";
-
-/** Compute the effective collision rect from a visual rect + optional hitbox override. */
-function getHitboxRect(
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  hitbox?: HitboxOverride,
-): { x: number; y: number; width: number; height: number } {
-  if (!hitbox) return { x, y, width, height };
-  const offsetX = (width - hitbox.width) / 2;
-  const offsetY = (height - hitbox.height) / 2;
-  return { x: x + offsetX, y: y + offsetY, width: hitbox.width, height: hitbox.height };
-}
+import { LAYERED_MAP } from "../config/layeredMap";
 
 export class MapSystem {
-  private map: MapDefinition;
+  private tileSize = LAYERED_MAP.tileSize;
+  private cols = LAYERED_MAP.cols;
+  private rows = LAYERED_MAP.rows;
+  private grid = LAYERED_MAP.collisionGrid;
 
-  constructor(map: MapDefinition) {
-    this.map = map;
+  get width(): number {
+    return LAYERED_MAP.widthPx;
   }
-
-  get width(): number { return this.map.widthPx; }
-  get height(): number { return this.map.heightPx; }
+  get height(): number {
+    return LAYERED_MAP.heightPx;
+  }
 
   getSpawnPoint(): { x: number; y: number } {
-    const spawn = this.map.playerSpawns[0];
-    return { x: spawn.x, y: spawn.y };
-  }
-
-  getObstacles(): MapObstacle[] {
-    return this.map.obstacles;
+    return { ...LAYERED_MAP.spawnPoint };
   }
 
   /**
-   * Check if a circle (at x,y with given radius) collides with any obstacle.
-   * Returns the first colliding obstacle, or null.
+   * Resolve the player circle out of any solid tiles it overlaps.
+   * Returns the corrected position. O(1).
    */
-  checkObstacleCollision(x: number, y: number, radius: number): MapObstacle | null {
-    for (const obstacle of this.map.obstacles) {
-      const hb = getHitboxRect(
-        obstacle.x, obstacle.y, obstacle.width, obstacle.height, obstacle.hitbox,
-      );
-      const closestX = Math.max(hb.x, Math.min(x, hb.x + hb.width));
-      const closestY = Math.max(hb.y, Math.min(y, hb.y + hb.height));
-      const dx = x - closestX;
-      const dy = y - closestY;
-      if (dx * dx + dy * dy < radius * radius) {
-        return obstacle;
+  resolveTileCollision(
+    x: number,
+    y: number,
+    radius: number,
+  ): { x: number; y: number } {
+    const col = Math.floor(x / this.tileSize);
+    const row = Math.floor(y / this.tileSize);
+
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        const r = row + dr;
+        const c = col + dc;
+        if (r < 0 || r >= this.rows || c < 0 || c >= this.cols) continue;
+        if (!this.grid[r * this.cols + c]) continue;
+
+        const cellX = c * this.tileSize;
+        const cellY = r * this.tileSize;
+
+        const closestX = Math.max(cellX, Math.min(x, cellX + this.tileSize));
+        const closestY = Math.max(cellY, Math.min(y, cellY + this.tileSize));
+        const dx = x - closestX;
+        const dy = y - closestY;
+        const distSq = dx * dx + dy * dy;
+
+        if (distSq < radius * radius) {
+          const dist = Math.sqrt(distSq);
+          if (dist > 0.0001) {
+            const push = radius - dist;
+            x += (dx / dist) * push;
+            y += (dy / dist) * push;
+          } else {
+            // Center inside the cell — push out along nearest edge
+            const dLeft = x - cellX;
+            const dRight = cellX + this.tileSize - x;
+            const dTop = y - cellY;
+            const dBottom = cellY + this.tileSize - y;
+            const minD = Math.min(dLeft, dRight, dTop, dBottom);
+            if (minD === dLeft) x = cellX - radius;
+            else if (minD === dRight) x = cellX + this.tileSize + radius;
+            else if (minD === dTop) y = cellY - radius;
+            else y = cellY + this.tileSize + radius;
+          }
+        }
       }
     }
-    return null;
-  }
 
-  /**
-   * Push a circle out of an obstacle so they no longer overlap.
-   */
-  resolveObstacleCollision(
-    x: number, y: number, radius: number, obstacle: MapObstacle,
-  ): { x: number; y: number } {
-    const hb = getHitboxRect(
-      obstacle.x, obstacle.y, obstacle.width, obstacle.height, obstacle.hitbox,
-    );
-    const closestX = Math.max(hb.x, Math.min(x, hb.x + hb.width));
-    const closestY = Math.max(hb.y, Math.min(y, hb.y + hb.height));
-    const dx = x - closestX;
-    const dy = y - closestY;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-
-    if (dist === 0) {
-      // Center is inside the obstacle — push out along nearest edge
-      const leftDist = Math.abs(x - hb.x);
-      const rightDist = Math.abs(hb.x + hb.width - x);
-      const topDist = Math.abs(y - hb.y);
-      const bottomDist = Math.abs(hb.y + hb.height - y);
-      const minDist = Math.min(leftDist, rightDist, topDist, bottomDist);
-      if (minDist === leftDist) return { x: hb.x - radius, y };
-      if (minDist === rightDist) return { x: hb.x + hb.width + radius, y };
-      if (minDist === topDist) return { x, y: hb.y - radius };
-      return { x, y: hb.y + hb.height + radius };
-    }
-
-    const overlap = radius - dist;
-    return {
-      x: x + (dx / dist) * overlap,
-      y: y + (dy / dist) * overlap,
-    };
+    return { x, y };
   }
 }

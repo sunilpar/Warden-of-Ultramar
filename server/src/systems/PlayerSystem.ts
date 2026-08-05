@@ -47,17 +47,12 @@ export class PlayerSystem {
         player.x = Math.max(0, Math.min(this.mapSystem.width, player.x));
         player.y = Math.max(0, Math.min(this.mapSystem.height, player.y));
 
-        // Resolve obstacle collisions
-        const hit = this.mapSystem.checkObstacleCollision(
+        // Resolve tile collisions (O(1) grid lookup)
+        const resolved = this.mapSystem.resolveTileCollision(
           player.x, player.y, GAME_CONFIG.PLAYER.COLLISION_RADIUS,
         );
-        if (hit) {
-          const resolved = this.mapSystem.resolveObstacleCollision(
-            player.x, player.y, GAME_CONFIG.PLAYER.COLLISION_RADIUS, hit,
-          );
-          player.x = resolved.x;
-          player.y = resolved.y;
-        }
+        player.x = resolved.x;
+        player.y = resolved.y;
 
         if (input.tick !== undefined) {
           player.tick = input.tick;

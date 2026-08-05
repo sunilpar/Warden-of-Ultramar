@@ -15,23 +15,28 @@
  *   confirms). If the server's position differs significantly, we snap to it.
  *   This hides network latency and makes movement feel instant.
  *
+ * LAYERED MAP (layerbasedMap1.json — the source of truth):
+ *   - "baselayer"    → floor tiles, always drawn (depth 0)
+ *   - "interactive"  → walls / decor / spawn / exit markers; 0 = skip (depth 1)
+ *   - "ememy spawn"  → object layer; rectangles where enemies will spawn
+ *   Collision is O(1) tile-grid lookup (see resolveTileCollision).
+ *
  * CHARACTER SPRITE SHEET (CharacterSpriteSheet64.png):
  *   4x4 grid, each frame 64x64 pixels.
  *   Row 0: walk RIGHT (frames  0,  1,  2,  3)
  *   Row 1: walk LEFT  (frames  4,  5,  6,  7)
  *   Row 2: walk UP    (frames  8,  9, 10, 11)
  *   Row 3: walk DOWN  (frames 12, 13, 14, 15)
- *
- * DEBUG HUD (top-left, fixed to screen):
- *   - FPS counter (updates every frame)
- *   - Hitbox toggle button (click or press F3)
  */
 
 import Phaser from "phaser";
 import { Client, Callbacks } from "@colyseus/sdk";
 import { BACKEND_URL } from "../backend";
 
-import { MAP_1, MAP_1_TILED, getHitboxRect } from "../maps/mapData";
+import {
+  LAYERED_MAP,
+  resolveTileCollision,
+} from "../maps/layeredMapData";
 
 // ============================================================
 // Game Scene
@@ -80,24 +85,6 @@ export class GameScene extends Phaser.Scene {
   private animationsCreated: boolean = false;
   private lastDirection: string = "down"; // default facing direction
 
-  // ---- Map ----
-  private currentMap = MAP_1;
-  private mapObjects: Phaser.GameObjects.GameObject[] = [];
-
-  // ---- Tiled-export map (built from map1cvs.js / ALLNEWMAP32.png) ----
-  // Toggle to switch between the hand-built MAP_1 and the Tiled export.
-  private useTiledMap = true;
-  private tiledMap = MAP_1_TILED;
-
-  /** Active map pixel width (camera bounds + clamping). */
-  private get activeWidthPx(): number {
-    return this.useTiledMap ? this.tiledMap.widthPx : this.currentMap.widthPx;
-  }
-  /** Active map pixel height (camera bounds + clamping). */
-  private get activeHeightPx(): number {
-    return this.useTiledMap ? this.tiledMap.heightPx : this.currentMap.heightPx;
-  }
-
   // ---- Debug HUD (fixed to screen) ----
   private debugFPS!: Phaser.GameObjects.Text;
   private showHitboxes: boolean = false;
@@ -122,15 +109,8 @@ export class GameScene extends Phaser.Scene {
       down: Phaser.Input.Keyboard.KeyCodes.S,
     }) as any;
 
-    // ---- Render the map (tiles + obstacles + spawn + exit) ----
-    if (this.useTiledMap) {
-      // Map built from the Tiled editor export (map1cvs.js)
-      this.renderTiledMap();
-    } else {
-      // Original hand-built map style (kept intact)
-      this.renderMapTiles();
-      this.renderMapEntities();
-    }
+    // ---- Render the layered map (baselayer + interactive + zones) ----
+    this.renderLayeredMap();
     this.renderDebugHitboxes();
 
     // ---- Debug HUD (FPS + hitbox toggle button) ----
@@ -156,7 +136,7 @@ export class GameScene extends Phaser.Scene {
       const sprite = this.add
         .sprite(player.x, player.y, "character_sheet", 0)
         .setDisplaySize(64, 64)
-        .setDepth(2);
+        .setDepth(3);
 
       // Create walk/idle animations once (shared by all sprites)
       if (!this.animationsCreated) {
@@ -173,7 +153,12 @@ export class GameScene extends Phaser.Scene {
 
         // Camera follows the local player
         this.cameras.main.startFollow(sprite, true, 0.1, 0.1);
-        this.cameras.main.setBounds(0, 0, this.activeWidthPx, this.activeHeightPx);
+        this.cameras.main.setBounds(
+          0,
+          0,
+          LAYERED_MAP.widthPx,
+          LAYERED_MAP.heightPx,
+        );
 
         // When the server sends a new position, reconcile if needed
         callbacks.onChange(player, () => {
@@ -303,179 +288,96 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ============================================================
-  // MAP RENDERING
+  // LAYERED MAP RENDERING
   // ============================================================
 
   /**
-   * Render the Tiled-export map (map1cvs.js -> MAP_1_TILED).
+   * Render the layered Tiled map:
+   *   - Baselayer: every tile drawn (depth 0) — the floor.
+   *   - Interactive layer: every non-zero tile drawn (depth 1) — walls,
+   *     decor, spawn & exit markers.
    *
-   * The Tiled layer data is a 2D grid of tile ids. We blit every non-empty
-   * tile onto a single canvas texture (one draw call) using the
-   * 'map1_tiled_tiles' spritesheet (ALLNEWMAP32.png, 7 cols x 6 rows, 32px).
+   * Both layers are blitted into a single canvas texture each (one draw call
+   * per layer) using the BIGOBS64sym.png spritesheet.
    *
-   * Tile ids are Tiled global ids (firstgid=1). Sprite frame = id - 1.
-   * Special tiles (spawn=1, exit=4) ARE drawn as art so the map matches the
-   * editor exactly; their logic lives in playerSpawns / exitPoint.
-   *
-   * Obstacles are intentionally empty for now — hand-authored hitboxes are
-   * added later (see notes at bottom of mapData.ts).
+   * Tile ids are Tiled global ids (firstgid=1); frame index = id - firstgid.
    */
-  private renderTiledMap(): void {
-    const map = this.tiledMap;
-    const { tileSize, tiles, tilesetKey, tilesetColumns } = map;
-    const rows = tiles.length;
-    const cols = tiles[0].length;
+  private renderLayeredMap(): void {
+    const map = LAYERED_MAP;
+    const { tileSize, tilesetColumns, tilesetKey, firstgid, cols, rows } = map;
 
-    // ---- 1) Blit all tiles to one canvas texture ----
-    const canvasKey = "map1_tiled_floor";
-    if (this.textures.exists(canvasKey)) this.textures.remove(canvasKey);
-
-    const canvas = this.textures.createCanvas(
-      canvasKey,
-      cols * tileSize,
-      rows * tileSize,
-    );
     const tilesetImg = this.textures
       .get(tilesetKey)
       .getSourceImage() as HTMLImageElement;
-    const ctx = canvas.getContext();
 
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        const tileId = tiles[row][col];
-        if (tileId === 0) continue; // empty
-
-        const frameIndex = tileId - 1; // Tiled firstgid = 1
-        const frameCol = frameIndex % tilesetColumns;
-        const frameRow = Math.floor(frameIndex / tilesetColumns);
-
-        ctx.drawImage(
-          tilesetImg,
-          frameCol * tileSize,
-          frameRow * tileSize, // source
-          tileSize,
-          tileSize,
-          col * tileSize,
-          row * tileSize, // dest
-          tileSize,
-          tileSize,
-        );
-      }
-    }
-    canvas.refresh();
-    this.add.image(0, 0, canvasKey).setOrigin(0, 0).setDepth(0);
-
-    // ---- 2) Markers (optional, tiny) ----
-    // Spawn tile id 1 is already drawn as art by the loop above.
-    // Exit tile id 4 is already drawn as art by the loop above.
-    // The colored debug overlay in renderDebugHitboxes() shows their bounds.
-
-    // NOTE: obstacles (map.obstacles) start empty. When you author hitboxes
-    // in Tiled as an Object Layer (rectangles), export them and paste the
-    // resulting {x,y,width,height} list into MAP_1_TILED.obstacles. They will
-    // then render + collide automatically via the shared code paths.
-  }
-
-  /**
-   * Render the floor tiles onto a canvas texture.
-   * Tiles are drawn from the tile sprite sheet based on tile ID.
-   */
-  private renderMapTiles(): void {
-    const map = this.currentMap;
-    const { tileSize, tiles } = map;
-    const rows = tiles.length;
-    const cols = tiles[0].length;
-    const ss = map.spriteSheets.tiles;
-
-    const canvasKey = "map_floor_canvas";
-    if (this.textures.exists(canvasKey)) {
-      this.textures.remove(canvasKey);
-    }
-
-    const canvas = this.textures.createCanvas(
-      canvasKey,
+    // ---- 1) Baselayer canvas (depth 0) ----
+    const baseKey = "layered_baselayer";
+    if (this.textures.exists(baseKey)) this.textures.remove(baseKey);
+    const baseCanvas = this.textures.createCanvas(
+      baseKey,
       cols * tileSize,
       rows * tileSize,
     );
-    const tilesetImg = this.textures
-      .get("map1_tiles")
-      .getSourceImage() as HTMLImageElement;
-    const ctx = canvas.getContext();
+    const baseCtx = baseCanvas.getContext();
 
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        const tileId = tiles[row][col];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const tileId = map.baselayer[r][c];
         if (tileId === 0) continue;
-
-        // tileId maps to sprite frame (tileId - 1)
-        const frameIndex = tileId - 1;
-        const frameCol = frameIndex % ss.columns;
-        const frameRow = Math.floor(frameIndex / ss.columns);
-
-        ctx.drawImage(
+        const frameIndex = tileId - firstgid;
+        const fc = frameIndex % tilesetColumns;
+        const fr = Math.floor(frameIndex / tilesetColumns);
+        baseCtx.drawImage(
           tilesetImg,
-          frameCol * ss.frameWidth,
-          frameRow * ss.frameHeight, // source
-          ss.frameWidth,
-          ss.frameHeight,
-          col * tileSize,
-          row * tileSize, // destination
+          fc * tileSize,
+          fr * tileSize,
+          tileSize,
+          tileSize,
+          c * tileSize,
+          r * tileSize,
           tileSize,
           tileSize,
         );
       }
     }
-    canvas.refresh();
+    baseCanvas.refresh();
+    this.add.image(0, 0, baseKey).setOrigin(0, 0).setDepth(0);
 
-    const floorImg = this.add
-      .image(0, 0, canvasKey)
-      .setOrigin(0, 0)
-      .setDepth(0);
-    this.mapObjects.push(floorImg);
-  }
+    // ---- 2) Interactive layer canvas (depth 1) — skip tile 0 ----
+    const interKey = "layered_interactive";
+    if (this.textures.exists(interKey)) this.textures.remove(interKey);
+    const interCanvas = this.textures.createCanvas(
+      interKey,
+      cols * tileSize,
+      rows * tileSize,
+    );
+    const interCtx = interCanvas.getContext();
 
-  /**
-   * Render obstacles, player spawn point, and exit zone using sprite sheets.
-   */
-  private renderMapEntities(): void {
-    const map = this.currentMap;
-
-    // Obstacles — use spriteFrame from map data
-    for (const obs of map.obstacles) {
-      const img = this.add
-        .image(
-          obs.x + obs.width / 2,
-          obs.y + obs.height / 2,
-          "map1_obstacles",
-          obs.spriteFrame,
-        )
-        .setDepth(1)
-        .setDisplaySize(obs.width, obs.height);
-      this.mapObjects.push(img);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const tileId = map.interactiveLayer[r][c];
+        if (tileId === 0) continue; // empty — nothing to draw
+        const frameIndex = tileId - firstgid;
+        const fc = frameIndex % tilesetColumns;
+        const fr = Math.floor(frameIndex / tilesetColumns);
+        interCtx.drawImage(
+          tilesetImg,
+          fc * tileSize,
+          fr * tileSize,
+          tileSize,
+          tileSize,
+          c * tileSize,
+          r * tileSize,
+          tileSize,
+          tileSize,
+        );
+      }
     }
+    interCanvas.refresh();
+    this.add.image(0, 0, interKey).setOrigin(0, 0).setDepth(1);
 
-    // Player spawn point
-    for (const spawn of map.playerSpawns) {
-      const size = spawn.visualSize ?? 64;
-      const img = this.add
-        .image(spawn.x, spawn.y, "map1_tiles", map.playerSpawnTileFrame)
-        .setDepth(1)
-        .setDisplaySize(size, size);
-      this.mapObjects.push(img);
-    }
-
-    // Exit zone
-    const exit = map.exitPoint;
-    const exitImg = this.add
-      .image(
-        exit.x + exit.width / 2,
-        exit.y + exit.height / 2,
-        "map1_tiles",
-        map.exitTileFrame,
-      )
-      .setDepth(1)
-      .setDisplaySize(exit.width, exit.height);
-    this.mapObjects.push(exitImg);
+    // Enemy spawn zones are NOT drawn here — they only appear in the debug
+    // hitbox overlay (toggle F3), so the map is clean during normal play.
   }
 
   // ============================================================
@@ -486,72 +388,52 @@ export class GameScene extends Phaser.Scene {
    * Render debug hitbox overlays (toggle with F3 or button).
    *
    * Colors:
-   *   RED (thick)   = obstacle collision hitbox (what actually blocks)
-   *   YELLOW (thin) = player spawn visual bounds
-   *   CYAN (thin)   = exit zone visual bounds
+   *   RED (thick)   = collision tile (blocks movement)
+   *   YELLOW (thin) = player spawn point
+   *   CYAN (thin)   = exit zone
+   *   MAGENTA (thin)= enemy spawn zone
    *   WHITE (thin)  = map boundary
    */
   private renderDebugHitboxes(): void {
     const gfx = this.add.graphics().setDepth(10);
+    const map = LAYERED_MAP;
+    const { tileSize, cols, rows } = map;
 
-    // Branch between hand-built MAP_1 and the Tiled-export MAP_1_TILED.
-    if (this.useTiledMap) {
-      const m = this.tiledMap;
-
-      // Obstacle collision hitboxes (RED thick) — empty until authored.
-      gfx.lineStyle(3, 0xff0000, 0.9);
-      for (const obs of m.obstacles) {
-        const hb = getHitboxRect(obs.x, obs.y, obs.width, obs.height, obs.hitbox);
-        gfx.strokeRect(hb.x, hb.y, hb.width, hb.height);
+    // Collision tiles (RED)
+    gfx.lineStyle(3, 0xff0000, 0.7);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (map.collisionGrid[r * cols + c]) {
+          gfx.strokeRect(c * tileSize, r * tileSize, tileSize, tileSize);
+        }
       }
-
-      // Player spawn bounds (YELLOW) — tile id 1 at (col 1, row 1).
-      gfx.lineStyle(2, 0xffff00, 0.8);
-      for (const sp of m.playerSpawns) {
-        const sz = sp.visualSize ?? m.tileSize;
-        gfx.strokeRect(sp.x - sz / 2, sp.y - sz / 2, sz, sz);
-      }
-
-      // Exit zone bounds (CYAN) — tile id 4 at (col 38, row 18).
-      gfx.lineStyle(2, 0x00ffff, 0.8);
-      const ex = m.exitPoint;
-      gfx.strokeRect(ex.x, ex.y, ex.width, ex.height);
-
-      // Map boundary (WHITE)
-      gfx.lineStyle(1, 0xffffff, 0.3);
-      gfx.strokeRect(0, 0, m.widthPx, m.heightPx);
-
-      gfx.setVisible(this.showHitboxes);
-      this.debugHitboxes = gfx;
-      return;
     }
 
-    const map = this.currentMap;
+    // Player spawn point (YELLOW)
+    gfx.lineStyle(2, 0xffff00, 0.9);
+    const sp = map.spawnPoint;
+    gfx.strokeRect(
+      sp.x - tileSize / 2,
+      sp.y - tileSize / 2,
+      tileSize,
+      tileSize,
+    );
 
-    // Obstacle collision hitboxes (RED thick)
-    gfx.lineStyle(3, 0xff0000, 0.9);
-    for (const obs of map.obstacles) {
-      const hb = getHitboxRect(obs.x, obs.y, obs.width, obs.height, obs.hitbox);
-      gfx.strokeRect(hb.x, hb.y, hb.width, hb.height);
+    // Exit zone (CYAN)
+    gfx.lineStyle(2, 0x00ffff, 0.9);
+    const ex = map.exitPoint;
+    gfx.strokeRect(ex.x, ex.y, ex.width, ex.height);
+
+    // Enemy spawn zones (MAGENTA)
+    gfx.lineStyle(2, 0xff00ff, 0.7);
+    for (const zone of map.enemySpawnZones) {
+      gfx.strokeRect(zone.x, zone.y, zone.width, zone.height);
     }
-
-    // Player spawn bounds (YELLOW)
-    gfx.lineStyle(2, 0xffff00, 0.6);
-    for (const spawn of map.playerSpawns) {
-      const size = spawn.visualSize ?? 64;
-      gfx.strokeRect(spawn.x - size / 2, spawn.y - size / 2, size, size);
-    }
-
-    // Exit zone bounds (CYAN)
-    gfx.lineStyle(2, 0x00ffff, 0.6);
-    const exit = map.exitPoint;
-    gfx.strokeRect(exit.x, exit.y, exit.width, exit.height);
 
     // Map boundary (WHITE)
     gfx.lineStyle(1, 0xffffff, 0.3);
     gfx.strokeRect(0, 0, map.widthPx, map.heightPx);
 
-    // Start hidden
     gfx.setVisible(this.showHitboxes);
     this.debugHitboxes = gfx;
   }
@@ -615,7 +497,7 @@ export class GameScene extends Phaser.Scene {
    *   2. Send input to server (message type 0)
    *   3. Predict movement locally (apply same formula as server)
    *   4. Clamp to map boundaries
-   *   5. Resolve obstacle collisions
+   *   5. Resolve tile collisions (O(1) grid lookup)
    *   6. Interpolate remote players toward their server positions
    *   7. Update FPS counter
    */
@@ -668,61 +550,26 @@ export class GameScene extends Phaser.Scene {
     this.currentPlayer.x = Phaser.Math.Clamp(
       this.currentPlayer.x,
       0,
-      this.activeWidthPx,
+      LAYERED_MAP.widthPx,
     );
     this.currentPlayer.y = Phaser.Math.Clamp(
       this.currentPlayer.y,
       0,
-      this.activeHeightPx,
+      LAYERED_MAP.heightPx,
     );
 
-    // ---- Client-side obstacle collision (match server) ----
-    const PLAYER_RADIUS = this.PLAYER_COLLISION_RADIUS;
-    const activeObstacles = this.useTiledMap
-      ? this.tiledMap.obstacles
-      : this.currentMap.obstacles;
-    for (const obs of activeObstacles) {
-      const hb = getHitboxRect(obs.x, obs.y, obs.width, obs.height, obs.hitbox);
-
-      const closestX = Phaser.Math.Clamp(
-        this.currentPlayer.x,
-        hb.x,
-        hb.x + hb.width,
-      );
-      const closestY = Phaser.Math.Clamp(
-        this.currentPlayer.y,
-        hb.y,
-        hb.y + hb.height,
-      );
-
-      const dx = this.currentPlayer.x - closestX;
-      const dy = this.currentPlayer.y - closestY;
-      const distSq = dx * dx + dy * dy;
-
-      if (distSq < PLAYER_RADIUS * PLAYER_RADIUS) {
-        // Push the player out along the smallest penetration axis
-        const entityLeft = this.currentPlayer.x - PLAYER_RADIUS;
-        const entityRight = this.currentPlayer.x + PLAYER_RADIUS;
-        const entityTop = this.currentPlayer.y - PLAYER_RADIUS;
-        const entityBottom = this.currentPlayer.y + PLAYER_RADIUS;
-
-        const pushLeft = hb.x - entityRight;
-        const pushRight = hb.x + hb.width - entityLeft;
-        const pushUp = hb.y - entityBottom;
-        const pushDown = hb.y + hb.height - entityTop;
-
-        const pushes = [
-          { dx: pushLeft, dy: 0 },
-          { dx: pushRight, dy: 0 },
-          { dx: 0, dy: pushUp },
-          { dx: 0, dy: pushDown },
-        ];
-        pushes.sort((a, b) => Math.abs(a.dx + a.dy) - Math.abs(b.dx + b.dy));
-
-        this.currentPlayer.x += pushes[0].dx;
-        this.currentPlayer.y += pushes[0].dy;
-      }
-    }
+    // ---- Resolve tile collisions (O(1) — matches server) ----
+    const resolved = resolveTileCollision(
+      this.currentPlayer.x,
+      this.currentPlayer.y,
+      this.PLAYER_COLLISION_RADIUS,
+      LAYERED_MAP.collisionGrid,
+      LAYERED_MAP.cols,
+      LAYERED_MAP.rows,
+      LAYERED_MAP.tileSize,
+    );
+    this.currentPlayer.x = resolved.x;
+    this.currentPlayer.y = resolved.y;
 
     // ---- Interpolate remote players toward server position ----
     for (const sessionId in this.playerEntities) {
