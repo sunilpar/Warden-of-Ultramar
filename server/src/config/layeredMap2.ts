@@ -11,6 +11,14 @@
 import mapJson from "./maps/Map2.json";
 import tilesetJson from "./maps/bigobssym.json";
 
+export interface EnemySpawnZone {
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface LayeredMap2Config {
   tileSize: number;
   cols: number;
@@ -20,6 +28,8 @@ export interface LayeredMap2Config {
   /** Flat collision grid: 1 = blocked, 0 = walkable. Index = row * cols + col. */
   collisionGrid: Uint8Array;
   spawnPoint: { x: number; y: number };
+  /** Enemy spawn zones from the Tiled object layer ("enemy spawn"). */
+  enemySpawnZones: EnemySpawnZone[];
 }
 
 function buildLayeredMap2(): LayeredMap2Config {
@@ -46,6 +56,8 @@ function buildLayeredMap2(): LayeredMap2Config {
   const layers = mapJson.layers as Array<{
     name: string;
     data?: number[];
+    type: string;
+    objects?: Array<{ x: number; y: number; width: number; height: number }>;
   }>;
   const interactive = layers.find((l) => l.name === "interactive");
   if (!interactive?.data) throw new Error("interactive layer not found in Map2");
@@ -89,6 +101,21 @@ function buildLayeredMap2(): LayeredMap2Config {
     }
   }
 
+  // ---- Extract enemy spawn zones from the object layer ----
+  const enemySpawnZones: EnemySpawnZone[] = [];
+  const enemySpawnLayer = layers.find((l) => l.name === "enemy spawn");
+  if (enemySpawnLayer?.objects) {
+    enemySpawnLayer.objects.forEach((obj, i) => {
+      enemySpawnZones.push({
+        name: `enemy_zone_${i + 1}`,
+        x: obj.x,
+        y: obj.y,
+        width: obj.width,
+        height: obj.height,
+      });
+    });
+  }
+
   return {
     tileSize,
     cols,
@@ -97,6 +124,7 @@ function buildLayeredMap2(): LayeredMap2Config {
     heightPx: rows * tileSize,
     collisionGrid,
     spawnPoint,
+    enemySpawnZones,
   };
 }
 

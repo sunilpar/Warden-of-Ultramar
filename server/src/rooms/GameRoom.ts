@@ -5,6 +5,7 @@
  *   - Player join/leave
  *   - Receiving movement input (message type 0)
  *   - Fixed timestep simulation (60 ticks/sec)
+ *   - Enemy AI update
  *
  * MESSAGE TYPES:
  *   0: Movement input { left, right, up, down, tick }
@@ -16,6 +17,7 @@ import { Player, InputData } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
 import { MapSystem } from "../systems/MapSystem";
 import { PlayerSystem } from "../systems/PlayerSystem";
+import { EnemySystem } from "../systems/EnemySystem";
 import { LAYERED_MAP } from "../config/layeredMap";
 
 export class GameRoom extends Room {
@@ -24,10 +26,15 @@ export class GameRoom extends Room {
 
   private mapSystem!: MapSystem;
   private playerSystem!: PlayerSystem;
+  private enemySystem!: EnemySystem;
 
   onCreate(_options: any) {
     this.mapSystem = new MapSystem();
     this.playerSystem = new PlayerSystem(this.state, this.mapSystem);
+    this.enemySystem = new EnemySystem(this.state, this.mapSystem);
+
+    // Spawn one Tyranid for now (from the first enemy spawn zone).
+    this.spawnInitialEnemy();
 
     // Fixed timestep simulation loop
     let elapsedTime = 0;
@@ -49,6 +56,22 @@ export class GameRoom extends Room {
   fixedTick(timeStepMs: number) {
     const dt = timeStepMs / 1000;
     this.playerSystem.update(dt);
+    this.enemySystem.update(dt);
+  }
+
+  /** Spawn a single Tyranid at the center of the first enemy spawn zone. */
+  private spawnInitialEnemy(): void {
+    const zones = LAYERED_MAP.enemySpawnZones;
+    if (zones.length === 0) return;
+    const z = zones[0];
+    const x = z.x + z.width / 2;
+    const y = z.y + z.height / 2;
+    this.enemySystem.spawn(
+      "tyranid",
+      x,
+      y,
+      GAME_CONFIG.ENEMY.DEFAULT_LEVEL,
+    );
   }
 
   // ============================================================

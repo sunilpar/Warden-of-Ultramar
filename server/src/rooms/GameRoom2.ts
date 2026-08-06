@@ -10,6 +10,8 @@ import { Player, InputData } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
 import { MapSystem2 } from "../systems/MapSystem2";
 import { PlayerSystem } from "../systems/PlayerSystem";
+import { EnemySystem } from "../systems/EnemySystem";
+import { LAYERED_MAP_2 } from "../config/layeredMap2";
 
 export class GameRoom2 extends Room {
   state = new RoomState();
@@ -17,10 +19,15 @@ export class GameRoom2 extends Room {
 
   private mapSystem!: MapSystem2;
   private playerSystem!: PlayerSystem;
+  private enemySystem!: EnemySystem;
 
   onCreate(_options: any) {
     this.mapSystem = new MapSystem2();
     this.playerSystem = new PlayerSystem(this.state, this.mapSystem as any);
+    this.enemySystem = new EnemySystem(this.state, this.mapSystem as any);
+
+    // Spawn one Tyranid for now (from the first enemy spawn zone).
+    this.spawnInitialEnemy();
 
     // Fixed timestep simulation loop
     let elapsedTime = 0;
@@ -38,6 +45,22 @@ export class GameRoom2 extends Room {
   fixedTick(timeStepMs: number) {
     const dt = timeStepMs / 1000;
     this.playerSystem.update(dt);
+    this.enemySystem.update(dt);
+  }
+
+  /** Spawn a single Tyranid at the center of the first enemy spawn zone. */
+  private spawnInitialEnemy(): void {
+    const zones = LAYERED_MAP_2.enemySpawnZones;
+    if (zones.length === 0) return;
+    const z = zones[0];
+    const x = z.x + z.width / 2;
+    const y = z.y + z.height / 2;
+    this.enemySystem.spawn(
+      "tyranid",
+      x,
+      y,
+      GAME_CONFIG.ENEMY.DEFAULT_LEVEL,
+    );
   }
 
   messages = {

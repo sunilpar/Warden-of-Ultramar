@@ -48,6 +48,9 @@ export class GameScene extends Phaser.Scene {
   // ---- Entity tracking ----
   currentPlayer!: Phaser.GameObjects.Sprite;
   playerEntities: { [sessionId: string]: Phaser.GameObjects.Sprite } = {};
+  // Enemy sprites keyed by enemy id (from server state.enemies)
+  enemyEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
+  private enemyAnimationsCreated: boolean = false;
 
   // ---- Input ----
   wasdKeys!: {
@@ -300,6 +303,40 @@ export class GameScene extends Phaser.Scene {
         delete this.playerEntities[sessionId];
       }
     });
+
+    // ============================================================
+    // ENEMY STATE LISTENERS
+    // ============================================================
+    callbacks.onAdd("enemies", (enemy: any, enemyId: string) => {
+      // Create enemy animations once (shared by all enemy sprites)
+      if (!this.enemyAnimationsCreated) {
+        this.createEnemyAnimations();
+        this.enemyAnimationsCreated = true;
+      }
+
+      const textureKey =
+        enemy.typeId === "tyranid" ? "tyranid_sheet" : "tyranid_sheet";
+      const sprite = this.add
+        .sprite(enemy.x, enemy.y, textureKey, 0)
+        .setDisplaySize(64, 64)
+        .setDepth(3);
+      sprite.anims.play("tri_idle");
+      this.enemyEntities[enemyId] = sprite;
+
+      callbacks.onChange(enemy, () => {
+        sprite.setData("serverX", enemy.x);
+        sprite.setData("serverY", enemy.y);
+        sprite.setData("facingRight", !!enemy.facingRight);
+      });
+    });
+
+    callbacks.onRemove("enemies", (_enemy: any, enemyId: string) => {
+      const entity = this.enemyEntities[enemyId];
+      if (entity) {
+        entity.destroy();
+        delete this.enemyEntities[enemyId];
+      }
+    });
   }
 
   // ============================================================
@@ -395,6 +432,45 @@ export class GameScene extends Phaser.Scene {
     if (!currentAnim || currentAnim.key !== animKey) {
       this.currentPlayer.anims.play(animKey);
     }
+  }
+
+  // ============================================================
+  // ENEMY ANIMATIONS
+  // ============================================================
+
+  /**
+   * Create animations for enemy sprite sheets.
+   *
+   * TYRANID (spriteSheetTRI64.png), 64x64 per frame:
+   *   Row 0 (frames 0-3) = idle animation. Per spec this idle animation is
+   *                        also shown while the enemy moves.
+   *   Row 1 (frames 4-7) = attack animation.
+   * The art faces LEFT by default. When the enemy faces right
+   * (enemy.facingRight === true) the sprite is flipped HORIZONTALLY
+   * (setFlipX) so it mirrors to face right.
+   */
+  private createEnemyAnimations(): void {
+    // Tyranid idle / move animation (loops)
+    this.anims.create({
+      key: "tri_idle",
+      frames: this.anims.generateFrameNumbers("tyranid_sheet", {
+        start: 0,
+        end: 3,
+      }),
+      frameRate: 8,
+      repeat: -1,
+    });
+
+    // Tyranid attack animation (plays once)
+    this.anims.create({
+      key: "tri_attack",
+      frames: this.anims.generateFrameNumbers("tyranid_sheet", {
+        start: 4,
+        end: 7,
+      }),
+      frameRate: 10,
+      repeat: 0,
+    });
   }
 
   // ============================================================
@@ -950,6 +1026,28 @@ export class GameScene extends Phaser.Scene {
         }
       }
     }
+
+    // ---- Interpolate enemies toward their server position + apply facing ----
+    for (const enemyId in this.enemyEntities) {
+      const entity = this.enemyEntities[enemyId];
+      const serverX = entity.data.get("serverX") as number;
+      const serverY = entity.data.get("serverY") as number;
+
+      if (serverX !== undefined && serverY !== undefined) {
+        entity.x = Phaser.Math.Linear(entity.x, serverX, 0.2);
+        entity.y = Phaser.Math.Linear(entity.y, serverY, 0.2);
+      }
+
+      // Facing: sprite faces LEFT by default; flip horizontally when right.
+      const facingRight = entity.data.get("facingRight") as boolean;
+      entity.setFlipX(!!facingRight);
+
+      // Idle animation plays for both movement and standing (per spec).
+      const eAnim = entity.anims.currentAnim;
+      if (!eAnim || eAnim.key !== "tri_idle") {
+        entity.anims.play("tri_idle");
+      }
+    }
   }
 
   /**
@@ -1000,6 +1098,13 @@ export class GameScene extends Phaser.Scene {
         delete this.playerEntities[id];
       }
       this.playerEntities = {};
+
+      for (const id in this.enemyEntities) {
+        const e = this.enemyEntities[id];
+        if (e) e.destroy();
+        delete this.enemyEntities[id];
+      }
+      this.enemyEntities = {};
 
       // Start the destination scene under a black cover so the player
       // never sees the unloaded map.

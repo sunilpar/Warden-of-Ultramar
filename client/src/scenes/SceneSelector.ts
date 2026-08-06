@@ -4,14 +4,11 @@
  * Shows the menu background with "Start Game" text.
  * Clicking "Start Game" switches to the GameScene.
  */
-
 import Phaser from "phaser";
-
 export class SceneSelector extends Phaser.Scene {
   constructor() {
     super({ key: "selector", active: true });
   }
-
   preload() {
     // Start screen background
     this.load.image("game_menu", "assets/menu_final.png");
@@ -25,7 +22,6 @@ export class SceneSelector extends Phaser.Scene {
       "assets/cards/cardSpritesheet128_200.png",
       { frameWidth: 128, frameHeight: 200 },
     );
-
     // Character sprite sheet (4x4 grid, each frame 64x64)
     this.load.spritesheet(
       "character_sheet",
@@ -35,7 +31,18 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 64,
       },
     );
-
+    // Tyranid enemy sprite sheet (64x64 frames).
+    // Row 0 (frames 0-3) = idle/move animation (faces LEFT by default).
+    // Row 1 (frames 4-7) = attack animation (faces LEFT by default).
+    // When the enemy faces right, the client flips horizontally.
+    this.load.spritesheet(
+      "tyranid_sheet",
+      "assets/spriteSheetTRI64.png",
+      {
+        frameWidth: 64,
+        frameHeight: 64,
+      },
+    );
     // Map1 tile sprite sheet (2 rows x 4 cols, 64x64 each)
     this.load.spritesheet(
       "map1_tiles",
@@ -45,7 +52,6 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 64,
       },
     );
-
     // Map1 obstacle sprite sheet (4 rows x 4 cols, 128x128 each)
     this.load.spritesheet(
       "map1_obstacles",
@@ -55,7 +61,6 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 128,
       },
     );
-
     // Tiled-export tileset for map1 (ALLNEWMAP64.png — 7 cols x 6 rows, 64px each)
     this.load.spritesheet(
       "map1_tiled_tiles",
@@ -65,7 +70,6 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 64,
       },
     );
-
     // Layered Tiled map tileset (BIGOBS64sym.png — 7 cols x 6 rows, 64px each)
     this.load.spritesheet(
       "bigobs_tiles",
@@ -76,13 +80,11 @@ export class SceneSelector extends Phaser.Scene {
       },
     );
   }
-
   create() {
     // Draw the menu background stretched to fill the screen
     this.add
       .image(this.cameras.main.centerX, this.cameras.main.centerY, "game_menu")
       .setDisplaySize(this.cameras.main.width, this.cameras.main.height);
-
     const textStyle: Phaser.Types.GameObjects.Text.TextStyle = {
       color: "#efbf68",
       fontSize: "23px",
@@ -90,7 +92,6 @@ export class SceneSelector extends Phaser.Scene {
       stroke: "#000000",
       strokeThickness: 3,
     };
-
     // "Start Game" button
     this.add
       .text(100, 286, "Start Game", textStyle)
@@ -100,7 +101,6 @@ export class SceneSelector extends Phaser.Scene {
       .on("pointerdown", () => {
         this.game.scene.switch("selector", "game");
       });
-
     // "Quit Game" button (just reloads for now)
     this.add
       .text(100, 564, "Quit Game", textStyle)
