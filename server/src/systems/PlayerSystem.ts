@@ -39,9 +39,13 @@ export class PlayerSystem {
           dirY /= length;
         }
 
-        // Apply movement
-        player.x += dirX * GAME_CONFIG.PLAYER.SPEED * dt;
-        player.y += dirY * GAME_CONFIG.PLAYER.SPEED * dt;
+        // Apply movement using the player's EFFECTIVE move speed
+        // (base * speedMultiplier), so debuffs/buffs take effect
+        // immediately. Recompute each tick in case a debuff changed.
+        player.recalcDerivedStats();
+        const speed = player.moveSpeed;
+        player.x += dirX * speed * dt;
+        player.y += dirY * speed * dt;
 
         // Clamp to map boundaries
         player.x = Math.max(0, Math.min(this.mapSystem.width, player.x));

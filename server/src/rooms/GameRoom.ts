@@ -70,6 +70,7 @@ export class GameRoom extends Room {
     console.log("Player joined:", client.sessionId);
 
     const player = new Player();
+    player.initBaseStats();
     const spawn = this.mapSystem.getSpawnPoint();
     player.x = spawn.x;
     player.y = spawn.y;

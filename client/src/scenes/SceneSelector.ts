@@ -17,6 +17,14 @@ export class SceneSelector extends Phaser.Scene {
     this.load.image("game_menu", "assets/menu_final.png");
     // Loading screen shown during map transitions
     this.load.image("loading_screen", "assets/loading_up.png");
+    // Bottom-left HUD (HP bar + skill card slots)
+    this.load.image("hud", "assets/hud.png");
+    // Skill card spritesheet (9 cols x 4 rows, each 128x200)
+    this.load.spritesheet(
+      "card_sheet",
+      "assets/cards/cardSpritesheet128_200.png",
+      { frameWidth: 128, frameHeight: 200 },
+    );
 
     // Character sprite sheet (4x4 grid, each frame 64x64)
     this.load.spritesheet(

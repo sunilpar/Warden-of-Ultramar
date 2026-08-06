@@ -50,6 +50,7 @@ export class GameRoom2 extends Room {
   onJoin(client: Client, _options: any) {
     console.log("Player joined GameRoom2:", client.sessionId);
     const player = new Player();
+    player.initBaseStats();
     const spawn = this.mapSystem.getSpawnPoint();
     player.x = spawn.x;
     player.y = spawn.y;

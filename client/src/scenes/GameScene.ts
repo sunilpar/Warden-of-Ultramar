@@ -33,10 +33,7 @@ import Phaser from "phaser";
 import { Client, Callbacks } from "@colyseus/sdk";
 import { BACKEND_URL } from "../backend";
 
-import {
-  LAYERED_MAP,
-  resolveTileCollision,
-} from "../maps/layeredMapData";
+import { LAYERED_MAP, resolveTileCollision } from "../maps/layeredMapData";
 import type { LayeredMapData } from "../maps/layeredMapData";
 import { LAYERED_MAP_2 } from "../maps/layeredMap2Data";
 
@@ -80,8 +77,24 @@ export class GameScene extends Phaser.Scene {
   currentTick: number = 0;
 
   // ---- Player settings (must match server GAME_CONFIG) ----
-  private readonly PLAYER_SPEED = 120; // pixels per second
+  // moveSpeed is now read from the server-synced Player schema
+  // (effective speed = base * speedMultiplier). Fall back to this
+  // constant until the first state snapshot arrives.
+  private moveSpeed: number = 120;
   private readonly PLAYER_COLLISION_RADIUS = 20;
+
+  // ---- Stats HUD (bottom-left HUD image + vertical HP bar + cards) ----
+  private hudImage!: Phaser.GameObjects.Image;
+  private hpFill!: Phaser.GameObjects.Rectangle;
+  private hpText!: Phaser.GameObjects.Text;
+  private statsText!: Phaser.GameObjects.Text;
+  private cardSlots: Phaser.GameObjects.Rectangle[] = [];
+  // HUD hitbox overlays (visible when showHitboxes is true)
+  private hudHitboxHP: Phaser.GameObjects.Rectangle | null = null;
+  private hudHitboxCards: Phaser.GameObjects.Rectangle[] = [];
+  // Scaled full-height of the HP bar (set in createStatsHUD)
+  private hpBarFullHeight: number = 0;
+  private hpBarFullWidth: number = 0;
 
   // ---- Character animation state ----
   private animationsCreated: boolean = false;
@@ -152,7 +165,9 @@ export class GameScene extends Phaser.Scene {
     //      the destination of a map transition. Cover the screen with a
     //      black rectangle + the loading image while the room connects,
     //      then fade them out to reveal the loaded map. ----
-    const startData = this.sys.settings.data as { fadeIn?: boolean } | undefined;
+    const startData = this.sys.settings.data as
+      | { fadeIn?: boolean }
+      | undefined;
     const isFadeIn = !!startData?.fadeIn;
 
     let cover: Phaser.GameObjects.Rectangle | null = null;
@@ -165,7 +180,11 @@ export class GameScene extends Phaser.Scene {
         .setScrollFactor(0)
         .setDepth(1000);
       loadingImg = this.add
-        .image(this.cameras.main.centerX, this.cameras.main.centerY, "loading_screen")
+        .image(
+          this.cameras.main.centerX,
+          this.cameras.main.centerY,
+          "loading_screen",
+        )
         .setScrollFactor(0)
         .setDepth(1001);
     }
@@ -176,6 +195,9 @@ export class GameScene extends Phaser.Scene {
 
     // ---- Debug HUD (FPS + hitbox toggle button) ----
     this.createDebugHUD();
+
+    // ---- Stats HUD (health / level / xp / attack / crit) ----
+    this.createStatsHUD();
 
     // ---- F3 to toggle hitbox overlay ----
     this.hitboxToggleKey = this.input.keyboard.addKey(
@@ -245,6 +267,10 @@ export class GameScene extends Phaser.Scene {
         // When the server sends a new position, reconcile if needed
         callbacks.onChange(player, () => {
           if (this.currentPlayer) {
+            // Keep our effective move speed synced with the server
+            // (so a slow debuff slows our prediction too).
+            this.moveSpeed = player.moveSpeed;
+
             const dx = Math.abs(player.x - this.currentPlayer.x);
             const dy = Math.abs(player.y - this.currentPlayer.y);
             // Snap to server position if we're far off (teleport, correction)
@@ -252,6 +278,8 @@ export class GameScene extends Phaser.Scene {
               this.currentPlayer.x = player.x;
               this.currentPlayer.y = player.y;
             }
+            // Refresh the stats HUD
+            this.updateStatsHUD(player);
           }
         });
       } else {
@@ -366,6 +394,215 @@ export class GameScene extends Phaser.Scene {
     const currentAnim = this.currentPlayer.anims.currentAnim;
     if (!currentAnim || currentAnim.key !== animKey) {
       this.currentPlayer.anims.play(animKey);
+    }
+  }
+
+  // ============================================================
+  // STATS HUD
+  // ============================================================
+  // ============================================================
+  // HUD LAYOUT CONSTANTS (native hud.png pixels — tweak these!)
+  // ============================================================
+  //
+  // Adjust these constants in createStatsHUD() to perfectly align the HP
+  // bar and card slots with the hud.png art. All values are in NATIVE
+  // image pixels (1366x479). The HUD_SCALE multiplier is applied
+  // automatically so everything scales together.
+  //
+  //   - Hitboxes are SHOWN when you press F3 (toggleHitboxes) so you can
+  //     see exactly where the regions are and align them visually.
+  //   - Red colors: hpFillColor / hpBackColor are the HP bar colors.
+  //   - Cards: 64x200 native card image goes into the region you define.
+  //
+  // ============================================================
+
+  /**
+   * Bottom-left HUD drawn over the hud.png image.
+   *
+   * TUNABLE CONSTANTS BELOW — adjust for perfect alignment.
+   */
+  private createStatsHUD(): void {
+    //
+    // ============================================================
+    // 🔧 TUNABLE CONSTANTS START (edit these!)
+    // ============================================================
+    //
+
+    // Overall HUD scale (native is 1366x479; tweak if HUD is too big/small)
+    const HUD_SCALE = 0.3;
+
+    // ---- HP bar region (native hud.png pixels) ----
+    // These define WHERE on the HUD image the HP fill goes.
+    const HP_X = 87; // left edge of HP fill area
+    const HP_Y_TOP = 90; // top edge (HP drains DOWN from here)
+    const HP_Y_BOT = 400; // bottom edge (fill is anchored here)
+    const HP_WIDTH = 120; // width of HP bar
+
+    // ---- HP bar colors ----
+    const HP_BACK_COLOR = 0x1a0000; // dark empty-bar backing (deeper red)
+    const HP_FILL_COLOR = 0xaa0000; // HP fill color (deeper red, not bright)
+    const HP_FILL_ALPHA = 1.0;
+
+    // ---- 5 card slot regions (native hud.png pixels) ----
+    // Each slot defines WHERE on the HUD the 64x200 card goes.
+    const SLOT_Y_TOP = 200;
+    const SLOT_Y_BOT = 400;
+    const SLOT_WIDTH = 128;
+    const SLOT_X0 = 440; // slot 0 left
+    const SLOT_GAP = 25; // gap between slots
+
+    // Hitbox colors (visible when F3 is pressed)
+    const HITBOX_HP_COLOR = 0x00ffff; // cyan for HP bar region
+    const HITBOX_CARD_COLOR = 0xff00ff; // magenta for card slots
+    const HITBOX_STROKE = 2;
+
+    //
+    // ============================================================
+    // 🔧 TUNABLE CONSTANTS END
+    // ============================================================
+    //
+
+    const HUD_IMG_W = 1366;
+    const HUD_IMG_H = 479;
+    const hudW = HUD_IMG_W * HUD_SCALE;
+    const hudH = HUD_IMG_H * HUD_SCALE;
+
+    const hudOriginX = 0;
+    const hudOriginY = this.cameras.main.height - hudH;
+
+    const nx = (x: number) => hudOriginX + x * HUD_SCALE;
+    const ny = (y: number) => hudOriginY + y * HUD_SCALE;
+
+    // ---- HUD background image ----
+    this.hudImage = this.add
+      .image(hudOriginX, hudOriginY, "hud")
+      .setOrigin(0, 0)
+      .setDisplaySize(hudW, hudH)
+      .setScrollFactor(0)
+      .setDepth(100);
+
+    // ---- HP bar: back + fill ----
+    const hpFullW = HP_WIDTH * HUD_SCALE;
+    const hpFullH = (HP_Y_BOT - HP_Y_TOP) * HUD_SCALE;
+    this.hpBarFullWidth = hpFullW;
+    this.hpBarFullHeight = hpFullH;
+
+    // Dark backing (empty bar behind the fill)
+    this.add
+      .rectangle(nx(HP_X), ny(HP_Y_TOP), hpFullW, hpFullH, HP_BACK_COLOR)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(101);
+
+    // HP fill (anchored at bottom so it drains TOP->BOTTOM as HP drops)
+    this.hpFill = this.add
+      .rectangle(
+        nx(HP_X),
+        ny(HP_Y_BOT),
+        hpFullW,
+        hpFullH,
+        HP_FILL_COLOR,
+        HP_FILL_ALPHA,
+      )
+      .setOrigin(0, 1)
+      .setScrollFactor(0)
+      .setDepth(102);
+
+    // HP text overlay
+    this.hpText = this.add
+      .text(nx(HP_X) + hpFullW / 2, ny(HP_Y_TOP) + hpFullH / 2, "", {
+        color: "#ffffff",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(103);
+
+    // ---- 5 card slots (empty frames ready for 64x200 cards) ----
+    const slotW = SLOT_WIDTH * HUD_SCALE;
+    const slotH = (SLOT_Y_BOT - SLOT_Y_TOP) * HUD_SCALE;
+    const slotStep = (SLOT_WIDTH + SLOT_GAP) * HUD_SCALE;
+    const slot0X = nx(SLOT_X0);
+    const slot0Y = ny(SLOT_Y_TOP);
+
+    this.cardSlots = [];
+    this.hudHitboxCards = [];
+    for (let i = 0; i < 5; i++) {
+      const x = slot0X + i * slotStep;
+      const y = slot0Y;
+
+      // Invisible placeholder frame (for later card placement)
+      const frame = this.add
+        .rectangle(x, y, slotW, slotH, 0x000000, 0.0)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(101);
+      this.cardSlots.push(frame);
+
+      // Hitbox overlay (visible when showHitboxes is true)
+      const hb = this.add
+        .rectangle(x, y, slotW, slotH, 0x000000, 0.0)
+        .setStrokeStyle(HITBOX_STROKE, HITBOX_CARD_COLOR, 0.9)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(1000);
+      hb.setVisible(this.showHitboxes);
+      this.hudHitboxCards.push(hb);
+    }
+
+    // ---- HP bar hitbox overlay ----
+    this.hudHitboxHP = this.add
+      .rectangle(nx(HP_X), ny(HP_Y_TOP), hpFullW, hpFullH, 0x000000, 0.0)
+      .setStrokeStyle(HITBOX_STROKE, HITBOX_HP_COLOR, 0.9)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(1000);
+    this.hudHitboxHP.setVisible(this.showHitboxes);
+
+    // ---- Secondary stats text (top-right) ----
+    this.statsText = this.add
+      .text(this.cameras.main.width - 10, 10, "", {
+        color: "#ffffff",
+        fontSize: "12px",
+        fontFamily: "monospace",
+        align: "right",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(1, 0)
+      .setScrollFactor(0)
+      .setDepth(100);
+  }
+
+  /** Update the HP bar + stats text from a Player state object. */
+  private updateStatsHUD(player: any): void {
+    if (!this.hpFill) return;
+
+    // ---- Vertical HP bar (anchored at bottom) ----
+    const ratio =
+      player.maxHealth > 0
+        ? Phaser.Math.Clamp(player.currentHealth / player.maxHealth, 0, 1)
+        : 0;
+    // Keep width constant; shrink height with HP. Origin (0,1) keeps
+    // the fill pinned to the bottom so it drains from the top.
+    this.hpFill.setSize(
+      this.hpBarFullWidth,
+      Math.max(0.001, this.hpBarFullHeight * ratio),
+    );
+    this.hpText.setText(`${Math.round(ratio * 100)}%`);
+
+    // ---- Secondary stats (top-right) ----
+    if (this.statsText) {
+      const pct = (v: number) => `${Math.round(v * 100)}%`;
+      this.statsText.setText(
+        [
+          `Lv ${Math.floor(player.level)}  XP ${Math.floor(player.currentXp)}/${Math.floor(player.xpToLevelUp)}`,
+          `ATK ${Math.round(player.attack)}  CRIT ${pct(player.critRate)} / ${pct(player.critDamage)}`,
+        ].join("\n"),
+      );
     }
   }
 
@@ -564,6 +801,13 @@ export class GameScene extends Phaser.Scene {
     if (this.debugHitboxes) {
       this.debugHitboxes.setVisible(this.showHitboxes);
     }
+    // Also toggle the HUD hitbox overlays (HP bar + card slots)
+    if (this.hudHitboxHP) {
+      this.hudHitboxHP.setVisible(this.showHitboxes);
+    }
+    this.hudHitboxCards.forEach((hb) => {
+      hb.setVisible(this.showHitboxes);
+    });
     this.hitboxToggleButton.setText(
       this.showHitboxes ? "[F3] Hitboxes: ON" : "[F3] Hitboxes: OFF",
     );
@@ -625,8 +869,8 @@ export class GameScene extends Phaser.Scene {
       dirY /= length;
     }
 
-    this.currentPlayer.x += dirX * this.PLAYER_SPEED * dt;
-    this.currentPlayer.y += dirY * this.PLAYER_SPEED * dt;
+    this.currentPlayer.x += dirX * this.moveSpeed * dt;
+    this.currentPlayer.y += dirY * this.moveSpeed * dt;
 
     // Clamp to map boundaries
     this.currentPlayer.x = Phaser.Math.Clamp(
