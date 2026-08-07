@@ -36,6 +36,12 @@ import { BACKEND_URL } from "../backend";
 import { LAYERED_MAP, resolveTileCollision } from "../maps/layeredMapData";
 import type { LayeredMapData } from "../maps/layeredMapData";
 import { LAYERED_MAP_2 } from "../maps/layeredMap2Data";
+import {
+  cardFrameForLevel,
+  BOLTER_COLORS,
+  bolterColorTier,
+  skillMods,
+} from "../config/skillDefs";
 
 // ============================================================
 // Game Scene
@@ -52,6 +58,29 @@ export class GameScene extends Phaser.Scene {
   enemyEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
   private enemyAnimationsCreated: boolean = false;
 
+  // ---- Projectiles (bolter bullets etc.) keyed by projectile id ----
+  projectileEntities: { [id: string]: Phaser.GameObjects.Arc } = {};
+
+  // ---- Enemy HP bars + last-known positions (for VFX on despawn) ----
+  enemyHpBars: { [id: string]: Phaser.GameObjects.Container } = {};
+  enemyLastPos: { [id: string]: { x: number; y: number } } = {};
+  projLastPos: { [id: string]: { x: number; y: number } } = {};
+
+  // ---- Skill (bolter) HUD: card image + level text in slot 1 ----
+  private bolterCard!: Phaser.GameObjects.Image;
+  private bolterLevelText!: Phaser.GameObjects.Text;
+  private localBolterLevel: number = 1;
+
+  // ---- Upgrade toast ----
+  private upgradeToast!: Phaser.GameObjects.Text;
+
+  // ---- Bolter cooldown overlay + tooltip ----
+  private bolterCooldownFill!: Phaser.GameObjects.Rectangle;
+  private bolterCooldownFillBaseH: number = 0;
+  private bolterTooltip!: Phaser.GameObjects.Text;
+
+  // ---- Aim / firing ----
+  private aimAngle: number = 0;
   // ---- Input ----
   wasdKeys!: {
     left: Phaser.Input.Keyboard.Key;
@@ -156,6 +185,31 @@ export class GameScene extends Phaser.Scene {
       down: Phaser.Input.Keyboard.KeyCodes.S,
     }) as any;
 
+    // ---- Mouse aim (world-space) + left-click to fire bolter ----
+    this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
+      const wx = pointer.worldX;
+      const wy = pointer.worldY;
+      if (this.currentPlayer) {
+        this.aimAngle = Math.atan2(wy - this.currentPlayer.y, wx - this.currentPlayer.x);
+      }
+    });
+    this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (pointer.leftButtonReleased() === false && pointer.event) {
+        // left click
+      }
+      if (!this.currentPlayer || !this.room) return;
+      const wx = pointer.worldX;
+      const wy = pointer.worldY;
+      const angle = Math.atan2(wy - this.currentPlayer.y, wx - this.currentPlayer.x);
+      this.room.send(1, { skill: "bolter", angle });
+    });
+
+    // ---- "0" key upgrades the bolter (debug) ----
+    this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.ZERO)?.on("down", () => {
+      if (!this.room) return;
+      this.room.send(2, { skill: "bolter" });
+    });
+
     // ---- Resolve this scene's map + room config from its scene key ----
     const cfg =
       GameScene.CONFIGS[this.sys.settings.key] ?? GameScene.CONFIGS["game"];
@@ -201,6 +255,8 @@ export class GameScene extends Phaser.Scene {
 
     // ---- Stats HUD (health / level / xp / attack / crit) ----
     this.createStatsHUD();
+    // Place the bolter card in slot 1 (initial level 1).
+    this.refreshBolterCard();
 
     // ---- F3 to toggle hitbox overlay ----
     this.hitboxToggleKey = this.input.keyboard.addKey(
@@ -283,6 +339,18 @@ export class GameScene extends Phaser.Scene {
             }
             // Refresh the stats HUD
             this.updateStatsHUD(player);
+            // Sync bolter level + card art
+            const lvl = (player.skillLevels && player.skillLevels.get)
+              ? player.skillLevels.get("bolter") ?? 1
+              : 1;
+            if (lvl !== this.localBolterLevel) {
+              this.localBolterLevel = lvl;
+              this.refreshBolterCard();
+              this.showUpgradeToast(lvl);
+            }
+            // Track cooldown end + attack for the HUD overlay + tooltip.
+            this.currentPlayer.setData("bolterCdEndsAt", player.bolterCooldownEndsAt ?? 0);
+            this.currentPlayer.setData("attack", player.attack ?? 100);
           }
         });
       } else {
@@ -323,10 +391,27 @@ export class GameScene extends Phaser.Scene {
       sprite.anims.play("tri_idle");
       this.enemyEntities[enemyId] = sprite;
 
+      // ---- Enemy HP bar (bg + fill) floating above the sprite ----
+      const hpW = 50;
+      const hpH = 6;
+      const hpBg = this.add.rectangle(0, -42, hpW, hpH, 0x000000, 0.7)
+        .setStrokeStyle(1, 0x000000, 0.9);
+      const hpFill = this.add.rectangle(-hpW / 2, -42, hpW, hpH, 0xff3333)
+        .setOrigin(0, 0.5);
+      const hpBar = this.add.container(enemy.x, enemy.y, [hpBg, hpFill]).setDepth(5);
+      this.enemyHpBars[enemyId] = hpBar;
+
+      this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
+
       callbacks.onChange(enemy, () => {
         sprite.setData("serverX", enemy.x);
         sprite.setData("serverY", enemy.y);
         sprite.setData("facingRight", !!enemy.facingRight);
+        sprite.setData("hp", enemy.currentHealth);
+        sprite.setData("maxHp", enemy.maxHealth);
+        sprite.setData("hitFlashUntil", enemy.hitFlashUntil);
+        sprite.setData("attacking", !!enemy.attacking);
+        this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
       });
     });
 
@@ -335,6 +420,52 @@ export class GameScene extends Phaser.Scene {
       if (entity) {
         entity.destroy();
         delete this.enemyEntities[enemyId];
+      }
+      const hpBar = this.enemyHpBars[enemyId];
+      if (hpBar) {
+        hpBar.destroy();
+        delete this.enemyHpBars[enemyId];
+      }
+      delete this.enemyLastPos[enemyId];
+    });
+
+    // ============================================================
+    // PROJECTILE STATE LISTENERS
+    // ============================================================
+    callbacks.onAdd("projectiles", (proj: any, projId: string) => {
+      const color = (proj.skillId === "bolter")
+        ? BOLTER_COLORS[bolterColorTier(proj.level)]
+        : 0xffffff;
+      // Rectangular bullet (8x3) stretched along its travel direction.
+      const arc = this.add
+        .rectangle(proj.x, proj.y, 10, 4, color)
+        .setDepth(4);
+      this.projectileEntities[projId] = arc as any;
+      this.projLastPos[projId] = { x: proj.x, y: proj.y };
+
+      callbacks.onChange(proj, () => {
+        arc.setPosition(proj.x, proj.y);
+        // Orient rectangle along travel direction.
+        const prev = this.projLastPos[projId];
+        if (prev) {
+          const a = Math.atan2(proj.y - prev.y, proj.x - prev.x);
+          arc.setRotation(a);
+        }
+        this.projLastPos[projId] = { x: proj.x, y: proj.y };
+      });
+    });
+
+    callbacks.onRemove("projectiles", (_proj: any, projId: string) => {
+      const entity = this.projectileEntities[projId];
+      const pos = this.projLastPos[projId];
+      if (entity) {
+        entity.destroy();
+        delete this.projectileEntities[projId];
+      }
+      // Spawn bullet-hit VFX at last known position.
+      if (pos) {
+        this.spawnBulletHitVfx(pos.x, pos.y);
+        delete this.projLastPos[projId];
       }
     });
   }
@@ -470,6 +601,139 @@ export class GameScene extends Phaser.Scene {
       }),
       frameRate: 10,
       repeat: 0,
+    });
+  }
+
+  // ============================================================
+  // SKILL CARD (BOLTER in slot 1) + UPGRADE TOAST
+  // ============================================================
+
+  /** Place / refresh the bolter card art in HUD slot 1 (no level text on card). */
+  private refreshBolterCard(): void {
+    if (!this.cardSlots || this.cardSlots.length === 0) return;
+    const slot = this.cardSlots[0];
+    const frame = cardFrameForLevel("bolter", this.localBolterLevel);
+
+    if (this.bolterCard) {
+      this.bolterCard.setFrame(frame);
+    } else {
+      this.bolterCard = this.add
+        .image(slot.x, slot.y, "card_sheet", frame)
+        .setOrigin(0, 0)
+        .setDisplaySize(slot.width, slot.height)
+        .setScrollFactor(0)
+        .setDepth(102)
+        .setInteractive({ useHandCursor: true });
+
+      // Cooldown fill overlay (blue, grows bottom-up). Hidden when ready.
+      this.bolterCooldownFill = this.add
+        .rectangle(slot.x, slot.y, slot.width, slot.height, 0x4da6ff, 0.45)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(103)
+        .setVisible(false);
+      this.bolterCooldownFillBaseH = slot.height;
+
+      // Hover tooltip.
+      this.bolterCard.on("pointerover", () => this.showBolterTooltip(slot));
+      this.bolterCard.on("pointerout", () => this.hideBolterTooltip());
+    }
+  }
+
+  /** Update the cooldown dim/fill overlay based on bolterCooldownEndsAt. */
+  private updateBolterCooldownOverlay(): void {
+    if (!this.bolterCard || !this.bolterCooldownFill || !this.currentPlayer) return;
+    const endsAt = (this.currentPlayer.data.get("bolterCdEndsAt") as number) ?? 0;
+    const now = Date.now();
+    if (endsAt > now) {
+      // On cooldown: dim the card + show filling overlay.
+      this.bolterCard.setAlpha(0.45);
+      this.bolterCooldownFill.setVisible(true);
+      const totalMs = 500; // bolter cooldown
+      const remaining = endsAt - now;
+      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
+      const h = this.bolterCooldownFillBaseH * fillPct;
+      // Grow from the bottom upward: move origin + reduce height.
+      this.bolterCooldownFill.setSize(this.bolterCard.displayWidth, h);
+      this.bolterCooldownFill.setPosition(
+        this.bolterCard.x,
+        this.bolterCard.y + this.bolterCooldownFillBaseH - h,
+      );
+    } else {
+      this.bolterCard.setAlpha(1);
+      this.bolterCooldownFill.setVisible(false);
+    }
+  }
+
+  private showBolterTooltip(slot: Phaser.GameObjects.Rectangle): void {
+    const mods = skillMods("bolter", this.localBolterLevel);
+    const atk = this.currentPlayer ? Math.round(this.localPlayerAttack()) : 0;
+    const cd = 0.5;
+    const lines = [
+      "Bolter",
+      "Fires a bullet toward your aim. Chains at higher levels.",
+      "ATK: " + atk,
+      "Cooldown: " + cd + "s",
+      "Level: " + this.localBolterLevel,
+      ...mods,
+    ];
+    const txt = lines.join("\n");
+    const tx = slot.x + slot.width + 6;
+    const ty = slot.y;
+    if (this.bolterTooltip) {
+      this.bolterTooltip.setText(txt).setPosition(tx, ty).setVisible(true);
+    } else {
+      this.bolterTooltip = this.add
+        .text(tx, ty, txt, {
+          color: "#ffffff",
+          fontSize: "13px",
+          fontFamily: "monospace",
+          backgroundColor: "#000000cc",
+          padding: { x: 6, y: 4 },
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(300);
+    }
+  }
+
+  private hideBolterTooltip(): void {
+    if (this.bolterTooltip) this.bolterTooltip.setVisible(false);
+  }
+
+  /** Approximate local player attack value for the tooltip. */
+  private localPlayerAttack(): number {
+    if (!this.currentPlayer) return 0;
+    // attack is tracked via stats HUD; read from the synced schema via data.
+    return (this.currentPlayer.data.get("attack") as number) ?? 100;
+  }
+
+  /** Show a transient "cards upgraded to Lv X" toast. */
+  private showUpgradeToast(level: number): void {
+    const msg = `Cards upgraded to Lv ${level}`;
+    if (this.upgradeToast) {
+      this.upgradeToast.setText(msg);
+    } else {
+      this.upgradeToast = this.add
+        .text(this.cameras.main.centerX, 60, msg, {
+          color: "#ffd700",
+          fontSize: "20px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 4,
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(200);
+    }
+    this.upgradeToast.setAlpha(1);
+    this.tweens.killTweensOf(this.upgradeToast);
+    this.time.delayedCall(1200, () => {
+      this.tweens.add({
+        targets: this.upgradeToast,
+        alpha: 0,
+        duration: 600,
+      });
     });
   }
 
@@ -1028,26 +1292,75 @@ export class GameScene extends Phaser.Scene {
     }
 
     // ---- Interpolate enemies toward their server position + apply facing ----
+    const now = Date.now();
     for (const enemyId in this.enemyEntities) {
       const entity = this.enemyEntities[enemyId];
       const serverX = entity.data.get("serverX") as number;
       const serverY = entity.data.get("serverY") as number;
 
+      // Smoother interpolation (higher factor = snappier).
       if (serverX !== undefined && serverY !== undefined) {
-        entity.x = Phaser.Math.Linear(entity.x, serverX, 0.2);
-        entity.y = Phaser.Math.Linear(entity.y, serverY, 0.2);
+        entity.x = Phaser.Math.Linear(entity.x, serverX, 0.35);
+        entity.y = Phaser.Math.Linear(entity.y, serverY, 0.35);
       }
 
       // Facing: sprite faces LEFT by default; flip horizontally when right.
       const facingRight = entity.data.get("facingRight") as boolean;
       entity.setFlipX(!!facingRight);
 
-      // Idle animation plays for both movement and standing (per spec).
+      // Animation: attack when attacking, otherwise idle (shown for move+stand).
+      const attacking = entity.data.get("attacking") as boolean;
       const eAnim = entity.anims.currentAnim;
-      if (!eAnim || eAnim.key !== "tri_idle") {
-        entity.anims.play("tri_idle");
+      if (attacking) {
+        if (!eAnim || eAnim.key !== "tri_attack") {
+          entity.anims.play("tri_attack");
+        }
+      } else {
+        if (!eAnim || eAnim.key !== "tri_idle") {
+          entity.anims.play("tri_idle");
+        }
+      }
+
+      // Hit flash: tint white while hitFlashUntil > now.
+      const flashUntil = entity.data.get("hitFlashUntil") as number;
+      if (flashUntil && now < flashUntil) {
+        entity.setTintFill(0xffffff);
+      } else {
+        entity.clearTint();
+      }
+
+      // ---- Update the floating HP bar ----
+      const hpBar = this.enemyHpBars[enemyId];
+      if (hpBar) {
+        hpBar.setPosition(entity.x, entity.y);
+        const fill = hpBar.getAt(1) as Phaser.GameObjects.Rectangle;
+        const hp = entity.data.get("hp") as number;
+        const maxHp = entity.data.get("maxHp") as number;
+        if (fill && maxHp > 0) {
+          const pct = Math.max(0, hp / maxHp);
+          fill.scaleX = pct;
+        }
       }
     }
+
+    // ---- Update bolter cooldown fill on the card ----
+    this.updateBolterCooldownOverlay();
+  }
+
+  // ============================================================
+  // BULLET HIT VFX
+  // ============================================================
+
+  /** Spawn a brief impact burst at a position (bullet hit wall/target). */
+  private spawnBulletHitVfx(x: number, y: number): void {
+    const burst = this.add.circle(x, y, 3, 0xffffff).setDepth(6);
+    this.tweens.add({
+      targets: burst,
+      scale: 4,
+      alpha: 0,
+      duration: 180,
+      onComplete: () => burst.destroy(),
+    });
   }
 
   /**
@@ -1105,6 +1418,13 @@ export class GameScene extends Phaser.Scene {
         delete this.enemyEntities[id];
       }
       this.enemyEntities = {};
+
+      for (const id in this.projectileEntities) {
+        const e = this.projectileEntities[id];
+        if (e) e.destroy();
+        delete this.projectileEntities[id];
+      }
+      this.projectileEntities = {};
 
       // Start the destination scene under a black cover so the player
       // never sees the unloaded map.

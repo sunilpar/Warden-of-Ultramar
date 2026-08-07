@@ -20,8 +20,9 @@
  *
  * Only the fields marked @type are sent to clients; inputQueue is local.
  */
-import { Schema, type } from "@colyseus/schema";
+import { Schema, type, MapSchema } from "@colyseus/schema";
 import { PLAYER_STATS } from "../config/playerStats";
+import type { SkillId } from "../config/skillDefs";
 
 export interface InputData {
   left: boolean;
@@ -71,6 +72,18 @@ export class Player extends Schema {
 
   // ---- Input queue (local — never synced) ----
   inputQueue: InputData[] = [];
+
+  // ---- Skill levels (synced) — per-skill level owned by this player.
+  //      Drives damage, color tiers, chain count, card art tier. Keys are
+  //      SkillId strings; values are the skill level (1..MAX_SKILL_LEVEL). ----
+  @type({ map: "number" }) skillLevels = new MapSchema<number>();
+
+  /** Server timestamp (ms) when the bolter comes off cooldown (for HUD fill). */
+  @type("number") bolterCooldownEndsAt: number = 0;
+
+  // ---- Skill cooldowns (NOT synced; server-only) — remaining seconds
+  //      before each skill can be cast again. ----
+  skillCooldowns: Map<SkillId, number> = new Map();
 
   // ============================================================
   // LIFECYCLE
@@ -166,5 +179,52 @@ export class Player extends Schema {
     // Heal on level up
     this.heal(this.maxHealth * PLAYER_STATS.LEVELING.HEAL_ON_LEVEL_UP);
     this.recalcDerivedStats();
+  }
+
+  // ============================================================
+  // SKILLS
+  // ============================================================
+
+  /** Get a skill's level (0 if not owned/learned). */
+  getSkillLevel(skill: SkillId): number {
+    return this.skillLevels.get(skill) ?? 0;
+  }
+
+  /** Set a skill's level (clamped to >=1). */
+  setSkillLevel(skill: SkillId, level: number): void {
+    this.skillLevels.set(skill, Math.max(1, Math.floor(level)));
+  }
+
+  /** Advance a skill's level by 1 (for the "0" upgrade key). */
+  upgradeSkill(skill: SkillId): void {
+    this.setSkillLevel(skill, this.getSkillLevel(skill) + 1);
+  }
+
+  /** Advance ALL owned skills by 1 (used by the debug upgrade key). */
+  upgradeAllSkills(): void {
+    this.skillLevels.forEach((_lvl, skill) => {
+      this.skillLevels.set(skill as SkillId, (_lvl ?? 0) + 1);
+    });
+  }
+
+  /** True if a skill is off cooldown. */
+  isSkillReady(skill: SkillId): boolean {
+    return (this.skillCooldowns.get(skill) ?? 0) <= 0;
+  }
+
+  /** Put a skill on cooldown (seconds). Also stamps the synced end-time
+   *  for the bolter so the client HUD can render a fill animation. */
+  startSkillCooldown(skill: SkillId, cooldown: number): void {
+    this.skillCooldowns.set(skill, cooldown);
+    if (skill === "bolter") {
+      this.bolterCooldownEndsAt = Date.now() + cooldown * 1000;
+    }
+  }
+
+  /** Advance all skill cooldowns by dt seconds (clamped at 0). */
+  tickSkillCooldowns(dt: number): void {
+    for (const [skill, cd] of this.skillCooldowns) {
+      this.skillCooldowns.set(skill, Math.max(0, cd - dt));
+    }
   }
 }

@@ -56,6 +56,12 @@ export class Enemy extends Schema {
   //      this is true. Synced so all clients render the same facing. ----
   @type("boolean") facingRight: boolean = false;
 
+  // ---- Visual state (synced) ----
+  /** Server timestamp (ms) until which the enemy flashes white (recent hit). */
+  @type("number") hitFlashUntil: number = 0;
+  /** True while the enemy is playing its attack animation. */
+  @type("boolean") attacking: boolean = false;
+
   // ---- Base stats (NOT synced — server-authoritative source of truth) ----
   baseMoveSpeed: number = 0;
 
@@ -74,6 +80,11 @@ export class Enemy extends Schema {
    * ready. Set back to the skill's cooldown after it is used.
    */
   skillCooldownsRemaining: Map<SkillId, number> = new Map();
+
+  /** Server timestamp (ms) until which the enemy is paused (hit-stun). */
+  pausedUntil: number = 0;
+  /** Server timestamp (ms) until which the enemy can attack again. */
+  attackCooldownUntil: number = 0;
 
   // ============================================================
   // LIFECYCLE
@@ -113,6 +124,12 @@ export class Enemy extends Schema {
     this.damageMultiplier = 1.0;
     this.incomingDamageMultiplier = 1.0;
 
+    // Reset visual / AI state
+    this.hitFlashUntil = 0;
+    this.attacking = false;
+    this.pausedUntil = 0;
+    this.attackCooldownUntil = 0;
+
     this.recalcDerivedStats();
   }
 
@@ -147,6 +164,12 @@ export class Enemy extends Schema {
       dmg -= absorbed;
     }
     this.currentHealth = Math.max(0, this.currentHealth - dmg);
+
+    // Hit feedback: white flash + brief hit-stun pause (mimics being hit).
+    const now = Date.now();
+    this.hitFlashUntil = now + 120;
+    this.pausedUntil = now + 120;
+
     return rawDamage * this.incomingDamageMultiplier;
   }
 
