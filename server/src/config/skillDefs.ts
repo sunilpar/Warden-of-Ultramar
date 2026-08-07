@@ -40,7 +40,7 @@ export type SkillId =
 export const MAX_SKILL_LEVEL = 10;
 
 /** Visual color tier for a bolter bullet, derived from its skill level. */
-export type BolterColorTier = "white" | "yellow" | "blue";
+export type BolterColorTier = "yellow" | "blue" | "purple";
 
 export interface SkillDef {
   id: SkillId;
@@ -64,16 +64,41 @@ export interface BolterDef extends SkillDef {
   chainCount: (skillLevel: number) => number;
 }
 
+
+export interface ClawDef extends SkillDef {
+  id: "claw";
+  /** Cone half-angle (radians) per tier. Full cone = 2 * halfAngle. */
+  coneHalfAngle: (skillLevel: number) => number;
+  /** Cone reach (px) per tier. */
+  range: (skillLevel: number) => number;
+  /** Skill level at which bleed is unlocked. */
+  bleedUnlockLevel: number;
+  /** Bleed damage per second (applied while active). */
+  bleedDps: (skillLevel: number) => number;
+  /** Bleed duration in seconds. */
+  bleedDuration: (skillLevel: number) => number;
+}
+
 export const SKILL_DEFS = {
   bolter: {
     id: "bolter",
     cooldown: 0.5,
     attackFactor: 1.0,
     projectileSpeed: 520,
-    projectileRadius: 7,
+    projectileRadius: 10,
     maxRange: 900,
     chainUnlockLevel: 3,
     chainCount: (lvl: number) => Math.max(0, lvl - 3),
+  },
+  claw: {
+    id: "claw",
+    cooldown: 0.5,
+    attackFactor: 1.0,
+    coneHalfAngle: (lvl: number) => (clawTier(lvl) === "big" ? 0.9 : clawTier(lvl) === "mid" ? 0.7 : 0.5),
+    range: (lvl: number) => (clawTier(lvl) === "big" ? 110 : clawTier(lvl) === "mid" ? 85 : 60),
+    bleedUnlockLevel: 8,
+    bleedDps: (_lvl: number) => 20,
+    bleedDuration: (_lvl: number) => 4,
   },
 } as const;
 
@@ -98,21 +123,45 @@ export function computeSkillDamage(
   const def = (SKILL_DEFS as Record<string, SkillDef>)[skillId];
   const af = def ? def.attackFactor : 1.0;
   return (
-    casterAttack * af * levelFactor(skillId, skillLevel) * casterDamageMultiplier
+    casterAttack *
+    af *
+    levelFactor(skillId, skillLevel) *
+    casterDamageMultiplier
   );
 }
 
 /** Bolter bullet color tier based on skill level (synced for rendering). */
 export function bolterColorTier(skillLevel: number): BolterColorTier {
-  if (skillLevel >= 5) return "blue";
-  if (skillLevel >= 3) return "yellow";
-  return "white";
+  if (skillLevel >= 8) return "purple";
+  if (skillLevel >= 4) return "blue";
+  return "yellow";
 }
 
 /** Chain damage multiplier for the Nth hit (0 = first target). Halve each. */
 export function chainDamageMultiplier(chainIndex: number): number {
   return Math.pow(0.5, chainIndex);
 }
+
+// ============================================================
+// CLAW TIER + BLEED
+// ============================================================
+
+/** Claw visual/damage tier. small (1-3), mid (4-7), big (8-10). */
+export type ClawTier = "small" | "mid" | "big";
+
+export function clawTier(skillLevel: number): ClawTier {
+  if (skillLevel >= 8) return "big";
+  if (skillLevel >= 4) return "mid";
+  return "small";
+}
+
+/** True if this skill level inflicts bleed (tier "big"). */
+export function clawInflictsBleed(skillLevel: number): boolean {
+  return skillLevel >= (SKILL_DEFS.claw as ClawDef).bleedUnlockLevel;
+}
+
+/** The typed claw definition helper. */
+export const CLAW_DEF: ClawDef = SKILL_DEFS.claw as ClawDef;
 
 /** The bolter definition (typed helper). */
 export const BOLTER_DEF: BolterDef = SKILL_DEFS.bolter;

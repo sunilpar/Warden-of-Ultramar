@@ -79,6 +79,29 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 64,
       },
     );
+    // Bolter skill spritesheet (3 cols x 2 rows, 64x64 each).
+    //   Row 0 (frames 0,1,2): bullet art per color tier (yellow/blue/purple).
+    //   Row 1 (frames 3,4,5): muzzle flash animation frames.
+    this.load.spritesheet(
+      "bolter_sheet",
+      "assets/skills/BolterSpriteSheet-0002.png",
+      {
+        frameWidth: 64,
+        frameHeight: 64,
+      },
+    );
+    // Claw skill spritesheet (4 cols x 3 rows, 64x64 each).
+    //   Row 0 (frames 0-3): tier "small" (levels 1-3).
+    //   Row 1 (frames 4-7): tier "mid" (levels 4-7).
+    //   Row 2 (frames 8-11): tier "big" (levels 8-10).
+    this.load.spritesheet(
+      "claw_sheet",
+      "assets/skills/clawSpritesheet-0003.png",
+      {
+        frameWidth: 64,
+        frameHeight: 64,
+      },
+    );
   }
   create() {
     // Draw the menu background stretched to fill the screen

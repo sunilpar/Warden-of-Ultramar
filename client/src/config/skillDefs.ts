@@ -83,24 +83,72 @@ export function cardFrameForLevel(skill: SkillId, level: number): number {
 }
 
 /** Bolter bullet color tier (must match server). */
-export type BolterColorTier = "white" | "yellow" | "blue";
+export type BolterColorTier = "yellow" | "blue" | "purple";
 
 export function bolterColorTier(level: number): BolterColorTier {
-  if (level >= 5) return "blue";
-  if (level >= 3) return "yellow";
-  return "white";
+  if (level >= 8) return "purple";
+  if (level >= 4) return "blue";
+  return "yellow";
 }
 
 export const BOLTER_COLORS: Record<BolterColorTier, number> = {
-  white: 0xffffff,
   yellow: 0xffe14d,
   blue: 0x4da6ff,
+  purple: 0xb266ff,
 };
 
 /**
  * Build the "mods" array (human-readable detail strings) for a skill at a
  * given level. Shown on card hover. Strings describe the current effects.
  */
+/**
+ * Bolter bullet spritesheet frame for a given level.
+ * BolterSpriteSheet-0002.png is 3 cols x 2 rows, 64x64 each.
+ *   Row 0 (frames 0,1,2): bullet art per tier
+ *     frame 0 = levels 1-3 (yellow)
+ *     frame 1 = levels 4-7 (blue)
+ *     frame 2 = levels 8-10 (purple)
+ *   Row 1 (frames 3,4,5): muzzle flash animation frames.
+ */
+export function bolterBulletFrameForLevel(level: number): number {
+  const tier = bolterColorTier(level);
+  if (tier === "purple") return 2;
+  if (tier === "blue") return 1;
+  return 0;
+}
+
+/** Muzzle flash animation frames (row 1): indices 3,4,5 in the 3-col sheet. */
+export const BOLTER_MUZZLE_FRAMES = [3, 4, 5];
+
+// ============================================================
+// CLAW TIER
+// ============================================================
+
+/** Claw visual tier. small (1-3), mid (4-7), big (8-10). */
+export type ClawTier = "small" | "mid" | "big";
+
+export function clawTier(level: number): ClawTier {
+  if (level >= 8) return "big";
+  if (level >= 4) return "mid";
+  return "small";
+}
+
+/**
+ * Claw spritesheet frame for a given level.
+ * clawSpritesheet-0003.png is 4 cols x 3 rows, 64x64 each.
+ *   Row 0 (frames 0-3): tier "small" animation (levels 1-3).
+ *   Row 1 (frames 4-7): tier "mid" animation (levels 4-7).
+ *   Row 2 (frames 8-11): tier "big" animation (levels 8-10).
+ * Returns the START frame of the tier's row (use frames start..start+3).
+ */
+export function clawRowStartFrame(level: number): number {
+  const t = clawTier(level);
+  if (t === "big") return 8;
+  if (t === "mid") return 4;
+  return 0;
+}
+export const CLAW_FRAMES_PER_ROW = 4;
+
 export function skillMods(skill: SkillId, level: number): string[] {
   const mods: string[] = [];
   if (skill === "bolter") {

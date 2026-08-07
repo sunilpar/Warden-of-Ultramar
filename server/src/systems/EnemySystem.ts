@@ -16,6 +16,7 @@ import { GAME_CONFIG } from "../config/game";
 import { ENEMY_STATS, type EnemyTypeId, type SkillId } from "../config/enemyStats";
 import { SKILL_DEFS } from "../config/skillDefs";
 import type { ProjectileSystem } from "./ProjectileSystem";
+import type { ClawSystem } from "./ClawSystem";
 
 /** Collision resolver signature (shared by MapSystem / MapSystem2). */
 export interface CollisionResolver {
@@ -30,6 +31,7 @@ export interface CollisionResolver {
 
 export class EnemySystem {
   private projectileSystem: ProjectileSystem | null = null;
+  private clawSystem: ClawSystem | null = null;
 
   constructor(
     private state: RoomState,
@@ -41,9 +43,15 @@ export class EnemySystem {
     this.projectileSystem = ps;
   }
 
+  /** Inject the ClawSystem (called by the room after both are created). */
+  setClawSystem(cs: ClawSystem): void {
+    this.clawSystem = cs;
+  }
+
   update(dt: number): void {
     this.state.enemies.forEach((enemy) => {
       enemy.tickCooldowns(dt);
+      enemy.tickBleed(dt);
       switch (enemy.typeId) {
         case "tyranid":
           this.updateTyranid(enemy, dt);
@@ -179,8 +187,18 @@ export class EnemySystem {
         this.enemySkillLevel(enemy, skill),
         enemy.damageMultiplier,
       );
+    } else if (skill === "claw" && this.clawSystem) {
+      this.clawSystem.castClaw(
+        this.enemyOwnerId(enemy),
+        "enemy",
+        enemy.x,
+        enemy.y,
+        angle,
+        enemy.attack,
+        this.enemySkillLevel(enemy, skill),
+        enemy.damageMultiplier,
+      );
     }
-    // TODO: other skills (claw melee, etc.) wired up later.
     enemy.startCooldown(skill);
   }
 

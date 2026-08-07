@@ -40,6 +40,11 @@ import {
   cardFrameForLevel,
   BOLTER_COLORS,
   bolterColorTier,
+  bolterBulletFrameForLevel,
+  BOLTER_MUZZLE_FRAMES,
+  clawRowStartFrame,
+  CLAW_FRAMES_PER_ROW,
+  type ClawTier,
   skillMods,
 } from "../config/skillDefs";
 
@@ -57,9 +62,13 @@ export class GameScene extends Phaser.Scene {
   // Enemy sprites keyed by enemy id (from server state.enemies)
   enemyEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
   private enemyAnimationsCreated: boolean = false;
+  private bolterMuzzleAnimCreated: boolean = false;
 
   // ---- Projectiles (bolter bullets etc.) keyed by projectile id ----
   projectileEntities: { [id: string]: Phaser.GameObjects.Arc } = {};
+  /** Claw VFX sprites keyed by skillCast id. */
+  clawEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
+  private clawAnimCreated: boolean = false;
 
   // ---- Enemy HP bars + last-known positions (for VFX on despawn) ----
   enemyHpBars: { [id: string]: Phaser.GameObjects.Container } = {};
@@ -190,25 +199,41 @@ export class GameScene extends Phaser.Scene {
       const wx = pointer.worldX;
       const wy = pointer.worldY;
       if (this.currentPlayer) {
-        this.aimAngle = Math.atan2(wy - this.currentPlayer.y, wx - this.currentPlayer.x);
+        this.aimAngle = Math.atan2(
+          wy - this.currentPlayer.y,
+          wx - this.currentPlayer.x,
+        );
       }
     });
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
-      if (pointer.leftButtonReleased() === false && pointer.event) {
-        // left click
-      }
       if (!this.currentPlayer || !this.room) return;
       const wx = pointer.worldX;
       const wy = pointer.worldY;
-      const angle = Math.atan2(wy - this.currentPlayer.y, wx - this.currentPlayer.x);
+      const angle = Math.atan2(
+        wy - this.currentPlayer.y,
+        wx - this.currentPlayer.x,
+      );
+      if (pointer.rightButtonDown()) {
+        // Right-click: claw skill (cone melee in aim direction).
+        this.room.send(1, { skill: "claw", angle });
+        return;
+      }
+      // Left-click: bolter skill.
+      if (!this.bolterMuzzleAnimCreated) {
+        this.createBolterAnimations();
+        this.bolterMuzzleAnimCreated = true;
+      }
+      this.spawnMuzzleFlash(this.currentPlayer.x, this.currentPlayer.y, angle);
       this.room.send(1, { skill: "bolter", angle });
     });
 
     // ---- "0" key upgrades the bolter (debug) ----
-    this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.ZERO)?.on("down", () => {
-      if (!this.room) return;
-      this.room.send(2, { skill: "bolter" });
-    });
+    this.input.keyboard
+      ?.addKey(Phaser.Input.Keyboard.KeyCodes.ZERO)
+      ?.on("down", () => {
+        if (!this.room) return;
+        this.room.send(2, { skill: "bolter" });
+      });
 
     // ---- Resolve this scene's map + room config from its scene key ----
     const cfg =
@@ -340,16 +365,20 @@ export class GameScene extends Phaser.Scene {
             // Refresh the stats HUD
             this.updateStatsHUD(player);
             // Sync bolter level + card art
-            const lvl = (player.skillLevels && player.skillLevels.get)
-              ? player.skillLevels.get("bolter") ?? 1
-              : 1;
+            const lvl =
+              player.skillLevels && player.skillLevels.get
+                ? (player.skillLevels.get("bolter") ?? 1)
+                : 1;
             if (lvl !== this.localBolterLevel) {
               this.localBolterLevel = lvl;
               this.refreshBolterCard();
               this.showUpgradeToast(lvl);
             }
             // Track cooldown end + attack for the HUD overlay + tooltip.
-            this.currentPlayer.setData("bolterCdEndsAt", player.bolterCooldownEndsAt ?? 0);
+            this.currentPlayer.setData(
+              "bolterCdEndsAt",
+              player.bolterCooldownEndsAt ?? 0,
+            );
             this.currentPlayer.setData("attack", player.attack ?? 100);
           }
         });
@@ -392,13 +421,17 @@ export class GameScene extends Phaser.Scene {
       this.enemyEntities[enemyId] = sprite;
 
       // ---- Enemy HP bar (bg + fill) floating above the sprite ----
-      const hpW = 50;
-      const hpH = 6;
-      const hpBg = this.add.rectangle(0, -42, hpW, hpH, 0x000000, 0.7)
+      const hpW = 38;
+      const hpH = 5;
+      const hpBg = this.add
+        .rectangle(0, -42, hpW, hpH, 0x000000, 0.7)
         .setStrokeStyle(1, 0x000000, 0.9);
-      const hpFill = this.add.rectangle(-hpW / 2, -42, hpW, hpH, 0xff3333)
+      const hpFill = this.add
+        .rectangle(-hpW / 2, -42, hpW, hpH, 0xff3333)
         .setOrigin(0, 0.5);
-      const hpBar = this.add.container(enemy.x, enemy.y, [hpBg, hpFill]).setDepth(5);
+      const hpBar = this.add
+        .container(enemy.x, enemy.y, [hpBg, hpFill])
+        .setDepth(5);
       this.enemyHpBars[enemyId] = hpBar;
 
       this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
@@ -433,23 +466,32 @@ export class GameScene extends Phaser.Scene {
     // PROJECTILE STATE LISTENERS
     // ============================================================
     callbacks.onAdd("projectiles", (proj: any, projId: string) => {
-      const color = (proj.skillId === "bolter")
-        ? BOLTER_COLORS[bolterColorTier(proj.level)]
-        : 0xffffff;
-      // Rectangular bullet (8x3) stretched along its travel direction.
-      const arc = this.add
-        .rectangle(proj.x, proj.y, 10, 4, color)
-        .setDepth(4);
-      this.projectileEntities[projId] = arc as any;
+      // Ensure the muzzle flash animation exists (created once).
+      if (!this.bolterMuzzleAnimCreated) {
+        this.createBolterAnimations();
+        this.bolterMuzzleAnimCreated = true;
+      }
+      // Bolter bullet: a 64x64 art frame, scaled small so the visible bullet
+      // is ~10px (the server-side hitbox stays its own small radius).
+      const tier = bolterColorTier(proj.level);
+      const tint = proj.skillId === "bolter" ? BOLTER_COLORS[tier] : 0xffffff;
+      const frame =
+        proj.skillId === "bolter" ? bolterBulletFrameForLevel(proj.level) : 0;
+      const bullet = this.add
+        .sprite(proj.x, proj.y, "bolter_sheet", frame)
+        .setDepth(4)
+        .setScale(0.4)
+        .setTint(tint);
+      this.projectileEntities[projId] = bullet as any;
       this.projLastPos[projId] = { x: proj.x, y: proj.y };
 
       callbacks.onChange(proj, () => {
-        arc.setPosition(proj.x, proj.y);
-        // Orient rectangle along travel direction.
+        bullet.setPosition(proj.x, proj.y);
+        // Orient the sprite along its travel direction.
         const prev = this.projLastPos[projId];
         if (prev) {
           const a = Math.atan2(proj.y - prev.y, proj.x - prev.x);
-          arc.setRotation(a);
+          bullet.setRotation(a);
         }
         this.projLastPos[projId] = { x: proj.x, y: proj.y };
       });
@@ -466,6 +508,41 @@ export class GameScene extends Phaser.Scene {
       if (pos) {
         this.spawnBulletHitVfx(pos.x, pos.y);
         delete this.projLastPos[projId];
+      }
+    });
+
+    // ============================================================
+    // SKILL CAST (CLAW CONE) STATE LISTENERS
+    // ============================================================
+    callbacks.onAdd("skillCasts", (cast: any, castId: string) => {
+      if (!this.clawAnimCreated) {
+        this.createClawAnimations();
+        this.clawAnimCreated = true;
+      }
+      if (cast.skillId === "claw") {
+        const startFrame = clawRowStartFrame(cast.level);
+        const tier: ClawTier = cast.tier ?? "small";
+        // Scale by tier: small=1.0, mid=1.4, big=1.8
+        const scl = tier === "big" ? 1.8 : tier === "mid" ? 1.4 : 1.0;
+        // Player claws render white/blue; enemy claws render red.
+        const tint = cast.faction === "enemy" ? 0xff5555 : 0xffffff;
+        const animKey = `claw_${tier}`;
+        const sprite = this.add
+          .sprite(cast.x, cast.y, "claw_sheet", startFrame)
+          .setDepth(5)
+          .setScale(scl)
+          .setRotation(cast.angle)
+          .setTint(tint);
+        sprite.anims.play(animKey);
+        this.clawEntities[castId] = sprite;
+      }
+    });
+
+    callbacks.onRemove("skillCasts", (_cast: any, castId: string) => {
+      const entity = this.clawEntities[castId];
+      if (entity) {
+        entity.destroy();
+        delete this.clawEntities[castId];
       }
     });
   }
@@ -605,6 +682,90 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ============================================================
+  // BOLTER ANIMATIONS + MUZZLE FLASH
+  // ============================================================
+
+  /**
+   * Create the bolter muzzle-flash animation once.
+   * BolterSpriteSheet-0002.png row 1 (frames 3,4,5) = muzzle flash frames.
+   */
+  private createBolterAnimations(): void {
+    if (this.anims.exists("bolter_muzzle")) return;
+    this.anims.create({
+      key: "bolter_muzzle",
+      frames: this.anims.generateFrameNumbers("bolter_sheet", {
+        frames: BOLTER_MUZZLE_FRAMES,
+      }),
+      frameRate: 18,
+      repeat: 0,
+    });
+  }
+
+  /**
+   * Spawn a one-shot muzzle flash, offset out from the player's center along
+   * the aim direction by half the hitbox width (PLAYER_COLLISION_RADIUS) so it
+   * plays just OUTSIDE the player hitbox. Rotated to the firing direction and
+   * auto-destroyed on completion.
+   */
+  private spawnMuzzleFlash(x: number, y: number, angle: number): void {
+    const offset = this.PLAYER_COLLISION_RADIUS * 1.4; // hitbox width / 2, pushed out a bit
+    const ox = x + Math.cos(angle) * offset;
+    const oy = y + Math.sin(angle) * offset;
+    const flash = this.add
+      .sprite(ox, oy, "bolter_sheet", BOLTER_MUZZLE_FRAMES[0])
+      .setDepth(6)
+      .setScale(0.9)
+      .setRotation(angle);
+    flash.anims.play("bolter_muzzle");
+    flash.on("animationcomplete", () => flash.destroy());
+  }
+
+  // ============================================================
+  // CLAW ANIMATIONS + VIEWPORT SYNC
+  // ============================================================
+
+  /**
+   * Create the claw slash animations once (per tier).
+   * clawSpritesheet-0003.png is 4 cols x 3 rows.
+   */
+  private createClawAnimations(): void {
+    const rows: { tier: ClawTier; start: number }[] = [
+      { tier: "small", start: 0 },
+      { tier: "mid", start: 4 },
+      { tier: "big", start: 8 },
+    ];
+    for (const { tier, start } of rows) {
+      const key = `claw_${tier}`;
+      if (this.anims.exists(key)) continue;
+      this.anims.create({
+        key,
+        frames: this.anims.generateFrameNumbers("claw_sheet", {
+          start,
+          end: start + CLAW_FRAMES_PER_ROW - 1,
+        }),
+        frameRate: 16,
+        repeat: 0,
+      });
+    }
+  }
+
+  /**
+   * Send the camera's world-space viewport rect to the server so it can
+   * activate enemy spawning only where players can see.
+   */
+  private sendViewport(): void {
+    if (!this.room) return;
+    const cam = this.cameras.main;
+    const wv = cam.worldView;
+    this.room.send(3, {
+      x: wv.x,
+      y: wv.y,
+      w: wv.width,
+      h: wv.height,
+    });
+  }
+
+  // ============================================================
   // SKILL CARD (BOLTER in slot 1) + UPGRADE TOAST
   // ============================================================
 
@@ -642,8 +803,10 @@ export class GameScene extends Phaser.Scene {
 
   /** Update the cooldown dim/fill overlay based on bolterCooldownEndsAt. */
   private updateBolterCooldownOverlay(): void {
-    if (!this.bolterCard || !this.bolterCooldownFill || !this.currentPlayer) return;
-    const endsAt = (this.currentPlayer.data.get("bolterCdEndsAt") as number) ?? 0;
+    if (!this.bolterCard || !this.bolterCooldownFill || !this.currentPlayer)
+      return;
+    const endsAt =
+      (this.currentPlayer.data.get("bolterCdEndsAt") as number) ?? 0;
     const now = Date.now();
     if (endsAt > now) {
       // On cooldown: dim the card + show filling overlay.
@@ -1345,6 +1508,8 @@ export class GameScene extends Phaser.Scene {
 
     // ---- Update bolter cooldown fill on the card ----
     this.updateBolterCooldownOverlay();
+    // ---- Sync viewport to server (for viewport-activated spawning) ----
+    this.sendViewport();
   }
 
   // ============================================================
@@ -1425,6 +1590,13 @@ export class GameScene extends Phaser.Scene {
         delete this.projectileEntities[id];
       }
       this.projectileEntities = {};
+
+      for (const id in this.clawEntities) {
+        const e = this.clawEntities[id];
+        if (e) e.destroy();
+        delete this.clawEntities[id];
+      }
+      this.clawEntities = {};
 
       // Start the destination scene under a black cover so the player
       // never sees the unloaded map.

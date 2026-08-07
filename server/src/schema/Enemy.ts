@@ -62,6 +62,9 @@ export class Enemy extends Schema {
   /** True while the enemy is playing its attack animation. */
   @type("boolean") attacking: boolean = false;
 
+  /** Server timestamp (ms) until which the enemy is bleeding (DoT). */
+  @type("number") bleedUntil: number = 0;
+
   // ---- Base stats (NOT synced — server-authoritative source of truth) ----
   baseMoveSpeed: number = 0;
 
@@ -85,6 +88,8 @@ export class Enemy extends Schema {
   pausedUntil: number = 0;
   /** Server timestamp (ms) until which the enemy can attack again. */
   attackCooldownUntil: number = 0;
+  /** Bleed damage per second (server-only; applied while bleedUntil > now). */
+  bleedDps: number = 0;
 
   // ============================================================
   // LIFECYCLE
@@ -129,6 +134,8 @@ export class Enemy extends Schema {
     this.attacking = false;
     this.pausedUntil = 0;
     this.attackCooldownUntil = 0;
+    this.bleedUntil = 0;
+    this.bleedDps = 0;
 
     this.recalcDerivedStats();
   }
@@ -187,6 +194,28 @@ export class Enemy extends Schema {
   // ============================================================
   // SKILL COOLDOWNS
   // ============================================================
+
+  /**
+   * Advance bleed DoT: apply bleedDps * dt damage while active.
+   * Returns true if the enemy died from bleed this tick.
+   */
+  tickBleed(dt: number): boolean {
+    if (this.bleedUntil <= 0) return false;
+    const now = Date.now();
+    if (now >= this.bleedUntil) {
+      this.bleedUntil = 0;
+      this.bleedDps = 0;
+      return false;
+    }
+    this.takeDamage(this.bleedDps * dt);
+    return this.isDead;
+  }
+
+  /** Inflict bleed: set dps + extend/until timestamp. */
+  applyBleed(dps: number, durationSec: number): void {
+    this.bleedDps = dps;
+    this.bleedUntil = Date.now() + durationSec * 1000;
+  }
 
   /** Advance all skill cooldowns by `dt` seconds (clamped at 0). */
   tickCooldowns(dt: number): void {

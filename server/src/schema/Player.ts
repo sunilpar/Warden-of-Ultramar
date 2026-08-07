@@ -81,9 +81,14 @@ export class Player extends Schema {
   /** Server timestamp (ms) when the bolter comes off cooldown (for HUD fill). */
   @type("number") bolterCooldownEndsAt: number = 0;
 
+  /** Server timestamp (ms) until which the player is bleeding (DoT). */
+  @type("number") bleedUntil: number = 0;
+
   // ---- Skill cooldowns (NOT synced; server-only) — remaining seconds
   //      before each skill can be cast again. ----
   skillCooldowns: Map<SkillId, number> = new Map();
+  /** Bleed damage per second (server-only; applied while bleedUntil > now). */
+  bleedDps: number = 0;
 
   // ============================================================
   // LIFECYCLE
@@ -226,5 +231,27 @@ export class Player extends Schema {
     for (const [skill, cd] of this.skillCooldowns) {
       this.skillCooldowns.set(skill, Math.max(0, cd - dt));
     }
+  }
+
+  /**
+   * Advance bleed DoT: apply bleedDps * dt damage while active.
+   * Returns true if the player died from bleed this tick.
+   */
+  tickBleed(dt: number): boolean {
+    if (this.bleedUntil <= 0) return false;
+    const now = Date.now();
+    if (now >= this.bleedUntil) {
+      this.bleedUntil = 0;
+      this.bleedDps = 0;
+      return false;
+    }
+    this.takeDamage(this.bleedDps * dt);
+    return this.isDead;
+  }
+
+  /** Inflict bleed: set dps + until timestamp. */
+  applyBleed(dps: number, durationSec: number): void {
+    this.bleedDps = dps;
+    this.bleedUntil = Date.now() + durationSec * 1000;
   }
 }

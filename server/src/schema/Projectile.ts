@@ -26,7 +26,7 @@ export class Projectile extends Schema {
   /** Skill level at cast time (drives color tier + chain). */
   @type("number") level: number = 1;
   /** Color tier (white/yellow/blue) derived from level — synced for render. */
-  @type("string") colorTier: BolterColorTier = "white";
+  @type("string") colorTier: BolterColorTier = "yellow";
   /** Who fired it — determines what it can hit. */
   @type("string") faction: ProjectileFaction = "player";
 

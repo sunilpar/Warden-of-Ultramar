@@ -13,6 +13,7 @@
  *   0: Movement input { left, right, up, down, tick }
  *   1: Cast skill     { skill: SkillId, angle: number }
  *   2: Upgrade skill  { skill: SkillId }
+ *   3: Viewport rect   { x, y, w, h } (camera world view)
  */
 
 import { Room, Client } from "colyseus";
@@ -23,6 +24,7 @@ import { MapSystem2 } from "../systems/MapSystem2";
 import { PlayerSystem } from "../systems/PlayerSystem";
 import { EnemySystem } from "../systems/EnemySystem";
 import { ProjectileSystem } from "../systems/ProjectileSystem";
+import { ClawSystem } from "../systems/ClawSystem";
 import { LAYERED_MAP_2 } from "../config/layeredMap2";
 import { SKILL_DEFS, MAX_SKILL_LEVEL, type SkillId } from "../config/skillDefs";
 
@@ -34,17 +36,19 @@ export class GameRoom2 extends Room {
   private playerSystem!: PlayerSystem;
   private enemySystem!: EnemySystem;
   private projectileSystem!: ProjectileSystem;
+  private clawSystem!: ClawSystem;
+  private spawnedZones = new Set<number>();
+  private viewports = new Map<string, { x: number; y: number; w: number; h: number }>();
 
   onCreate(_options: any) {
     this.mapSystem = new MapSystem2();
     this.playerSystem = new PlayerSystem(this.state, this.mapSystem as any);
     this.enemySystem = new EnemySystem(this.state, this.mapSystem);
     this.projectileSystem = new ProjectileSystem(this.state, this.mapSystem as any);
-    // Cross-link: enemies can fire projectiles.
+    this.clawSystem = new ClawSystem(this.state);
+    // Cross-link: enemies can fire projectiles + claws.
     this.enemySystem.setProjectileSystem(this.projectileSystem);
-
-    // Spawn one Tyranid for now (from the first enemy spawn zone).
-    this.spawnInitialEnemy();
+    this.enemySystem.setClawSystem(this.clawSystem);
 
     // Fixed timestep simulation loop
     let elapsedTime = 0;
@@ -68,23 +72,50 @@ export class GameRoom2 extends Room {
     this.playerSystem.update(dt);
     this.enemySystem.update(dt);
     this.projectileSystem.update(dt);
-    // Tick player skill cooldowns
-    this.state.players.forEach((p) => p.tickSkillCooldowns(dt));
+    this.clawSystem.update(dt);
+    // Tick player skill cooldowns + bleed DoT
+    this.state.players.forEach((p) => {
+      p.tickSkillCooldowns(dt);
+      p.tickBleed(dt);
+    });
     // Clean up dead enemies
     this.cleanupDeadEnemies();
+    // Viewport-activated spawning
+    this.checkSpawnZones();
   }
 
-  /** Spawn a single Tyranid at the center of the first enemy spawn zone. */
-  private spawnInitialEnemy(): void {
+  /**
+   * Spawn one enemy at the center of each spawn zone the FIRST time any
+   * player's viewport touches it. Each zone spawns exactly once.
+   */
+  private checkSpawnZones(): void {
     const zones = LAYERED_MAP_2.enemySpawnZones;
-    if (zones.length === 0) return;
-    const z = zones[0];
-    this.enemySystem.spawn(
-      "tyranid",
-      z.x + z.width / 2,
-      z.y + z.height / 2,
-      GAME_CONFIG.ENEMY.DEFAULT_LEVEL,
-    );
+    if (zones.length === 0 || this.viewports.size === 0) return;
+    for (let i = 0; i < zones.length; i++) {
+      if (this.spawnedZones.has(i)) continue;
+      const z = zones[i];
+      let touched = false;
+      for (const vp of this.viewports.values()) {
+        if (
+          vp.x < z.x + z.width &&
+          vp.x + vp.w > z.x &&
+          vp.y < z.y + z.height &&
+          vp.y + vp.h > z.y
+        ) {
+          touched = true;
+          break;
+        }
+      }
+      if (touched) {
+        this.enemySystem.spawn(
+          "tyranid",
+          z.x + z.width / 2,
+          z.y + z.height / 2,
+          GAME_CONFIG.ENEMY.DEFAULT_LEVEL,
+        );
+        this.spawnedZones.add(i);
+      }
+    }
   }
 
   /** Remove dead enemies from state. */
@@ -130,8 +161,19 @@ export class GameRoom2 extends Room {
         if (fired) {
           player.startSkillCooldown(skill, SKILL_DEFS.bolter.cooldown);
         }
+      } else if (skill === "claw") {
+        this.clawSystem.castClaw(
+          client.sessionId,
+          "player",
+          player.x,
+          player.y,
+          msg.angle,
+          player.attack,
+          level,
+          player.damageMultiplier,
+        );
+        player.startSkillCooldown(skill, SKILL_DEFS.claw.cooldown);
       }
-      // TODO: other skills wired up later.
     },
 
     // Upgrade a skill (debug "0" key). { skill }
@@ -147,6 +189,11 @@ export class GameRoom2 extends Room {
         player.upgradeSkill(skill);
       }
     },
+
+    // Viewport rect { x, y, w, h } — the client's camera world view.
+    3: (client: Client, msg: { x: number; y: number; w: number; h: number }) => {
+      this.viewports.set(client.sessionId, msg);
+    },
   };
 
   // ============================================================
@@ -160,6 +207,7 @@ export class GameRoom2 extends Room {
     player.initBaseStats();
     // Give the joining player the bolter at level 1 (slot 1 default).
     player.setSkillLevel("bolter", 1);
+    player.setSkillLevel("claw", 1);
     const spawn = this.mapSystem.getSpawnPoint();
     player.x = spawn.x;
     player.y = spawn.y;
@@ -170,6 +218,7 @@ export class GameRoom2 extends Room {
   onLeave(client: Client, _code: number) {
     console.log("Player left GameRoom2:", client.sessionId);
     this.state.players.delete(client.sessionId);
+    this.viewports.delete(client.sessionId);
   }
 
   onDispose() {
