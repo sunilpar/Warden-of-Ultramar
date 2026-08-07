@@ -61,6 +61,8 @@ export class Enemy extends Schema {
   @type("number") hitFlashUntil: number = 0;
   /** True while the enemy is playing its attack animation. */
   @type("boolean") attacking: boolean = false;
+  /** Server timestamp (ms) until which the attack animation is considered active. */
+  @type("number") attackingUntil: number = 0;
 
   /** Server timestamp (ms) until which the enemy is bleeding (DoT). */
   @type("number") bleedUntil: number = 0;
@@ -132,6 +134,7 @@ export class Enemy extends Schema {
     // Reset visual / AI state
     this.hitFlashUntil = 0;
     this.attacking = false;
+    this.attackingUntil = 0;
     this.pausedUntil = 0;
     this.attackCooldownUntil = 0;
     this.bleedUntil = 0;

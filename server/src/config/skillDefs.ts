@@ -83,7 +83,7 @@ export const SKILL_DEFS = {
   bolter: {
     id: "bolter",
     cooldown: 0.5,
-    attackFactor: 1.0,
+    attackFactor: 2.0,
     projectileSpeed: 520,
     projectileRadius: 10,
     maxRange: 900,

@@ -65,6 +65,7 @@ export class ClawSystem {
     attack: number,
     skillLevel: number,
     damageMultiplier: number,
+    casterRadius: number = 20,
   ): boolean {
     const tier = clawTier(skillLevel);
     const halfAngle = CLAW_DEF.coneHalfAngle(skillLevel);
@@ -111,9 +112,12 @@ export class ClawSystem {
     }
 
     // --- Spawn the transient SkillCast VFX entity ---
+    // Offset from caster center to the edge of the caster hitbox in the aim direction.
+    const vfxX = x + Math.cos(angle) * casterRadius;
+    const vfxY = y + Math.sin(angle) * casterRadius;
     const cast = new SkillCast();
-    cast.x = x;
-    cast.y = y;
+    cast.x = vfxX;
+    cast.y = vfxY;
     cast.skillId = "claw";
     cast.angle = angle;
     cast.level = skillLevel;

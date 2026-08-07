@@ -89,17 +89,19 @@ export class EnemySystem {
     const dx = target.x - enemy.x;
     const dy = target.y - enemy.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const STOP_RANGE = 10 + enemy.collisionRadius + 20; // 10px gap + target radius
+    // Use BASE claw range (lvl 1: 60px) as the effective attack range.
+    const BASE_CLAW_RANGE = 60;
+    const EFFECTIVE_RANGE = BASE_CLAW_RANGE;
+    // Attack animation flag: only true if attackingUntil > now (reuse 'now' from above)
+    enemy.attacking = now < enemy.attackingUntil;
 
-    if (dist <= STOP_RANGE) {
-      // In range: stop moving and play the attack animation.
-      enemy.attacking = true;
+    if (dist <= EFFECTIVE_RANGE) {
+      // In range: stop moving, attempt to use skill.
+      this.tryUseSkill(enemy, target);
     } else {
-      enemy.attacking = false;
+      // Out of range: move toward target, don't attempt skills.
       this.moveToward(enemy, target.x, target.y, _dt);
     }
-
-    this.tryUseSkill(enemy, target);
   }
 
   // ============================================================
@@ -176,6 +178,11 @@ export class EnemySystem {
    */
   private useSkill(enemy: Enemy, skill: SkillId, target: Player): void {
     const angle = Math.atan2(target.y - enemy.y, target.x - enemy.x);
+    // Trigger attack animation EVERY time a skill is used.
+    // Keep the flag true for 350ms (one full attack animation cycle).
+    const now = Date.now();
+    enemy.attackingUntil = now + 350;
+    enemy.attacking = true;
     if (skill === "bolter" && this.projectileSystem) {
       this.projectileSystem.castBolter(
         this.enemyOwnerId(enemy),
@@ -197,6 +204,7 @@ export class EnemySystem {
         enemy.attack,
         this.enemySkillLevel(enemy, skill),
         enemy.damageMultiplier,
+        enemy.collisionRadius,
       );
     }
     enemy.startCooldown(skill);

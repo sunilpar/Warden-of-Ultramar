@@ -171,6 +171,7 @@ export class GameRoom2 extends Room {
           player.attack,
           level,
           player.damageMultiplier,
+          20,
         );
         player.startSkillCooldown(skill, SKILL_DEFS.claw.cooldown);
       }
