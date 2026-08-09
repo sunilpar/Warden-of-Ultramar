@@ -78,7 +78,14 @@ export class GameRoom extends Room {
     // Tick player skill cooldowns + bleed DoT
     this.state.players.forEach((p) => {
       p.tickSkillCooldowns(dt);
-      p.tickBleed(dt);
+      if (p.tickBleed(dt)) {
+        // Player died from bleed
+        p.die();
+      }
+      // Check if player died from any damage source
+      if (p.isDead && p.currentHealth === 0) {
+        p.die();
+      }
     });
     // Clean up dead enemies
     this.cleanupDeadEnemies();
@@ -126,7 +133,44 @@ export class GameRoom extends Room {
     this.state.enemies.forEach((enemy, id) => {
       if (enemy.isDead) dead.push(id);
     });
-    for (const id of dead) this.state.enemies.delete(id);
+    for (const id of dead) {
+      const enemy = this.state.enemies.get(id);
+      if (enemy) {
+        // Award XP to nearest player (or all players if none nearby).
+        let awarded = false;
+        let nearestId: string | null = null;
+        let nearestDist = Infinity;
+        this.state.players.forEach((player, pid) => {
+          if (player.isDead) return;
+          const dx = player.x - enemy.x;
+          const dy = player.y - enemy.y;
+          const dist = dx * dx + dy * dy;
+          if (dist < nearestDist) {
+            nearestDist = dist;
+            nearestId = pid;
+          }
+        });
+        if (nearestId) {
+          const player = this.state.players.get(nearestId);
+          if (player) {
+            player.addXp(enemy.xpReward);
+            awarded = true;
+          }
+        }
+        if (!awarded) {
+          // Fallback: split XP among all alive players.
+          let alive = 0;
+          this.state.players.forEach((p) => { if (!p.isDead) alive++; });
+          if (alive > 0) {
+            const share = Math.floor(enemy.xpReward / alive);
+            this.state.players.forEach((p) => {
+              if (!p.isDead) p.addXp(share);
+            });
+          }
+        }
+      }
+      this.state.enemies.delete(id);
+    }
   }
 
   // ============================================================
@@ -196,6 +240,28 @@ export class GameRoom extends Room {
     // Viewport rect { x, y, w, h } — the client's camera world view.
     3: (client: Client, msg: { x: number; y: number; w: number; h: number }) => {
       this.viewports.set(client.sessionId, msg);
+    },
+
+    // Respawn request (player pressed Respawn button).
+    4: (client: Client, _msg: any) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || !player.isDead) return;
+      // Respawn: reset stats, heal to full, move to spawn point.
+      player.respawn();
+      const spawn = this.mapSystem.getSpawnPoint();
+      player.x = spawn.x;
+      player.y = spawn.y;
+      // Give bolter + claw at level 1
+      player.setSkillLevel("bolter", 1);
+      player.setSkillLevel("claw", 1);
+    },
+
+    // Map transition XP reward (map1 → map2: +{xp} XP).
+    5: (client: Client, _msg: any) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+      player.addXp(500);
+      console.log(`Player ${client.sessionId} earned ${500} XP for map transition (map1 → map2)`);
     },
   };
 

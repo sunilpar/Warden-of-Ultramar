@@ -187,6 +187,37 @@ export class Player extends Schema {
   }
 
   // ============================================================
+  // DEATH / RESPAWN
+  // ============================================================
+
+  /**
+   * Mark the player as dead: halve current XP and set HP to 0.
+   * Called by the game loop when currentHealth reaches 0.
+   */
+  die(): void {
+    this.currentHealth = 0;
+    // Death penalty: halve current XP.
+    this.currentXp = Math.floor(this.currentXp / 2);
+  }
+
+  /**
+   * Respawn: reset to full health, reset XP/level to base stats,
+   * and reset all skills to their defaults.
+   * Called when the player presses the Respawn button.
+   */
+  respawn(): void {
+    this.initBaseStats();
+    // Reset skills to level 1 defaults
+    this.skillLevels.clear();
+    this.skillLevels.set("bolter", 1);
+    this.skillLevels.set("claw", 1);
+    this.skillCooldowns.clear();
+    // Clear bleed
+    this.bleedUntil = 0;
+    this.bleedDps = 0;
+  }
+
+  // ============================================================
   // SKILLS
   // ============================================================
 

@@ -62,6 +62,8 @@ export interface EnemyBaseConfig {
     moveSpeed: number;
     attack: number;
   };
+  /** XP awarded to the killer when this enemy dies. */
+  xpReward: number;
 }
 
 export interface EnemyTypeConfig extends EnemyBaseConfig {
@@ -86,6 +88,7 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
       moveSpeed: 0, // speed doesn't grow with level
       attack: 8,
     },
+    xpReward: 200,
   },
 };
 

@@ -19,12 +19,12 @@ export const PLAYER_STATS = {
 
   /** Leveling */
   LEVELING: {
-    LEVEL_1_XP: 500, // xp needed to go from level 1 -> 2
+    LEVEL_1_XP: 1000, // xp needed to go from level 1 -> 2
     /** XP needed for the NEXT level, given the current level.
      *  Override this to change the XP curve. */
     xpForNextLevel: (currentLevel: number): number => {
       // Simple geometric curve: each level needs 25% more than the last.
-      return Math.round(500 * Math.pow(1.25, currentLevel - 1));
+      return Math.round(1000 * Math.pow(1.5, currentLevel - 1));
     },
     /** Stat growth per level. Added to base when leveling up. */
     GROWTH: {

@@ -58,6 +58,8 @@ export class GameScene extends Phaser.Scene {
 
   // ---- Entity tracking ----
   currentPlayer!: Phaser.GameObjects.Sprite;
+  /** The local player's state object (for reading HP/XP/level). */
+  currentPlayerState: any = null;
   playerEntities: { [sessionId: string]: Phaser.GameObjects.Sprite } = {};
   // Enemy sprites keyed by enemy id (from server state.enemies)
   enemyEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
@@ -69,6 +71,9 @@ export class GameScene extends Phaser.Scene {
   /** Claw VFX sprites keyed by skillCast id. */
   clawEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
   private clawAnimCreated: boolean = false;
+  /** Death screen overlay container (null when hidden). */
+  private deathOverlay: Phaser.GameObjects.Container | null = null;
+  private wasDead: boolean = false;
 
   // ---- Enemy HP bars + last-known positions (for VFX on despawn) ----
   enemyHpBars: { [id: string]: Phaser.GameObjects.Container } = {};
@@ -338,6 +343,7 @@ export class GameScene extends Phaser.Scene {
       if (sessionId === this.room.sessionId) {
         // ---- LOCAL PLAYER ----
         this.currentPlayer = sprite;
+        this.currentPlayerState = player;
 
         // Camera follows the local player
         this.cameras.main.startFollow(sprite, true, 0.1, 0.1);
@@ -1506,6 +1512,15 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
+    // ---- Check death state ----
+    if (this.currentPlayerState) {
+      if (this.currentPlayerState.currentHealth <= 0 && !this.wasDead) {
+        this.wasDead = true;
+        this.showDeathScreen();
+      } else if (this.currentPlayerState.currentHealth > 0 && this.wasDead) {
+        this.hideDeathScreen();
+      }
+    }
     // ---- Update bolter cooldown fill on the card ----
     this.updateBolterCooldownOverlay();
     // ---- Sync viewport to server (for viewport-activated spawning) ----
@@ -1550,7 +1565,113 @@ export class GameScene extends Phaser.Scene {
    * The old Colyseus room is left during the dark phase and is
    * auto-disposed by Colyseus once it has no clients.
    */
-  private transitionToScene(sceneKey: string): void {
+  // ============================================================
+  // DEATH SCREEN OVERLAY
+  // ============================================================
+
+  /**
+   * Show the death screen: translucent black overlay + gold-lined box
+   * with Respawn and Quit buttons.
+   */
+  private showDeathScreen(): void {
+    if (this.deathOverlay) return; // already shown
+    const cam = this.cameras.main;
+    const cx = cam.width / 2;
+    const cy = cam.height / 2;
+
+    // Translucent black background
+    const bg = this.add.rectangle(cx, cy, cam.width, cam.height, 0x000000, 0.75)
+      .setScrollFactor(0)
+      .setDepth(2000);
+
+    // Gold-lined box (wood-colored fill)
+    const boxW = 360;
+    const boxH = 220;
+    const box = this.add.rectangle(cx, cy, boxW, boxH, 0x3d2b1f, 0.95)
+      .setStrokeStyle(4, 0xd4a017, 1) // gold border
+      .setScrollFactor(0)
+      .setDepth(2001);
+
+    // "YOU DIED" title
+    const title = this.add.text(cx, cy - 70, "YOU DIED", {
+      fontFamily: "Georgia, serif",
+      fontSize: "28px",
+      color: "#d4a017",
+      stroke: "#000000",
+      strokeThickness: 4,
+    })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(2002);
+
+    // Respawn button
+    const respawnBtn = this.add.rectangle(cx, cy + 10, 180, 44, 0x2d4a2b, 0.9)
+      .setStrokeStyle(2, 0xd4a017, 0.8)
+      .setScrollFactor(0)
+      .setDepth(2002)
+      .setInteractive({ useHandCursor: true });
+    const respawnText = this.add.text(cx, cy + 10, "Respawn", {
+      fontFamily: "Georgia, serif",
+      fontSize: "18px",
+      color: "#ffffff",
+    })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(2003);
+
+    // Quit button
+    const quitBtn = this.add.rectangle(cx, cy + 64, 180, 44, 0x4a2b2b, 0.9)
+      .setStrokeStyle(2, 0xd4a017, 0.8)
+      .setScrollFactor(0)
+      .setDepth(2002)
+      .setInteractive({ useHandCursor: true });
+    const quitText = this.add.text(cx, cy + 64, "Quit", {
+      fontFamily: "Georgia, serif",
+      fontSize: "18px",
+      color: "#ffffff",
+    })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(2003);
+
+    // Button actions
+    respawnBtn.on("pointerdown", () => {
+      if (this.room) {
+        this.room.send(4, {});
+      }
+      this.hideDeathScreen();
+    });
+    quitBtn.on("pointerdown", () => {
+      // Quit does nothing for now
+    });
+
+    // Hover effects
+    respawnBtn.on("pointerover", () => respawnBtn.setFillStyle(0x3d6a3d, 0.95));
+    respawnBtn.on("pointerout", () => respawnBtn.setFillStyle(0x2d4a2b, 0.9));
+    quitBtn.on("pointerover", () => quitBtn.setFillStyle(0x6a3d3d, 0.95));
+    quitBtn.on("pointerout", () => quitBtn.setFillStyle(0x4a2b2b, 0.9));
+
+    this.deathOverlay = this.add.container(0, 0, [
+      bg, box, title, respawnBtn, respawnText, quitBtn, quitText,
+    ])
+      .setScrollFactor(0)
+      .setDepth(2000);
+  }
+
+  /** Hide the death screen overlay. */
+  private hideDeathScreen(): void {
+    if (this.deathOverlay) {
+      this.deathOverlay.destroy();
+      this.deathOverlay = null;
+    }
+    this.wasDead = false;
+  }
+
+  // ============================================================
+  // MAP TRANSITION
+  // ============================================================
+
+    private transitionToScene(sceneKey: string): void {
     if (this.transitioning) return;
     this.transitioning = true;
 
@@ -1562,6 +1683,12 @@ export class GameScene extends Phaser.Scene {
     // Once the camera has fully faded to black, swap scenes.
     cam.once("camerafadeoutcomplete", () => {
       // Leave the old room (it auto-disposes when empty).
+      // Award map transition XP before leaving.
+      try {
+        this.room?.send(5, {});
+      } catch (_e) {
+        // ignore
+      }
       try {
         this.room?.leave();
       } catch (_e) {

@@ -50,6 +50,8 @@ export class Enemy extends Schema {
 
   // ---- Combat (synced) ----
   @type("number") attack: number = 0;
+  /** XP awarded when this enemy is killed. */
+  @type("number") xpReward: number = 0;
 
   // ---- Facing (synced) — true = facing right, false = facing left.
   //      The tyranid sprite faces LEFT by default; the client flips when
@@ -117,6 +119,7 @@ export class Enemy extends Schema {
     this.baseMoveSpeed = cfg.moveSpeed + cfg.growth.moveSpeed * extraLevels;
     this.attack = cfg.attack + cfg.growth.attack * extraLevels;
     this.shield = cfg.shield;
+    this.xpReward = cfg.xpReward;
     this.collisionRadius = cfg.collisionRadius;
 
     // Skill pool + reset cooldowns (ready immediately)
