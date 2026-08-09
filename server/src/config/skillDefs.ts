@@ -79,13 +79,22 @@ export interface ClawDef extends SkillDef {
   bleedDuration: (skillLevel: number) => number;
 }
 
+export interface SlamDef extends SkillDef {
+  id: "slam";
+  range: (skillLevel: number) => number;
+  speed: number;
+  halfWidth: number;
+  halfHeight: number;
+  hitInterval: number;
+}
+
 export const SKILL_DEFS = {
   bolter: {
     id: "bolter",
     cooldown: 0.5,
     attackFactor: 2.0,
     projectileSpeed: 520,
-    projectileRadius: 10,
+    projectileRadius: 6,
     maxRange: 900,
     chainUnlockLevel: 3,
     chainCount: (lvl: number) => Math.max(0, lvl - 3),
@@ -99,6 +108,16 @@ export const SKILL_DEFS = {
     bleedUnlockLevel: 8,
     bleedDps: (_lvl: number) => 20,
     bleedDuration: (_lvl: number) => 4,
+  },
+  slam: {
+    id: "slam",
+    cooldown: 2.0,
+    attackFactor: 1.0,
+    range: (lvl: number) => (lvl >= 6 ? 200 : 120),
+    speed: 300,
+    halfWidth: 40,
+    halfHeight: 20,
+    hitInterval: 0.5,
   },
 } as const;
 
@@ -165,3 +184,6 @@ export const CLAW_DEF: ClawDef = SKILL_DEFS.claw as ClawDef;
 
 /** The bolter definition (typed helper). */
 export const BOLTER_DEF: BolterDef = SKILL_DEFS.bolter;
+
+/** The slam definition (typed helper). */
+export const SLAM_DEF: SlamDef = SKILL_DEFS.slam as SlamDef;

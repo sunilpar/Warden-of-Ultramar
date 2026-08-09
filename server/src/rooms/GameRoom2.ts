@@ -25,6 +25,7 @@ import { PlayerSystem } from "../systems/PlayerSystem";
 import { EnemySystem } from "../systems/EnemySystem";
 import { ProjectileSystem } from "../systems/ProjectileSystem";
 import { ClawSystem } from "../systems/ClawSystem";
+import { SlamSystem } from "../systems/SlamSystem";
 import { LAYERED_MAP_2 } from "../config/layeredMap2";
 import { SKILL_DEFS, MAX_SKILL_LEVEL, type SkillId } from "../config/skillDefs";
 
@@ -37,6 +38,7 @@ export class GameRoom2 extends Room {
   private enemySystem!: EnemySystem;
   private projectileSystem!: ProjectileSystem;
   private clawSystem!: ClawSystem;
+  private slamSystem!: SlamSystem;
   private spawnedZones = new Set<number>();
   private viewports = new Map<string, { x: number; y: number; w: number; h: number }>();
 
@@ -46,9 +48,11 @@ export class GameRoom2 extends Room {
     this.enemySystem = new EnemySystem(this.state, this.mapSystem);
     this.projectileSystem = new ProjectileSystem(this.state, this.mapSystem as any);
     this.clawSystem = new ClawSystem(this.state);
+    this.slamSystem = new SlamSystem(this.state, this.mapSystem);
     // Cross-link: enemies can fire projectiles + claws.
     this.enemySystem.setProjectileSystem(this.projectileSystem);
     this.enemySystem.setClawSystem(this.clawSystem);
+    this.enemySystem.setSlamSystem(this.slamSystem);
 
     // Fixed timestep simulation loop
     let elapsedTime = 0;
@@ -73,6 +77,7 @@ export class GameRoom2 extends Room {
     this.enemySystem.update(dt);
     this.projectileSystem.update(dt);
     this.clawSystem.update(dt);
+    this.slamSystem.update(dt);
     // Tick player skill cooldowns + bleed DoT
     this.state.players.forEach((p) => {
       p.tickSkillCooldowns(dt);
@@ -115,7 +120,7 @@ export class GameRoom2 extends Room {
       }
       if (touched) {
         this.enemySystem.spawn(
-          "tyranid",
+          Math.random() < 0.5 ? "tyranid" : "orck",
           z.x + z.width / 2,
           z.y + z.height / 2,
           GAME_CONFIG.ENEMY.DEFAULT_LEVEL,
@@ -215,9 +220,15 @@ export class GameRoom2 extends Room {
           player.attack,
           level,
           player.damageMultiplier,
-          20,
+          10,
         );
         player.startSkillCooldown(skill, SKILL_DEFS.claw.cooldown);
+      } else if (skill === "slam") {
+        this.slamSystem.castSlam(
+          client.sessionId, "player", player.x, player.y, msg.angle,
+          level,
+        );
+        player.startSkillCooldown(skill, SKILL_DEFS.slam.cooldown);
       }
     },
 
@@ -252,6 +263,7 @@ export class GameRoom2 extends Room {
       // Give bolter + claw at level 1
       player.setSkillLevel("bolter", 1);
       player.setSkillLevel("claw", 1);
+      player.setSkillLevel("slam", 1);
     },
 
     // Map transition XP reward (map2 → map3: +{xp} XP).
@@ -275,6 +287,7 @@ export class GameRoom2 extends Room {
     // Give the joining player the bolter at level 1 (slot 1 default).
     player.setSkillLevel("bolter", 1);
     player.setSkillLevel("claw", 1);
+    player.setSkillLevel("slam", 1);
     const spawn = this.mapSystem.getSpawnPoint();
     player.x = spawn.x;
     player.y = spawn.y;

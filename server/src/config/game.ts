@@ -14,7 +14,7 @@ export const GAME_CONFIG = {
   /** Player settings */
   PLAYER: {
     SPEED: 120, // pixels per second
-    COLLISION_RADIUS: 20,
+    COLLISION_RADIUS: 10,
   },
 
   /** Enemy settings */

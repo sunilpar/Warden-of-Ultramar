@@ -71,6 +71,9 @@ export class GameScene extends Phaser.Scene {
   /** Claw VFX sprites keyed by skillCast id. */
   clawEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
   private clawAnimCreated: boolean = false;
+  /** Slam VFX sprites keyed by slam id. */
+  slamEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
+  private slamAnimCreated: boolean = false;
   /** Death screen overlay container (null when hidden). */
   private deathOverlay: Phaser.GameObjects.Container | null = null;
   private wasDead: boolean = false;
@@ -92,6 +95,19 @@ export class GameScene extends Phaser.Scene {
   private bolterCooldownFill!: Phaser.GameObjects.Rectangle;
   private bolterCooldownFillBaseH: number = 0;
   private bolterTooltip!: Phaser.GameObjects.Text;
+
+  // ---- Slam card (slot 2) + Claw card (slot 3) ----
+  private slamCard!: Phaser.GameObjects.Image;
+  private localSlamLevel: number = 1;
+  private slamCooldownFill!: Phaser.GameObjects.Rectangle;
+  private slamCooldownFillBaseH: number = 0;
+  private clawCard!: Phaser.GameObjects.Image;
+  private localClawLevel: number = 1;
+  private clawCooldownFill!: Phaser.GameObjects.Rectangle;
+  private clawCooldownFillBaseH: number = 0;
+
+  // ---- Skill-on-cooldown toast (shown above the HUD in light grey) ----
+  private cooldownToast!: Phaser.GameObjects.Text;
 
   // ---- Aim / firing ----
   private aimAngle: number = 0;
@@ -127,7 +143,7 @@ export class GameScene extends Phaser.Scene {
   // (effective speed = base * speedMultiplier). Fall back to this
   // constant until the first state snapshot arrives.
   private moveSpeed: number = 120;
-  private readonly PLAYER_COLLISION_RADIUS = 20;
+  private readonly PLAYER_COLLISION_RADIUS = 10;
 
   // ---- Stats HUD (bottom-left HUD image + vertical HP bar + cards) ----
   private hudImage!: Phaser.GameObjects.Image;
@@ -150,6 +166,8 @@ export class GameScene extends Phaser.Scene {
   private debugFPS!: Phaser.GameObjects.Text;
   private showHitboxes: boolean = false;
   private debugHitboxes: Phaser.GameObjects.Graphics | null = null;
+  /** Live entity hitbox overlay (player/enemy/projectile/claw circles). */
+  private debugEntityHitboxes: Phaser.GameObjects.Graphics | null = null;
   private hitboxToggleKey!: Phaser.Input.Keyboard.Key;
   private hitboxToggleButton!: Phaser.GameObjects.Text;
 
@@ -219,11 +237,19 @@ export class GameScene extends Phaser.Scene {
         wx - this.currentPlayer.x,
       );
       if (pointer.rightButtonDown()) {
-        // Right-click: claw skill (cone melee in aim direction).
-        this.room.send(1, { skill: "claw", angle });
+        // Right-click: slam skill.
+        if (!this.isSkillReady("slam")) {
+          this.showCooldownToast();
+          return;
+        }
+        this.room.send(1, { skill: "slam", angle });
         return;
       }
       // Left-click: bolter skill.
+      if (!this.isSkillReady("bolter")) {
+        this.showCooldownToast();
+        return;
+      }
       if (!this.bolterMuzzleAnimCreated) {
         this.createBolterAnimations();
         this.bolterMuzzleAnimCreated = true;
@@ -238,6 +264,19 @@ export class GameScene extends Phaser.Scene {
       ?.on("down", () => {
         if (!this.room) return;
         this.room.send(2, { skill: "bolter" });
+      });
+
+    // ---- Space key casts claw skill ----
+    this.input.keyboard
+      ?.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)
+      ?.on("down", () => {
+        if (!this.currentPlayer || !this.room) return;
+        if (!this.isSkillReady("claw")) {
+          this.showCooldownToast();
+          return;
+        }
+        const angle = this.aimAngle;
+        this.room.send(1, { skill: "claw", angle });
       });
 
     // ---- Resolve this scene's map + room config from its scene key ----
@@ -280,13 +319,19 @@ export class GameScene extends Phaser.Scene {
     this.renderLayeredMap();
     this.renderDebugHitboxes();
 
+    // Live entity hitbox overlay (redrawn each frame)
+    this.debugEntityHitboxes = this.add.graphics().setDepth(11);
+    this.debugEntityHitboxes.setVisible(false);
+
     // ---- Debug HUD (FPS + hitbox toggle button) ----
     this.createDebugHUD();
 
     // ---- Stats HUD (health / level / xp / attack / crit) ----
     this.createStatsHUD();
-    // Place the bolter card in slot 1 (initial level 1).
+    // Place the skill cards in slots 1-3 (initial level 1).
     this.refreshBolterCard();
+    this.refreshSlamCard();
+    this.refreshClawCard();
 
     // ---- F3 to toggle hitbox overlay ----
     this.hitboxToggleKey = this.input.keyboard.addKey(
@@ -386,6 +431,26 @@ export class GameScene extends Phaser.Scene {
               player.bolterCooldownEndsAt ?? 0,
             );
             this.currentPlayer.setData("attack", player.attack ?? 100);
+            this.currentPlayer.setData("slamCdEndsAt", player.slamCooldownEndsAt ?? 0);
+            this.currentPlayer.setData("clawCdEndsAt", player.clawCooldownEndsAt ?? 0);
+            // Sync slam level + card art
+            const slamLvl =
+              player.skillLevels && player.skillLevels.get
+                ? (player.skillLevels.get("slam") ?? 1)
+                : 1;
+            if (slamLvl !== this.localSlamLevel) {
+              this.localSlamLevel = slamLvl;
+              this.refreshSlamCard();
+            }
+            // Sync claw level + card art
+            const clawLvl =
+              player.skillLevels && player.skillLevels.get
+                ? (player.skillLevels.get("claw") ?? 1)
+                : 1;
+            if (clawLvl !== this.localClawLevel) {
+              this.localClawLevel = clawLvl;
+              this.refreshClawCard();
+            }
           }
         });
       } else {
@@ -417,13 +482,15 @@ export class GameScene extends Phaser.Scene {
         this.enemyAnimationsCreated = true;
       }
 
-      const textureKey =
-        enemy.typeId === "tyranid" ? "tyranid_sheet" : "tyranid_sheet";
+      const isOrck = enemy.typeId === "orck";
+      const textureKey = isOrck ? "orck_sheet" : "tyranid_sheet";
+      const idleAnim = isOrck ? "orck_idle" : "tri_idle";
+      const displaySize = isOrck ? 80 : 64;
       const sprite = this.add
         .sprite(enemy.x, enemy.y, textureKey, 0)
-        .setDisplaySize(64, 64)
+        .setDisplaySize(displaySize, displaySize)
         .setDepth(3);
-      sprite.anims.play("tri_idle");
+      sprite.anims.play(idleAnim);
       this.enemyEntities[enemyId] = sprite;
 
       // ---- Enemy HP bar (bg + fill) floating above the sprite ----
@@ -521,6 +588,7 @@ export class GameScene extends Phaser.Scene {
     // SKILL CAST (CLAW CONE) STATE LISTENERS
     // ============================================================
     callbacks.onAdd("skillCasts", (cast: any, castId: string) => {
+      console.log("[DEBUG] skillCast onAdd:", cast.skillId, "level:", cast.level, "tier:", cast.tier, "angle:", cast.angle, "range:", cast.range, "faction:", cast.faction);
       if (!this.clawAnimCreated) {
         this.createClawAnimations();
         this.clawAnimCreated = true;
@@ -528,18 +596,31 @@ export class GameScene extends Phaser.Scene {
       if (cast.skillId === "claw") {
         const startFrame = clawRowStartFrame(cast.level);
         const tier: ClawTier = cast.tier ?? "small";
-        // Scale by tier: small=1.0, mid=1.4, big=1.8
-        const scl = tier === "big" ? 1.8 : tier === "mid" ? 1.4 : 1.0;
+        // Place the UNSCALED 64px sprite at the OUTER EDGE of the hitbox cone
+        // so the animation visually covers the tip of the hitbox.
+        // If the cone range is 200px and the sprite is 64px, the sprite sits
+        // from (200-64)=136px to 200px from the caster along the aim direction.
+        // The sprite CENTER is at: castPos + (range - 32) along the aim angle.
+        // (32 = half the sprite width since the sprite is drawn centered.)
+        // This applies in ALL directions because we use the aim angle vector.
+        const range: number = cast.range || (tier === "big" ? 110 : tier === "mid" ? 85 : 60);
+        const SPRITE_NATIVE = 64;
+        const halfSprite = SPRITE_NATIVE / 2; // 32
+        // Distance from the cast origin to the sprite center.
+        const edgeDist = range - halfSprite;
+        const edgeX = cast.x + Math.cos(cast.angle) * edgeDist;
+        const edgeY = cast.y + Math.sin(cast.angle) * edgeDist;
         // Player claws render white/blue; enemy claws render red.
         const tint = cast.faction === "enemy" ? 0xff5555 : 0xffffff;
         const animKey = `claw_${tier}`;
         const sprite = this.add
-          .sprite(cast.x, cast.y, "claw_sheet", startFrame)
+          .sprite(edgeX, edgeY, "claw_sheet", startFrame)
           .setDepth(5)
-          .setScale(scl)
+          .setScale(1)
           .setRotation(cast.angle)
           .setTint(tint);
         sprite.anims.play(animKey);
+        (sprite as any).castData = cast; // store for debug hitbox overlay
         this.clawEntities[castId] = sprite;
       }
     });
@@ -549,6 +630,36 @@ export class GameScene extends Phaser.Scene {
       if (entity) {
         entity.destroy();
         delete this.clawEntities[castId];
+      }
+    });
+
+    // ============================================================
+    // SLAM STATE LISTENERS
+    // ============================================================
+    callbacks.onAdd("slams", (slam: any, slamId: string) => {
+      const isUpgraded = slam.level >= 6;
+      const sprite = this.add
+        .sprite(slam.x, slam.y, "slam_sheet", 0)
+        .setDepth(4)
+        .setScale(1.5)
+        .setRotation(slam.angle);
+      sprite.setData("slamLevel", slam.level);
+      sprite.setData("isUpgraded", isUpgraded);
+      sprite.setData("angle", slam.angle);
+      sprite.setData("remainingRange", slam.remainingRange);
+      this.slamEntities[slamId] = sprite;
+
+      callbacks.onChange(slam, () => {
+        sprite.setPosition(slam.x, slam.y);
+        sprite.setData("remainingRange", slam.remainingRange);
+      });
+    });
+
+    callbacks.onRemove("slams", (_slam: any, slamId: string) => {
+      const entity = this.slamEntities[slamId];
+      if (entity) {
+        entity.destroy();
+        delete this.slamEntities[slamId];
       }
     });
   }
@@ -685,6 +796,28 @@ export class GameScene extends Phaser.Scene {
       frameRate: 10,
       repeat: 0,
     });
+
+    // Orck walk animation (row 0, frames 0-4, loops)
+    this.anims.create({
+      key: "orck_idle",
+      frames: this.anims.generateFrameNumbers("orck_sheet", {
+        start: 0,
+        end: 4,
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
+
+    // Orck attack animation (row 1, frames 5-9, plays once)
+    this.anims.create({
+      key: "orck_attack",
+      frames: this.anims.generateFrameNumbers("orck_sheet", {
+        start: 5,
+        end: 9,
+      }),
+      frameRate: 10,
+      repeat: 0,
+    });
   }
 
   // ============================================================
@@ -807,6 +940,58 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Place / refresh the slam card art in HUD slot 2. */
+  private refreshSlamCard(): void {
+    if (!this.cardSlots || this.cardSlots.length < 2) return;
+    const slot = this.cardSlots[1];
+    const frame = cardFrameForLevel("slam", this.localSlamLevel);
+    if (this.slamCard) {
+      this.slamCard.setFrame(frame);
+    } else {
+      this.slamCard = this.add
+        .image(slot.x, slot.y, "card_sheet", frame)
+        .setOrigin(0, 0)
+        .setDisplaySize(slot.width, slot.height)
+        .setScrollFactor(0)
+        .setDepth(102);
+
+      // Cooldown fill overlay (orange, grows bottom-up).
+      this.slamCooldownFill = this.add
+        .rectangle(slot.x, slot.y, slot.width, slot.height, 0xff8800, 0.45)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(103)
+        .setVisible(false);
+      this.slamCooldownFillBaseH = slot.height;
+    }
+  }
+
+  /** Place / refresh the claw card art in HUD slot 3. */
+  private refreshClawCard(): void {
+    if (!this.cardSlots || this.cardSlots.length < 3) return;
+    const slot = this.cardSlots[2];
+    const frame = cardFrameForLevel("claw", this.localClawLevel);
+    if (this.clawCard) {
+      this.clawCard.setFrame(frame);
+    } else {
+      this.clawCard = this.add
+        .image(slot.x, slot.y, "card_sheet", frame)
+        .setOrigin(0, 0)
+        .setDisplaySize(slot.width, slot.height)
+        .setScrollFactor(0)
+        .setDepth(102);
+
+      // Cooldown fill overlay (green, grows bottom-up).
+      this.clawCooldownFill = this.add
+        .rectangle(slot.x, slot.y, slot.width, slot.height, 0x44ff44, 0.45)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(103)
+        .setVisible(false);
+      this.clawCooldownFillBaseH = slot.height;
+    }
+  }
+
   /** Update the cooldown dim/fill overlay based on bolterCooldownEndsAt. */
   private updateBolterCooldownOverlay(): void {
     if (!this.bolterCard || !this.bolterCooldownFill || !this.currentPlayer)
@@ -831,6 +1016,52 @@ export class GameScene extends Phaser.Scene {
     } else {
       this.bolterCard.setAlpha(1);
       this.bolterCooldownFill.setVisible(false);
+    }
+  }
+
+  /** Update the slam cooldown overlay. */
+  private updateSlamCooldownOverlay(): void {
+    if (!this.slamCard || !this.slamCooldownFill || !this.currentPlayer) return;
+    const endsAt = (this.currentPlayer.data.get("slamCdEndsAt") as number) ?? 0;
+    const now = Date.now();
+    if (endsAt > now) {
+      this.slamCard.setAlpha(0.45);
+      this.slamCooldownFill.setVisible(true);
+      const totalMs = 2000;
+      const remaining = endsAt - now;
+      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
+      const h = this.slamCooldownFillBaseH * fillPct;
+      this.slamCooldownFill.setSize(this.slamCard.displayWidth, h);
+      this.slamCooldownFill.setPosition(
+        this.slamCard.x,
+        this.slamCard.y + this.slamCooldownFillBaseH - h,
+      );
+    } else {
+      this.slamCard.setAlpha(1);
+      this.slamCooldownFill.setVisible(false);
+    }
+  }
+
+  /** Update the claw cooldown overlay. */
+  private updateClawCooldownOverlay(): void {
+    if (!this.clawCard || !this.clawCooldownFill || !this.currentPlayer) return;
+    const endsAt = (this.currentPlayer.data.get("clawCdEndsAt") as number) ?? 0;
+    const now = Date.now();
+    if (endsAt > now) {
+      this.clawCard.setAlpha(0.45);
+      this.clawCooldownFill.setVisible(true);
+      const totalMs = 500;
+      const remaining = endsAt - now;
+      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
+      const h = this.clawCooldownFillBaseH * fillPct;
+      this.clawCooldownFill.setSize(this.clawCard.displayWidth, h);
+      this.clawCooldownFill.setPosition(
+        this.clawCard.x,
+        this.clawCard.y + this.clawCooldownFillBaseH - h,
+      );
+    } else {
+      this.clawCard.setAlpha(1);
+      this.clawCooldownFill.setVisible(false);
     }
   }
 
@@ -875,6 +1106,46 @@ export class GameScene extends Phaser.Scene {
     if (!this.currentPlayer) return 0;
     // attack is tracked via stats HUD; read from the synced schema via data.
     return (this.currentPlayer.data.get("attack") as number) ?? 100;
+  }
+
+  /** True if a skill is off cooldown (client-side check using the synced
+   *  bolterCooldownEndsAt for the bolter). Claw has no synced end-time. */
+  private isSkillReady(skill: "bolter" | "claw" | "slam"): boolean {
+    if (!this.currentPlayer) return true;
+    const key = skill + "CdEndsAt";
+    const endsAt = (this.currentPlayer.data.get(key) as number) ?? 0;
+    return endsAt <= Date.now();
+  }
+
+  /** Show a transient "skill in cooldown" message above the HUD. */
+  private showCooldownToast(): void {
+    const msg = "skill in cooldown";
+    const x = this.cameras.main.centerX;
+    const y = this.hudImage ? this.hudImage.y - 18 : this.cameras.main.height - 160;
+    if (this.cooldownToast) {
+      this.cooldownToast.setText(msg).setPosition(x, y);
+    } else {
+      this.cooldownToast = this.add
+        .text(x, y, msg, {
+          color: "#cccccc",
+          fontSize: "16px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 3,
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(200);
+    }
+    this.cooldownToast.setAlpha(1);
+    this.tweens.killTweensOf(this.cooldownToast);
+    this.time.delayedCall(600, () => {
+      this.tweens.add({
+        targets: this.cooldownToast,
+        alpha: 0,
+        duration: 400,
+      });
+    });
   }
 
   /** Show a transient "cards upgraded to Lv X" toast. */
@@ -1317,6 +1588,9 @@ export class GameScene extends Phaser.Scene {
     this.hudHitboxCards.forEach((hb) => {
       hb.setVisible(this.showHitboxes);
     });
+    if (this.debugEntityHitboxes) {
+      this.debugEntityHitboxes.setVisible(this.showHitboxes);
+    }
     this.hitboxToggleButton.setText(
       this.showHitboxes ? "[F3] Hitboxes: ON" : "[F3] Hitboxes: OFF",
     );
@@ -1479,14 +1753,17 @@ export class GameScene extends Phaser.Scene {
 
       // Animation: attack when attacking, otherwise idle (shown for move+stand).
       const attacking = entity.data.get("attacking") as boolean;
+      const isOrck = (entity.texture.key === "orck_sheet");
+      const atkKey = isOrck ? "orck_attack" : "tri_attack";
+      const idleKey = isOrck ? "orck_idle" : "tri_idle";
       const eAnim = entity.anims.currentAnim;
       if (attacking) {
-        if (!eAnim || eAnim.key !== "tri_attack") {
-          entity.anims.play("tri_attack");
+        if (!eAnim || eAnim.key !== atkKey) {
+          entity.anims.play(atkKey);
         }
       } else {
-        if (!eAnim || eAnim.key !== "tri_idle") {
-          entity.anims.play("tri_idle");
+        if (!eAnim || eAnim.key !== idleKey) {
+          entity.anims.play(idleKey);
         }
       }
 
@@ -1512,6 +1789,41 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
+    // ---- Slam VFX: update sprite frame based on travel progress ----
+    for (const slamId in this.slamEntities) {
+      const sprite = this.slamEntities[slamId];
+      const isUpgraded = sprite.data.get("isUpgraded") as boolean;
+      const remaining = sprite.data.get("remainingRange") as number;
+      const totalRange = isUpgraded ? 200 : 120;
+      const travelled = Math.max(0, 1 - remaining / totalRange); // 0..1
+
+      if (isUpgraded) {
+        // Row 1: 4 frames (0=start, 1=travel1, 2=travel2, 3=impact)
+        // Show 0 at start, alternate 1/2 during travel, 3 at end.
+        let frame: number;
+        if (travelled >= 0.95) {
+          frame = 4 + 3; // row 1 frame 3 (index 7 in the 4-col sheet)
+        } else if (travelled <= 0.05) {
+          frame = 4 + 0; // row 1 frame 0
+        } else {
+          // Alternate frames 1 and 2 during travel
+          frame = 4 + (Math.floor(travelled * 20) % 2 === 0 ? 1 : 2);
+        }
+        sprite.setFrame(frame);
+      } else {
+        // Row 0: 3 frames (0=start, 1=travel, 2=impact)
+        let frame: number;
+        if (travelled >= 0.9) {
+          frame = 2; // impact frame
+        } else if (travelled <= 0.05) {
+          frame = 0; // start frame
+        } else {
+          frame = 1; // travel frame
+        }
+        sprite.setFrame(frame);
+      }
+    }
+
     // ---- Check death state ----
     if (this.currentPlayerState) {
       if (this.currentPlayerState.currentHealth <= 0 && !this.wasDead) {
@@ -1523,8 +1835,116 @@ export class GameScene extends Phaser.Scene {
     }
     // ---- Update bolter cooldown fill on the card ----
     this.updateBolterCooldownOverlay();
+    this.updateSlamCooldownOverlay();
+    this.updateClawCooldownOverlay();
     // ---- Sync viewport to server (for viewport-activated spawning) ----
+    // ---- Update live entity hitbox overlay ----
+    this.updateEntityHitboxes();
     this.sendViewport();
+  }
+
+  // ============================================================
+  // LIVE ENTITY HITBOX OVERLAY
+  // ============================================================
+
+  /**
+   * Redraw the live entity hitbox overlay (call each frame).
+   * Only visible when showHitboxes is true (toggle F3).
+   *
+   * Colors:
+   *   GREEN  (circle) = player hitbox (radius 10)
+   *   RED    (circle) = enemy hitbox (radius 9)
+   *   BLUE   (circle) = bolter projectile hitbox (radius 6)
+   *   ORANGE (cone)   = claw skill VFX hitbox
+   */
+  private updateEntityHitboxes(): void {
+    const gfx = this.debugEntityHitboxes;
+    if (!gfx) return;
+    gfx.clear();
+
+    if (!this.showHitboxes) return;
+
+    // ---- Players (GREEN circles, radius 10) ----
+    gfx.lineStyle(1.5, 0x00ff00, 0.9);
+    if (this.currentPlayer) {
+      gfx.strokeCircle(this.currentPlayer.x, this.currentPlayer.y, this.PLAYER_COLLISION_RADIUS);
+    }
+    for (const sessionId in this.playerEntities) {
+      if (sessionId === this.room?.sessionId) continue;
+      const sp = this.playerEntities[sessionId];
+      gfx.strokeCircle(sp.x, sp.y, this.PLAYER_COLLISION_RADIUS);
+    }
+
+    // ---- Enemies (RED circles, actual collision radius) ----
+    gfx.lineStyle(1.5, 0xff0000, 0.9);
+    for (const id in this.enemyEntities) {
+      const sp = this.enemyEntities[id];
+      const radius = sp.texture.key === "orck_sheet" ? 16 : 9;
+      gfx.strokeCircle(sp.x, sp.y, radius);
+    }
+
+    // ---- Bolter projectiles (BLUE circles, radius 6) ----
+    gfx.lineStyle(1.5, 0x00aaff, 0.9);
+    for (const id in this.projectileEntities) {
+      const e = this.projectileEntities[id];
+      gfx.strokeCircle(e.x, e.y, 6);
+    }
+
+    // ---- Claw VFX (ORANGE cones) ----
+    gfx.lineStyle(1.5, 0xff8800, 0.8);
+    for (const id in this.clawEntities) {
+      const e = this.clawEntities[id];
+      // Read range from the synced cast data (stored on the sprite).
+      const castData = (e as any).castData as any;
+      const range = castData?.range || 60;
+      const tier: string = castData?.tier || "small";
+      const halfAngle = tier === "big" ? 0.9 : tier === "mid" ? 0.7 : 0.5;
+      const angle = e.rotation || 0;
+      gfx.beginPath();
+      gfx.moveTo(e.x, e.y);
+      gfx.lineTo(e.x + Math.cos(angle - halfAngle) * range, e.y + Math.sin(angle - halfAngle) * range);
+      gfx.moveTo(e.x, e.y);
+      gfx.lineTo(e.x + Math.cos(angle + halfAngle) * range, e.y + Math.sin(angle + halfAngle) * range);
+      gfx.strokePath();
+      gfx.beginPath();
+      gfx.arc(e.x, e.y, range, angle - halfAngle, angle + halfAngle);
+      gfx.strokePath();
+    }
+
+    // ---- Slam hitboxes (CYAN rectangles) ----
+    gfx.lineStyle(1.5, 0x00ffff, 0.8);
+    for (const id in this.slamEntities) {
+      const s = this.slamEntities[id];
+      const angle = s.rotation || 0;
+      // Read dimensions from the sprite data (set at creation time).
+      // halfHeight = along travel dir, halfWidth = perpendicular.
+      const halfH = 20;
+      const halfW = 40;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      // 4 corners of the oriented rectangle
+      const corners = [
+        { lx: -halfH, ly: -halfW },
+        { lx:  halfH, ly: -halfW },
+        { lx:  halfH, ly:  halfW },
+        { lx: -halfH, ly:  halfW },
+      ].map((c) => ({
+        x: s.x + c.lx * cos - c.ly * sin,
+        y: s.y + c.lx * sin + c.ly * cos,
+      }));
+      gfx.beginPath();
+      gfx.moveTo(corners[0].x, corners[0].y);
+      for (let i = 1; i < corners.length; i++) {
+        gfx.lineTo(corners[i].x, corners[i].y);
+      }
+      gfx.lineTo(corners[0].x, corners[0].y);
+      gfx.strokePath();
+      // Draw travel direction arrow
+      gfx.beginPath();
+      gfx.moveTo(s.x, s.y);
+      gfx.lineTo(s.x + cos * halfH * 2, s.y + sin * halfH * 2);
+      gfx.strokePath();
+    }
   }
 
   // ============================================================

@@ -11,10 +11,12 @@ import { Player } from "./Player";
 import { Enemy } from "./Enemy";
 import { Projectile } from "./Projectile";
 import { SkillCast } from "./SkillCast";
+import { Slam } from "./Slam";
 
 export class RoomState extends Schema {
   @type({ map: Player }) players = new MapSchema<Player>();
   @type({ map: Enemy }) enemies = new MapSchema<Enemy>();
   @type({ map: Projectile }) projectiles = new MapSchema<Projectile>();
   @type({ map: SkillCast }) skillCasts = new MapSchema<SkillCast>();
+  @type({ map: Slam }) slams = new MapSchema<Slam>();
 }

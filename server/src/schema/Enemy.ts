@@ -79,7 +79,7 @@ export class Enemy extends Schema {
 
   // ---- AI / skill state (NOT synced; server-only) ----
   /** Collision radius (used by tile resolution). */
-  collisionRadius: number = 18;
+  collisionRadius: number = 9;
   /** Skills this enemy may cast (copied from config). */
   skillPool: SkillId[] = [];
   /**

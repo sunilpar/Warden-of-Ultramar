@@ -35,7 +35,7 @@ export type SkillId =
   | "heal";
 
 /** Enemy type identifier. */
-export type EnemyTypeId = "tyranid";
+export type EnemyTypeId = "tyranid" | "orck";
 
 export interface EnemyBaseConfig {
   /** Display title. */
@@ -80,12 +80,31 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     moveSpeed: 60, // 1px per tick
     attack: 40,
     shield: 0,
-    collisionRadius: 18,
+    collisionRadius: 9,
     skillPool: ["claw"],
     skillCooldown: { claw: 1.5 },
     growth: {
       maxHealth: 120,
       moveSpeed: 0, // speed doesn't grow with level
+      attack: 8,
+    },
+    xpReward: 200,
+  },
+  orck: {
+    id: "orck",
+    title: "Orck",
+    description:
+      "A hulking greenskin brute. Slower but tougher than a tyranid, with a larger frame.",
+    maxHealth: 500,
+    moveSpeed: 45, // slower than tyranid
+    attack: 40,
+    shield: 0,
+    collisionRadius: 16, // larger hitbox than tyranid
+    skillPool: ["slam"],
+    skillCooldown: { slam: 2.0 },
+    growth: {
+      maxHealth: 100,
+      moveSpeed: 0,
       attack: 8,
     },
     xpReward: 200,

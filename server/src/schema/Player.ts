@@ -80,6 +80,10 @@ export class Player extends Schema {
 
   /** Server timestamp (ms) when the bolter comes off cooldown (for HUD fill). */
   @type("number") bolterCooldownEndsAt: number = 0;
+  /** Server timestamp (ms) when slam comes off cooldown (for client HUD). */
+  @type("number") slamCooldownEndsAt: number = 0;
+  /** Server timestamp (ms) when claw comes off cooldown (for client HUD). */
+  @type("number") clawCooldownEndsAt: number = 0;
 
   /** Server timestamp (ms) until which the player is bleeding (DoT). */
   @type("number") bleedUntil: number = 0;
@@ -211,6 +215,7 @@ export class Player extends Schema {
     this.skillLevels.clear();
     this.skillLevels.set("bolter", 1);
     this.skillLevels.set("claw", 1);
+    this.skillLevels.set("slam", 1);
     this.skillCooldowns.clear();
     // Clear bleed
     this.bleedUntil = 0;
@@ -252,8 +257,13 @@ export class Player extends Schema {
    *  for the bolter so the client HUD can render a fill animation. */
   startSkillCooldown(skill: SkillId, cooldown: number): void {
     this.skillCooldowns.set(skill, cooldown);
+    const endsAt = Date.now() + cooldown * 1000;
     if (skill === "bolter") {
-      this.bolterCooldownEndsAt = Date.now() + cooldown * 1000;
+      this.bolterCooldownEndsAt = endsAt;
+    } else if (skill === "slam") {
+      this.slamCooldownEndsAt = endsAt;
+    } else if (skill === "claw") {
+      this.clawCooldownEndsAt = endsAt;
     }
   }
 

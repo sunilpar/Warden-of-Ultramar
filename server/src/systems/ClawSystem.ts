@@ -65,7 +65,7 @@ export class ClawSystem {
     attack: number,
     skillLevel: number,
     damageMultiplier: number,
-    casterRadius: number = 20,
+    casterRadius: number = 10,
   ): boolean {
     const tier = clawTier(skillLevel);
     const halfAngle = CLAW_DEF.coneHalfAngle(skillLevel);
@@ -123,6 +123,7 @@ export class ClawSystem {
     cast.level = skillLevel;
     cast.tier = tier;
     cast.faction = faction;
+    cast.range = range;
     const id = `cast_${this.nextId++}_${Date.now()}`;
     this.state.skillCasts.set(id, cast);
     this.expiry.set(id, Date.now() + SKILL_CAST_TTL_MS);

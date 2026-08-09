@@ -17,6 +17,7 @@ import { ENEMY_STATS, type EnemyTypeId, type SkillId } from "../config/enemyStat
 import { SKILL_DEFS } from "../config/skillDefs";
 import type { ProjectileSystem } from "./ProjectileSystem";
 import type { ClawSystem } from "./ClawSystem";
+import { SlamSystem } from "./SlamSystem";
 
 /** Collision resolver signature (shared by MapSystem / MapSystem2). */
 export interface CollisionResolver {
@@ -32,6 +33,17 @@ export interface CollisionResolver {
 export class EnemySystem {
   private projectileSystem: ProjectileSystem | null = null;
   private clawSystem: ClawSystem | null = null;
+  private slamSystem: SlamSystem | null = null;
+
+  /** Pending slam casts (delayed until after attack animation). */
+  private pendingSlams: {
+    ownerId: string;
+    x: number;
+    y: number;
+    angle: number;
+    level: number;
+    castAt: number;
+  }[] = [];
 
   constructor(
     private state: RoomState,
@@ -48,13 +60,31 @@ export class EnemySystem {
     this.clawSystem = cs;
   }
 
+  /** Inject the SlamSystem (called by the room after both are created). */
+  setSlamSystem(ss: SlamSystem): void {
+    this.slamSystem = ss;
+  }
+
   update(dt: number): void {
+    // Process pending slam casts (delayed after attack animation).
+    const now = Date.now();
+    const ready = this.pendingSlams.filter((s) => s.castAt <= now);
+    this.pendingSlams = this.pendingSlams.filter((s) => s.castAt > now);
+    for (const s of ready) {
+      if (this.slamSystem) {
+        this.slamSystem.castSlam(s.ownerId, "enemy", s.x, s.y, s.angle, s.level);
+      }
+    }
+
     this.state.enemies.forEach((enemy) => {
       enemy.tickCooldowns(dt);
       enemy.tickBleed(dt);
       switch (enemy.typeId) {
         case "tyranid":
           this.updateTyranid(enemy, dt);
+          break;
+        case "orck":
+          this.updateOrck(enemy, dt);
           break;
         default:
           break;
@@ -100,6 +130,43 @@ export class EnemySystem {
       this.tryUseSkill(enemy, target);
     } else {
       // Out of range: move toward target, don't attempt skills.
+      this.moveToward(enemy, target.x, target.y, _dt);
+    }
+  }
+
+  // ============================================================
+  // ORCK
+  // ============================================================
+
+  /** Orck: same melee chase AI as the tyranid. Finds the nearest player,
+   *  moves toward them, and plays the attack animation when in range.
+   *  Orcks have an empty skill pool so tryUseSkill is a no-op. */
+  private updateOrck(enemy: Enemy, _dt: number): void {
+    const now = Date.now();
+    const isPaused = now < enemy.pausedUntil;
+
+    const target = this.findNearestPlayer(enemy);
+    if (!target) {
+      enemy.attacking = false;
+      return;
+    }
+
+    enemy.facingRight = target.x > enemy.x;
+
+    if (isPaused) {
+      enemy.attacking = false;
+      return;
+    }
+
+    const dx = target.x - enemy.x;
+    const dy = target.y - enemy.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const ATTACK_RANGE = 100;
+    enemy.attacking = now < enemy.attackingUntil;
+
+    if (dist <= ATTACK_RANGE) {
+      this.tryUseSkill(enemy, target);
+    } else {
       this.moveToward(enemy, target.x, target.y, _dt);
     }
   }
@@ -181,7 +248,8 @@ export class EnemySystem {
     // Trigger attack animation EVERY time a skill is used.
     // Keep the flag true for 350ms (one full attack animation cycle).
     const now = Date.now();
-    enemy.attackingUntil = now + 350;
+    const atkDur = enemy.typeId === "orck" ? 500 : 350;
+    enemy.attackingUntil = now + atkDur;
     enemy.attacking = true;
     if (skill === "bolter" && this.projectileSystem) {
       this.projectileSystem.castBolter(
@@ -206,6 +274,17 @@ export class EnemySystem {
         enemy.damageMultiplier,
         enemy.collisionRadius,
       );
+    } else if (skill === "slam" && this.slamSystem) {
+      // Delay the slam hitbox until after the attack animation completes.
+      // Orck attack anim = 5 frames @ 10fps = 500ms; add small extra delay.
+      this.pendingSlams.push({
+        ownerId: this.enemyOwnerId(enemy),
+        x: enemy.x,
+        y: enemy.y,
+        angle,
+        level: this.enemySkillLevel(enemy, skill),
+        castAt: now + 500,
+      });
     }
     enemy.startCooldown(skill);
   }

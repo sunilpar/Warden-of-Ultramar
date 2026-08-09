@@ -20,6 +20,7 @@ const config: Phaser.Types.Core.GameConfig = {
     default: "arcade",
   },
   pixelArt: true,
+  disableContextMenu: true,
   scene: [SceneSelector, new GameScene({ key: "game" }), new GameScene({ key: "game2" })],
 };
 

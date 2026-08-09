@@ -26,4 +26,6 @@ export class SkillCast extends Schema {
   @type("string") tier: ClawTier = "small";
   /** Faction of the caster (for client tint: player vs enemy). */
   @type("string") faction: string = "player";
+  /** Cone range in pixels (the outer edge of the hitbox). */
+  @type("number") range: number = 0;
 }

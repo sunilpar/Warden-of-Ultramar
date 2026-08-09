@@ -43,6 +43,18 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 64,
       },
     );
+    // Orck enemy sprite sheet (256x256 frames).
+    // Row 0 (frames 0-4) = walk animation (faces LEFT by default).
+    // Row 1 (frames 5-9) = attack animation (faces LEFT by default).
+    // When the enemy faces right, the client flips horizontally.
+    this.load.spritesheet(
+      "orck_sheet",
+      "assets/skills/ocksSlamSheet.png",
+      {
+        frameWidth: 256,
+        frameHeight: 256,
+      },
+    );
     // Map1 tile sprite sheet (2 rows x 4 cols, 64x64 each)
     this.load.spritesheet(
       "map1_tiles",
@@ -79,6 +91,16 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 64,
       },
     );
+    // 32px Tiled map tileset (BIGOBS64sym.png, 14 cols x 12 rows, 32px each).
+    // Same source image but loaded with 32px frames for the 32px maps.
+    this.load.spritesheet(
+      "bigobs_tiles_32",
+      "assets/maps/map1/BIGOBS64sym.png",
+      {
+        frameWidth: 32,
+        frameHeight: 32,
+      },
+    );
     // Bolter skill spritesheet (3 cols x 2 rows, 64x64 each).
     //   Row 0 (frames 0,1,2): bullet art per color tier (yellow/blue/purple).
     //   Row 1 (frames 3,4,5): muzzle flash animation frames.
@@ -97,6 +119,17 @@ export class SceneSelector extends Phaser.Scene {
     this.load.spritesheet(
       "claw_sheet",
       "assets/skills/clawSpritesheet-0003.png",
+      {
+        frameWidth: 64,
+        frameHeight: 64,
+      },
+    );
+    // Slam skill sprite sheet (64x64 frames, 2 rows).
+    // Row 0 (frames 0-2) = base slam (levels 1-5): start, travel, impact.
+    // Row 1 (frames 0-3) = upgraded slam (levels 6-10): start, travel1, travel2, impact.
+    this.load.spritesheet(
+      "slam_sheet",
+      "assets/skills/slamSpritesheet.png",
       {
         frameWidth: 64,
         frameHeight: 64,

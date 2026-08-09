@@ -1,28 +1,29 @@
 /**
- * Layered Map Data (from Tiled editor export)
- * ============================================
- * Parses layerbasedMap1.json (the map) + bigobssym.json (the tileset
- * properties) to build all runtime data: layers for rendering, a collision
- * grid for O(1) collision, spawn/exit points, and enemy spawn zones.
+ * Layered Map Data (32px — from Tiled editor export)
+ * ===================================================
+ * Parses map1_32bit.json (the map) + 32symtric.json (the tileset
+ * properties) to build all runtime data: layers for rendering, a
+ * collision grid for O(1) collision, spawn/exit points, and enemy
+ * spawn zones.
+ *
+ * 32px MIGRATION
+ *   - tileSize is now 32 (was 64); cols/rows are 80x40 (was 40x20).
+ *   - Tileset property names: "collision", "starting point", "exit point".
+ *   - Collision tiles live in a layer named "collision" (was "interactive").
+ *   - Spawn markers live in "baselayer" tiles.
+ *   - Exit markers live in "baselayer" tiles (4 tiles forming a 2x2 block).
+ *   - Enemy spawn zones live in the "enemy spawn" object layer.
+ *   - The tileset image is BIGOBS64sym.png loaded at 32px frames
+ *     (14 cols x 12 rows = 168 tiles).
  *
  * TILE NUMBERING:
  *   The map uses Tiled global ids (firstgid = 1).
  *   Tile 0 in a layer = empty (nothing to draw).
  *   The tileset uses local ids (0-indexed); globalId = localId + firstgid.
- *
- * TILESET PROPERTIES (bigobssym.json):
- *   collide:true    → tile blocks movement
- *   spawnpoint:true → player spawn location
- *   exitpoint:true  → map exit zone
- *
- * LAYERS:
- *   "baselayer"    → floor tiles, always drawn (depth 0)
- *   "interactive"  → walls, decor, spawn/exit markers; tile 0 = skip (depth 1)
- *   "ememy spawn"  → object layer with rectangles defining enemy spawn zones
  */
 
-import mapJson from "./layerbasedMap1.json";
-import tilesetJson from "./bigobssym.json";
+import mapJson from "./map1_32bit.json";
+import tilesetJson from "./32symtric.json";
 
 // ============================================================
 // TYPES
@@ -46,7 +47,7 @@ export interface LayeredMapData {
   heightPx: number;
   /** Baselayer tile grid [row][col] — always drawn. */
   baselayer: number[][];
-  /** Interactive layer tile grid [row][col] — 0 means empty/skip. */
+  /** Collision layer tile grid [row][col] — 0 means empty/skip. */
   interactiveLayer: number[][];
   /** Flat collision grid: 1 = blocked, 0 = walkable. Index = row * cols + col. */
   collisionGrid: Uint8Array;
@@ -56,9 +57,9 @@ export interface LayeredMapData {
   tilesetKey: string;
   /** firstgid from the map (globalId = localId + firstgid). */
   firstgid: number;
-  /** Player spawn position in pixels (center of spawn tile). */
+  /** Player spawn position in pixels (center of the 2x2 spawn tile block). */
   spawnPoint: { x: number; y: number };
-  /** Exit zone in pixels. */
+  /** Exit zone in pixels (bounding box of the 2x2 exit tile block). */
   exitPoint: { x: number; y: number; width: number; height: number };
   /** Enemy spawn zones from the Tiled object layer. */
   enemySpawnZones: EnemySpawnZone[];
@@ -68,9 +69,9 @@ export interface LayeredMapData {
 // PARSING
 // ============================================================
 
-const TILE_SIZE: number = mapJson.tilewidth; // 64
-const COLS: number = mapJson.width; // 40
-const ROWS: number = mapJson.height; // 20
+const TILE_SIZE: number = mapJson.tilewidth; // 32
+const COLS: number = mapJson.width; // 80
+const ROWS: number = mapJson.height; // 40
 const FIRST_GID: number = mapJson.tilesets[0].firstgid; // 1
 
 // ---- Build tile-property sets from the tileset ----
@@ -84,11 +85,11 @@ for (const tile of tilesetJson.tiles as Array<{
 }>) {
   const globalId = tile.id + FIRST_GID;
   for (const prop of tile.properties) {
-    if (prop.name === "collide" && prop.value === true)
+    if (prop.name === "collision" && prop.value === true)
       collisionTileIds.add(globalId);
-    if (prop.name === "spawnpoint" && prop.value === true)
+    if (prop.name === "starting point" && prop.value === true)
       spawnTileIds.add(globalId);
-    if (prop.name === "exitpoint" && prop.value === true)
+    if (prop.name === "exit point" && prop.value === true)
       exitTileIds.add(globalId);
   }
 }
@@ -102,12 +103,12 @@ const layers = mapJson.layers as Array<{
 }>;
 
 const baselayerRaw = layers.find((l) => l.name === "baselayer");
-const interactiveRaw = layers.find((l) => l.name === "interactive");
-const enemySpawnRaw = layers.find((l) => l.name === "ememy spawn");
+const collisionRaw = layers.find((l) => l.name === "collision");
+const enemySpawnRaw = layers.find((l) => l.name === "enemy spawn");
 
-if (!baselayerRaw?.data) throw new Error("baselayer not found in map JSON");
-if (!interactiveRaw?.data)
-  throw new Error("interactive layer not found in map JSON");
+if (!baselayerRaw?.data) throw new Error("baselayer not found in map1 32bit JSON");
+if (!collisionRaw?.data)
+  throw new Error("collision layer not found in map1 32bit JSON");
 
 // ---- Convert flat arrays to 2D grids ----
 function to2D(flat: number[], cols: number): number[][] {
@@ -119,9 +120,10 @@ function to2D(flat: number[], cols: number): number[][] {
 }
 
 const baselayer = to2D(baselayerRaw.data, COLS);
-const interactiveLayer = to2D(interactiveRaw.data, COLS);
+// Kept under the name "interactiveLayer" for rendering compatibility.
+const interactiveLayer = to2D(collisionRaw.data, COLS);
 
-// ---- Build collision grid (O(1) lookup at runtime) ----
+// ---- Build collision grid from the "collision" layer (O(1) lookup at runtime) ----
 const collisionGrid = new Uint8Array(COLS * ROWS);
 for (let r = 0; r < ROWS; r++) {
   for (let c = 0; c < COLS; c++) {
@@ -131,34 +133,52 @@ for (let r = 0; r < ROWS; r++) {
   }
 }
 
-// ---- Find spawn & exit tiles in the interactive layer ----
-let spawnPoint = { x: TILE_SIZE / 2, y: TILE_SIZE / 2 };
-let exitPoint = {
-  x: 0,
-  y: 0,
-  width: TILE_SIZE,
-  height: TILE_SIZE,
-};
-
+// ---- Find spawn tiles in baselayer (4 tiles forming a 2x2 block) ----
+let spawnMinX = Infinity,
+  spawnMinY = Infinity,
+  spawnMaxX = -Infinity,
+  spawnMaxY = -Infinity;
+let spawnFound = false;
 for (let r = 0; r < ROWS; r++) {
   for (let c = 0; c < COLS; c++) {
-    const tid = interactiveLayer[r][c];
-    if (spawnTileIds.has(tid)) {
-      spawnPoint = {
-        x: c * TILE_SIZE + TILE_SIZE / 2,
-        y: r * TILE_SIZE + TILE_SIZE / 2,
-      };
-    }
-    if (exitTileIds.has(tid)) {
-      exitPoint = {
-        x: c * TILE_SIZE,
-        y: r * TILE_SIZE,
-        width: TILE_SIZE,
-        height: TILE_SIZE,
-      };
+    if (spawnTileIds.has(baselayer[r][c])) {
+      spawnFound = true;
+      spawnMinX = Math.min(spawnMinX, c * TILE_SIZE);
+      spawnMinY = Math.min(spawnMinY, r * TILE_SIZE);
+      spawnMaxX = Math.max(spawnMaxX, c * TILE_SIZE + TILE_SIZE);
+      spawnMaxY = Math.max(spawnMaxY, r * TILE_SIZE + TILE_SIZE);
     }
   }
 }
+const spawnPoint = spawnFound
+  ? { x: (spawnMinX + spawnMaxX) / 2, y: (spawnMinY + spawnMaxY) / 2 }
+  : { x: TILE_SIZE / 2, y: TILE_SIZE / 2 };
+
+// ---- Find exit tiles in baselayer (4 tiles forming a 2x2 block) ----
+let exitMinX = Infinity,
+  exitMinY = Infinity,
+  exitMaxX = -Infinity,
+  exitMaxY = -Infinity;
+let exitFound = false;
+for (let r = 0; r < ROWS; r++) {
+  for (let c = 0; c < COLS; c++) {
+    if (exitTileIds.has(baselayer[r][c])) {
+      exitFound = true;
+      exitMinX = Math.min(exitMinX, c * TILE_SIZE);
+      exitMinY = Math.min(exitMinY, r * TILE_SIZE);
+      exitMaxX = Math.max(exitMaxX, c * TILE_SIZE + TILE_SIZE);
+      exitMaxY = Math.max(exitMaxY, r * TILE_SIZE + TILE_SIZE);
+    }
+  }
+}
+const exitPoint = exitFound
+  ? {
+      x: exitMinX,
+      y: exitMinY,
+      width: exitMaxX - exitMinX,
+      height: exitMaxY - exitMinY,
+    }
+  : { x: 0, y: 0, width: TILE_SIZE, height: TILE_SIZE };
 
 // ---- Extract enemy spawn zones from the object layer ----
 const enemySpawnZones: EnemySpawnZone[] = [];
@@ -180,7 +200,7 @@ if (enemySpawnRaw?.objects) {
 
 export const LAYERED_MAP: LayeredMapData = {
   id: "map_layered_1",
-  name: "The First Hall (Layered)",
+  name: "The First Hall (32px)",
   tileSize: TILE_SIZE,
   cols: COLS,
   rows: ROWS,
@@ -190,7 +210,7 @@ export const LAYERED_MAP: LayeredMapData = {
   interactiveLayer,
   collisionGrid,
   tilesetColumns: tilesetJson.columns,
-  tilesetKey: "bigobs_tiles",
+  tilesetKey: "bigobs_tiles_32",
   firstgid: FIRST_GID,
   spawnPoint,
   exitPoint,
@@ -201,8 +221,10 @@ export const LAYERED_MAP: LayeredMapData = {
 // O(1) GRID COLLISION RESOLUTION
 // ============================================================
 // MUST MATCH server's resolveTileCollision() exactly.
-// The player is a circle (radius < tileSize/2). It can overlap at most
-// 4 grid cells, so we check a 3×3 neighborhood — constant time.
+// The player is a circle (radius < tileSize/2). At 32px tiles the
+// radius must be < 16, so we use 10 for the player. A 3×3 neighborhood
+// is sufficient because radius < tileSize/2 means the circle overlaps
+// at most 4 grid cells.
 
 export function resolveTileCollision(
   x: number,
@@ -242,7 +264,7 @@ export function resolveTileCollision(
           x += (dx / dist) * push;
           y += (dy / dist) * push;
         } else {
-          // Center is inside the cell — push out along nearest edge
+          // Center is inside the cell - push out along nearest edge
           const dLeft = x - cellX;
           const dRight = cellX + tileSize - x;
           const dTop = y - cellY;

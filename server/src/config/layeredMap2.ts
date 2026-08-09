@@ -1,15 +1,17 @@
 /**
  * Layered Map 2 (Server-Side Authoritative)
  * =========================================
- * Parses Map2.json + tileset properties (bigobssym.json) to build the
- * collision grid used by the server for authoritative O(1) tile collision
- * in game_room_2.
+ * Parses the 32px Tiled export (map2 32bit.json) + tileset properties
+ * (32symtric..json) to build the collision grid used by the server for
+ * authoritative O(1) tile collision in game_room_2.
+ *
+ * 32px MIGRATION — see layeredMap.ts for details.
  *
  * MUST produce the EXACT same collision grid as the client
  * (client/src/maps/layeredMap2Data.ts). Keep them in sync.
  */
-import mapJson from "./maps/Map2.json";
-import tilesetJson from "./maps/bigobssym.json";
+import mapJson from "./maps/map2 32bit.json";
+import tilesetJson from "./maps/32symtric..json";
 
 export interface EnemySpawnZone {
   name: string;
@@ -33,9 +35,9 @@ export interface LayeredMap2Config {
 }
 
 function buildLayeredMap2(): LayeredMap2Config {
-  const tileSize: number = mapJson.tilewidth;
-  const cols: number = mapJson.width;
-  const rows: number = mapJson.height;
+  const tileSize: number = mapJson.tilewidth; // 32
+  const cols: number = mapJson.width; // 80
+  const rows: number = mapJson.height; // 40
   const firstGid: number = mapJson.tilesets[0].firstgid;
 
   // ---- Build the set of colliding tile ids from the tileset properties ----
@@ -46,36 +48,40 @@ function buildLayeredMap2(): LayeredMap2Config {
   }>) {
     const globalId = tile.id + firstGid;
     for (const prop of tile.properties) {
-      if (prop.name === "collide" && prop.value === true) {
+      if (prop.name === "collision" && prop.value === true) {
         collisionTileIds.add(globalId);
       }
     }
   }
 
-  // ---- Find the interactive layer (where walls / collide tiles live) ----
+  // ---- Find layers (32px: collision tiles live in "collision" layer) ----
   const layers = mapJson.layers as Array<{
     name: string;
     data?: number[];
     type: string;
     objects?: Array<{ x: number; y: number; width: number; height: number }>;
   }>;
-  const interactive = layers.find((l) => l.name === "interactive");
-  if (!interactive?.data) throw new Error("interactive layer not found in Map2");
+  const baselayer = layers.find((l) => l.name === "baselayer");
+  const collisionLayer = layers.find((l) => l.name === "collision");
+  if (!baselayer?.data) throw new Error("baselayer not found in map2 32bit");
+  if (!collisionLayer?.data)
+    throw new Error("collision layer not found in map2 32bit");
 
-  const interactiveData = interactive.data;
+  const baselayerData = baselayer.data;
+  const collisionData = collisionLayer.data;
 
-  // ---- Build collision grid ----
+  // ---- Build collision grid from the "collision" layer ----
   const collisionGrid = new Uint8Array(cols * rows);
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const tid = interactiveData[r * cols + c];
+      const tid = collisionData[r * cols + c];
       if (collisionTileIds.has(tid)) {
         collisionGrid[r * cols + c] = 1;
       }
     }
   }
 
-  // ---- Find spawn tile ----
+  // ---- Find spawn tiles ("starting point" property, 4 tiles forming a 2x2) ----
   const spawnTileIds = new Set<number>();
   for (const tile of tilesetJson.tiles as Array<{
     id: number;
@@ -83,25 +89,33 @@ function buildLayeredMap2(): LayeredMap2Config {
   }>) {
     const globalId = tile.id + firstGid;
     for (const prop of tile.properties) {
-      if (prop.name === "spawnpoint" && prop.value === true) {
+      if (prop.name === "starting point" && prop.value === true) {
         spawnTileIds.add(globalId);
       }
     }
   }
 
-  let spawnPoint = { x: tileSize / 2, y: tileSize / 2 };
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  let found = false;
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      if (spawnTileIds.has(interactiveData[r * cols + c])) {
-        spawnPoint = {
-          x: c * tileSize + tileSize / 2,
-          y: r * tileSize + tileSize / 2,
-        };
+      if (spawnTileIds.has(baselayerData[r * cols + c])) {
+        found = true;
+        minX = Math.min(minX, c * tileSize);
+        minY = Math.min(minY, r * tileSize);
+        maxX = Math.max(maxX, c * tileSize + tileSize);
+        maxY = Math.max(maxY, r * tileSize + tileSize);
       }
     }
   }
+  const spawnPoint = found
+    ? { x: (minX + maxX) / 2, y: (minY + maxY) / 2 }
+    : { x: tileSize, y: tileSize };
 
-  // ---- Extract enemy spawn zones from the object layer ----
+  // ---- Extract enemy spawn zones from the "enemy spawn" object layer ----
   const enemySpawnZones: EnemySpawnZone[] = [];
   const enemySpawnLayer = layers.find((l) => l.name === "enemy spawn");
   if (enemySpawnLayer?.objects) {

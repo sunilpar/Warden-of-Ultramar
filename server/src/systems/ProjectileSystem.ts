@@ -181,7 +181,7 @@ export class ProjectileSystem {
       if (hit !== null) return;
       if (proj.hitSet.has(id)) return;
       if (player.isDead) return;
-      if (this.circleOverlap(proj.x, proj.y, r, player.x, player.y, 20)) {
+      if (this.circleOverlap(proj.x, proj.y, r, player.x, player.y, 10)) {
         hit = id;
       }
     });
