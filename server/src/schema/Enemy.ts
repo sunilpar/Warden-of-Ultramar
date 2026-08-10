@@ -15,6 +15,7 @@
  * by per-skill cooldowns tracked server-side.
  */
 import { Schema, type } from "@colyseus/schema";
+import { type SkillId, getSkillHitFeedback } from "../config/skillDefs";
 import {
   ENEMY_STATS,
   type EnemyTypeId,
@@ -168,7 +169,7 @@ export class Enemy extends Schema {
    * Respects incomingDamageMultiplier. Returns actual damage applied
    * (shield + health).
    */
-  takeDamage(rawDamage: number): number {
+  takeDamage(rawDamage: number, sourceSkillId?: SkillId): number {
     let dmg = rawDamage * this.incomingDamageMultiplier;
     // Shield absorbs first
     if (this.shield > 0) {
@@ -178,10 +179,14 @@ export class Enemy extends Schema {
     }
     this.currentHealth = Math.max(0, this.currentHealth - dmg);
 
-    // Hit feedback: white flash + brief hit-stun pause (mimics being hit).
+    // Hit feedback: white flash + brief hit-stun pause.
+    // Duration scales with skill power (e.g. slam > claw > bolter).
+    const fbMs = sourceSkillId
+      ? getSkillHitFeedback(sourceSkillId)
+      : 120;
     const now = Date.now();
-    this.hitFlashUntil = now + 120;
-    this.pausedUntil = now + 120;
+    this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
+    this.pausedUntil = Math.max(this.pausedUntil, now + fbMs);
 
     return rawDamage * this.incomingDamageMultiplier;
   }

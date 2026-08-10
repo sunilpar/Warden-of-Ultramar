@@ -83,7 +83,7 @@ export class ClawSystem {
       this.state.enemies.forEach((enemy, id) => {
         if (id === ownerId || enemy.isDead) return;
         if (this.inCone(x, y, angle, halfAngle, range, enemy.x, enemy.y)) {
-          enemy.takeDamage(damage);
+          enemy.takeDamage(damage, "claw");
           if (bleed) {
             enemy.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel));
           }
@@ -94,7 +94,7 @@ export class ClawSystem {
       this.state.players.forEach((player, id) => {
         if (id === ownerId || player.isDead) return;
         if (this.inCone(x, y, angle, halfAngle, range, player.x, player.y)) {
-          player.takeDamage(damage);
+          player.takeDamage(damage, "claw");
           if (bleed) {
             player.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel));
           }
@@ -103,7 +103,7 @@ export class ClawSystem {
       this.state.enemies.forEach((enemy, id) => {
         if (id === ownerId || enemy.isDead) return;
         if (this.inCone(x, y, angle, halfAngle, range, enemy.x, enemy.y)) {
-          enemy.takeDamage(damage);
+          enemy.takeDamage(damage, "claw");
           if (bleed) {
             enemy.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel));
           }

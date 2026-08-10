@@ -22,7 +22,7 @@
  */
 import { Schema, type, MapSchema } from "@colyseus/schema";
 import { PLAYER_STATS } from "../config/playerStats";
-import type { SkillId } from "../config/skillDefs";
+import { type SkillId, getSkillHitFeedback } from "../config/skillDefs";
 
 export interface InputData {
   left: boolean;
@@ -85,6 +85,11 @@ export class Player extends Schema {
   /** Server timestamp (ms) when claw comes off cooldown (for client HUD). */
   @type("number") clawCooldownEndsAt: number = 0;
 
+  /** Server timestamp (ms) until which the player flashes white (hit feedback). */
+  @type("number") hitFlashUntil: number = 0;
+  /** Server timestamp (ms) until which the player is frozen (hit-stun). */
+  pausedUntil: number = 0;
+
   /** Server timestamp (ms) until which the player is bleeding (DoT). */
   @type("number") bleedUntil: number = 0;
 
@@ -136,11 +141,19 @@ export class Player extends Schema {
   // HEALTH
   // ============================================================
 
-  /** Apply damage to the player (respects incomingDamageMultiplier). */
-  takeDamage(rawDamage: number): number {
+  /** Apply damage to the player (respects incomingDamageMultiplier).
+   *  sourceSkillId controls the hit-feedback duration (flash + pause). */
+  takeDamage(rawDamage: number, sourceSkillId?: SkillId): number {
     const dmg = rawDamage * this.incomingDamageMultiplier;
     this.currentHealth = Math.max(0, this.currentHealth - dmg);
-    return dmg; // actual damage applied
+    // Hit feedback: white flash + hit-stun, duration per skill.
+    if (sourceSkillId) {
+      const fbMs = getSkillHitFeedback(sourceSkillId);
+      const now = Date.now();
+      this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
+      this.pausedUntil = Math.max(this.pausedUntil, now + fbMs);
+    }
+    return dmg;
   }
 
   /** Heal the player (clamped to maxHealth). Returns amount healed. */

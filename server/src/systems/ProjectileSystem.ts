@@ -202,12 +202,12 @@ export class ProjectileSystem {
   private applyDamage(proj: Projectile, targetId: string): void {
     const player = this.state.players.get(targetId);
     if (player) {
-      player.takeDamage(proj.damage);
+      player.takeDamage(proj.damage, "bolter");
       return;
     }
     const enemy = this.state.enemies.get(targetId);
     if (enemy) {
-      enemy.takeDamage(proj.damage);
+      enemy.takeDamage(proj.damage, "bolter");
     }
   }
 

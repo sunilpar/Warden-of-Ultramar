@@ -48,6 +48,8 @@ export interface SkillDef {
   cooldown: number;
   /** Base attack factor: finalDamage = casterAttack * attackFactor * levelFactor * dmgMult. */
   attackFactor: number;
+  /** Hit feedback duration in ms (white flash + hit-stun freeze). */
+  hitFeedbackMs?: number;
 }
 
 export interface BolterDef extends SkillDef {
@@ -98,6 +100,7 @@ export const SKILL_DEFS = {
     maxRange: 900,
     chainUnlockLevel: 3,
     chainCount: (lvl: number) => Math.max(0, lvl - 3),
+    hitFeedbackMs: 100,
   },
   claw: {
     id: "claw",
@@ -108,6 +111,7 @@ export const SKILL_DEFS = {
     bleedUnlockLevel: 8,
     bleedDps: (_lvl: number) => 20,
     bleedDuration: (_lvl: number) => 4,
+    hitFeedbackMs: 120,
   },
   slam: {
     id: "slam",
@@ -118,6 +122,7 @@ export const SKILL_DEFS = {
     halfWidth: 40,
     halfHeight: 20,
     hitInterval: 0.5,
+    hitFeedbackMs: 250,
   },
 } as const;
 
@@ -187,3 +192,9 @@ export const BOLTER_DEF: BolterDef = SKILL_DEFS.bolter;
 
 /** The slam definition (typed helper). */
 export const SLAM_DEF: SlamDef = SKILL_DEFS.slam as SlamDef;
+
+/** Returns the hit-feedback duration (ms) for a given skill. */
+export function getSkillHitFeedback(skill: SkillId): number {
+  const def = (SKILL_DEFS as Record<string, { hitFeedbackMs?: number }>)[skill];
+  return def?.hitFeedbackMs ?? 80; // default 80ms
+}

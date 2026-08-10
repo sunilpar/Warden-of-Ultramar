@@ -109,9 +109,8 @@ export class SlamSystem {
         if (id === slam.ownerId || enemy.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
         if (this.rectContains(slam, enemy.x, enemy.y, enemy.collisionRadius)) {
-          enemy.takeDamage(slam.damage);
-          this.knockback(enemy, slam.angle);
-          slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
+          enemy.takeDamage(slam.damage, "slam");
+            slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });
     } else {
@@ -120,18 +119,16 @@ export class SlamSystem {
         if (id === slam.ownerId || player.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
         if (this.rectContains(slam, player.x, player.y, 10)) {
-          player.takeDamage(slam.damage);
-          this.knockbackPlayer(player, slam.angle);
-          slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
+          player.takeDamage(slam.damage, "slam");
+            slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });
       this.state.enemies.forEach((enemy, id) => {
         if (id === slam.ownerId || enemy.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
         if (this.rectContains(slam, enemy.x, enemy.y, enemy.collisionRadius)) {
-          enemy.takeDamage(slam.damage);
-          this.knockback(enemy, slam.angle);
-          slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
+          enemy.takeDamage(slam.damage, "slam");
+            slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });
     }

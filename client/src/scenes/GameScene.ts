@@ -433,6 +433,7 @@ export class GameScene extends Phaser.Scene {
             this.currentPlayer.setData("attack", player.attack ?? 100);
             this.currentPlayer.setData("slamCdEndsAt", player.slamCooldownEndsAt ?? 0);
             this.currentPlayer.setData("clawCdEndsAt", player.clawCooldownEndsAt ?? 0);
+            this.currentPlayer.setData("hitFlashUntil", player.hitFlashUntil ?? 0);
             // Sync slam level + card art
             const slamLvl =
               player.skillLevels && player.skillLevels.get
@@ -459,6 +460,7 @@ export class GameScene extends Phaser.Scene {
         callbacks.onChange(player, () => {
           sprite.setData("serverX", player.x);
           sprite.setData("serverY", player.y);
+          sprite.setData("hitFlashUntil", player.hitFlashUntil ?? 0);
         });
       }
     });
@@ -1612,6 +1614,7 @@ export class GameScene extends Phaser.Scene {
    */
   fixedTick() {
     this.currentTick++;
+    const now = Date.now();
 
     // Toggle hitbox overlay on F3 press
     if (Phaser.Input.Keyboard.JustDown(this.hitboxToggleKey)) {
@@ -1688,6 +1691,16 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    // ---- Local player hit flash ----
+    if (this.currentPlayer) {
+      const localFlash = this.currentPlayer.data.get("hitFlashUntil") as number;
+      if (localFlash && now < localFlash) {
+        this.currentPlayer.setTintFill(0xffffff);
+      } else {
+        this.currentPlayer.clearTint();
+      }
+    }
+
     // ---- Interpolate remote players toward server position ----
     for (const sessionId in this.playerEntities) {
       if (sessionId === this.room.sessionId) continue;
@@ -1732,10 +1745,17 @@ export class GameScene extends Phaser.Scene {
           entity.anims.play(animKey);
         }
       }
+
+      // Hit flash: tint white while hitFlashUntil > now.
+      const playerFlash = entity.data.get("hitFlashUntil") as number;
+      if (playerFlash && now < playerFlash) {
+        entity.setTintFill(0xffffff);
+      } else {
+        entity.clearTint();
+      }
     }
 
     // ---- Interpolate enemies toward their server position + apply facing ----
-    const now = Date.now();
     for (const enemyId in this.enemyEntities) {
       const entity = this.enemyEntities[enemyId];
       const serverX = entity.data.get("serverX") as number;

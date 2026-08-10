@@ -18,6 +18,11 @@ export class PlayerSystem {
 
   update(dt: number): void {
     this.state.players.forEach((player) => {
+      // Skip movement while in hit-stun (pausedUntil).
+      if (Date.now() < (player as any).pausedUntil) {
+        player.inputQueue.length = 0;
+        return;
+      }
       let inputsProcessed = 0;
       let input: InputData | undefined;
 
