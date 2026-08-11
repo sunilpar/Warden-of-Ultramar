@@ -207,7 +207,7 @@ export class ProjectileSystem {
     }
     const enemy = this.state.enemies.get(targetId);
     if (enemy) {
-      enemy.takeDamage(proj.damage, "bolter");
+      enemy.takeDamage(proj.damage, "bolter", proj.ownerId);
     }
   }
 

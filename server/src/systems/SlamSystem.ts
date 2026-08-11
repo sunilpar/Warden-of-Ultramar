@@ -109,7 +109,7 @@ export class SlamSystem {
         if (id === slam.ownerId || enemy.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
         if (this.rectContains(slam, enemy.x, enemy.y, enemy.collisionRadius)) {
-          enemy.takeDamage(slam.damage, "slam");
+          enemy.takeDamage(slam.damage, "slam", slam.ownerId);
             slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });
@@ -127,7 +127,7 @@ export class SlamSystem {
         if (id === slam.ownerId || enemy.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
         if (this.rectContains(slam, enemy.x, enemy.y, enemy.collisionRadius)) {
-          enemy.takeDamage(slam.damage, "slam");
+          enemy.takeDamage(slam.damage, "slam", slam.ownerId);
             slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });

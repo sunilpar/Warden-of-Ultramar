@@ -19,7 +19,6 @@ import { type SkillId, getSkillHitFeedback } from "../config/skillDefs";
 import {
   ENEMY_STATS,
   type EnemyTypeId,
-  type SkillId,
 } from "../config/enemyStats";
 
 export class Enemy extends Schema {
@@ -96,6 +95,8 @@ export class Enemy extends Schema {
   /** Bleed damage per second (server-only; applied while bleedUntil > now). */
   bleedDps: number = 0;
 
+  /** Tracks total damage dealt by each player (sessionId -> damage). */
+  damageTrackers: Map<string, number> = new Map();
   // ============================================================
   // LIFECYCLE
   // ============================================================
@@ -143,6 +144,7 @@ export class Enemy extends Schema {
     this.attackCooldownUntil = 0;
     this.bleedUntil = 0;
     this.bleedDps = 0;
+    this.damageTrackers.clear();
 
     this.recalcDerivedStats();
   }
@@ -169,7 +171,7 @@ export class Enemy extends Schema {
    * Respects incomingDamageMultiplier. Returns actual damage applied
    * (shield + health).
    */
-  takeDamage(rawDamage: number, sourceSkillId?: SkillId): number {
+  takeDamage(rawDamage: number, sourceSkillId?: SkillId, attackerId?: string): number {
     let dmg = rawDamage * this.incomingDamageMultiplier;
     // Shield absorbs first
     if (this.shield > 0) {
@@ -178,6 +180,14 @@ export class Enemy extends Schema {
       dmg -= absorbed;
     }
     this.currentHealth = Math.max(0, this.currentHealth - dmg);
+
+    // Track damage contribution for XP rewards.
+    if (attackerId) {
+      this.damageTrackers.set(
+        attackerId,
+        (this.damageTrackers.get(attackerId) ?? 0) + dmg,
+      );
+    }
 
     // Hit feedback: white flash + brief hit-stun pause.
     // Duration scales with skill power (e.g. slam > claw > bolter).

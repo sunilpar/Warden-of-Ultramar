@@ -23,6 +23,7 @@ import { GAME_CONFIG } from "../config/game";
 import { MapSystem2 } from "../systems/MapSystem2";
 import { PlayerSystem } from "../systems/PlayerSystem";
 import { EnemySystem } from "../systems/EnemySystem";
+import type { Enemy } from "../schema/Enemy";
 import { ProjectileSystem } from "../systems/ProjectileSystem";
 import { ClawSystem } from "../systems/ClawSystem";
 import { SlamSystem } from "../systems/SlamSystem";
@@ -130,6 +131,39 @@ export class GameRoom2 extends Room {
     }
   }
 
+  /**
+   * Award XP: killer gets 100%, other damagers get 50%.
+   */
+  private awardKillXp(enemy: Enemy): void {
+    const trackers = enemy.damageTrackers;
+    if (trackers.size === 0) {
+      let alive = 0;
+      this.state.players.forEach((p) => { if (!p.isDead) alive++; });
+      if (alive > 0) {
+        const share = Math.floor(enemy.xpReward / alive);
+        this.state.players.forEach((p) => {
+          if (!p.isDead) p.addXp(share);
+        });
+      }
+      return;
+    }
+    let killerId: string | null = null;
+    let maxDmg = 0;
+    for (const [pid, dmg] of trackers) {
+      if (dmg > maxDmg) { maxDmg = dmg; killerId = pid; }
+    }
+    if (killerId) {
+      const killer = this.state.players.get(killerId);
+      if (killer && !killer.isDead) killer.addXp(enemy.xpReward);
+    }
+    const halfXp = Math.floor(enemy.xpReward * 0.5);
+    for (const pid of trackers.keys()) {
+      if (pid === killerId) continue;
+      const teammate = this.state.players.get(pid);
+      if (teammate && !teammate.isDead) teammate.addXp(halfXp);
+    }
+  }
+
   /** Remove dead enemies from state. */
   private cleanupDeadEnemies(): void {
     const dead: string[] = [];
@@ -139,38 +173,7 @@ export class GameRoom2 extends Room {
     for (const id of dead) {
       const enemy = this.state.enemies.get(id);
       if (enemy) {
-        // Award XP to nearest player (or all players if none nearby).
-        let awarded = false;
-        let nearestId: string | null = null;
-        let nearestDist = Infinity;
-        this.state.players.forEach((player, pid) => {
-          if (player.isDead) return;
-          const dx = player.x - enemy.x;
-          const dy = player.y - enemy.y;
-          const dist = dx * dx + dy * dy;
-          if (dist < nearestDist) {
-            nearestDist = dist;
-            nearestId = pid;
-          }
-        });
-        if (nearestId) {
-          const player = this.state.players.get(nearestId);
-          if (player) {
-            player.addXp(enemy.xpReward);
-            awarded = true;
-          }
-        }
-        if (!awarded) {
-          // Fallback: split XP among all alive players.
-          let alive = 0;
-          this.state.players.forEach((p) => { if (!p.isDead) alive++; });
-          if (alive > 0) {
-            const share = Math.floor(enemy.xpReward / alive);
-            this.state.players.forEach((p) => {
-              if (!p.isDead) p.addXp(share);
-            });
-          }
-        }
+        this.awardKillXp(enemy);
       }
       this.state.enemies.delete(id);
     }
@@ -179,7 +182,6 @@ export class GameRoom2 extends Room {
   // ============================================================
   // MESSAGE HANDLERS
   // ============================================================
-
   messages = {
     // Movement input
     0: (client: Client, input: InputData) => {

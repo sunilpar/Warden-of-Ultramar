@@ -109,6 +109,28 @@ export class GameScene extends Phaser.Scene {
   // ---- Skill-on-cooldown toast (shown above the HUD in light grey) ----
   private cooldownToast!: Phaser.GameObjects.Text;
 
+  // ---- XP bar (top-center): thin blue bar + level badge + gain popups ----
+  private xpBarBack!: Phaser.GameObjects.Rectangle;
+  private xpBarFill!: Phaser.GameObjects.Rectangle;
+  /** White overlay that shows the XP gained portion; fades to reveal blue. */
+  private xpBarGain!: Phaser.GameObjects.Rectangle;
+  /** Small pill/badge in front of the XP bar showing current level. */
+  private levelBadge!: Phaser.GameObjects.Container;
+  private levelBadgeText!: Phaser.GameObjects.Text;
+  /** Numeric text overlay inside the XP bar ("120 / 1000"). */
+  private xpBarText!: Phaser.GameObjects.Text;
+  /** Last synced XP/level values used to detect gains. */
+  private lastKnownXp: number = -1;
+  private lastKnownLevel: number = -1;
+  /** Reusable "+N xp" floating text objects (pooled to avoid per-gain alloc). */
+  private xpGainPopups: Phaser.GameObjects.Text[] = [];
+  /** Reusable level-up celebration toast. */
+  private levelUpToast!: Phaser.GameObjects.Text;
+  /** Full unscaled width of the XP bar (px). */
+  private xpBarFullWidth: number = 0;
+  /** Screen-space Y of the XP bar (px). */
+  private xpBarY: number = 0;
+
   // ---- Aim / firing ----
   private aimAngle: number = 0;
   // ---- Input ----
@@ -328,6 +350,8 @@ export class GameScene extends Phaser.Scene {
 
     // ---- Stats HUD (health / level / xp / attack / crit) ----
     this.createStatsHUD();
+    // ---- XP bar (top-center) ----
+    this.createXpBar();
     // Place the skill cards in slots 1-3 (initial level 1).
     this.refreshBolterCard();
     this.refreshSlamCard();
@@ -415,6 +439,8 @@ export class GameScene extends Phaser.Scene {
             }
             // Refresh the stats HUD
             this.updateStatsHUD(player);
+            // Refresh the XP bar (detects XP gain / level-up)
+            this.updateXpBar(player);
             // Sync bolter level + card art
             const lvl =
               player.skillLevels && player.skillLevels.get
@@ -431,9 +457,18 @@ export class GameScene extends Phaser.Scene {
               player.bolterCooldownEndsAt ?? 0,
             );
             this.currentPlayer.setData("attack", player.attack ?? 100);
-            this.currentPlayer.setData("slamCdEndsAt", player.slamCooldownEndsAt ?? 0);
-            this.currentPlayer.setData("clawCdEndsAt", player.clawCooldownEndsAt ?? 0);
-            this.currentPlayer.setData("hitFlashUntil", player.hitFlashUntil ?? 0);
+            this.currentPlayer.setData(
+              "slamCdEndsAt",
+              player.slamCooldownEndsAt ?? 0,
+            );
+            this.currentPlayer.setData(
+              "clawCdEndsAt",
+              player.clawCooldownEndsAt ?? 0,
+            );
+            this.currentPlayer.setData(
+              "hitFlashUntil",
+              player.hitFlashUntil ?? 0,
+            );
             // Sync slam level + card art
             const slamLvl =
               player.skillLevels && player.skillLevels.get
@@ -590,7 +625,20 @@ export class GameScene extends Phaser.Scene {
     // SKILL CAST (CLAW CONE) STATE LISTENERS
     // ============================================================
     callbacks.onAdd("skillCasts", (cast: any, castId: string) => {
-      console.log("[DEBUG] skillCast onAdd:", cast.skillId, "level:", cast.level, "tier:", cast.tier, "angle:", cast.angle, "range:", cast.range, "faction:", cast.faction);
+      console.log(
+        "[DEBUG] skillCast onAdd:",
+        cast.skillId,
+        "level:",
+        cast.level,
+        "tier:",
+        cast.tier,
+        "angle:",
+        cast.angle,
+        "range:",
+        cast.range,
+        "faction:",
+        cast.faction,
+      );
       if (!this.clawAnimCreated) {
         this.createClawAnimations();
         this.clawAnimCreated = true;
@@ -605,7 +653,8 @@ export class GameScene extends Phaser.Scene {
         // The sprite CENTER is at: castPos + (range - 32) along the aim angle.
         // (32 = half the sprite width since the sprite is drawn centered.)
         // This applies in ALL directions because we use the aim angle vector.
-        const range: number = cast.range || (tier === "big" ? 110 : tier === "mid" ? 85 : 60);
+        const range: number =
+          cast.range || (tier === "big" ? 110 : tier === "mid" ? 85 : 60);
         const SPRITE_NATIVE = 64;
         const halfSprite = SPRITE_NATIVE / 2; // 32
         // Distance from the cast origin to the sprite center.
@@ -1123,7 +1172,9 @@ export class GameScene extends Phaser.Scene {
   private showCooldownToast(): void {
     const msg = "skill in cooldown";
     const x = this.cameras.main.centerX;
-    const y = this.hudImage ? this.hudImage.y - 18 : this.cameras.main.height - 160;
+    const y = this.hudImage
+      ? this.hudImage.y - 18
+      : this.cameras.main.height - 160;
     if (this.cooldownToast) {
       this.cooldownToast.setText(msg).setPosition(x, y);
     } else {
@@ -1227,7 +1278,7 @@ export class GameScene extends Phaser.Scene {
 
     // ---- 5 card slot regions (native hud.png pixels) ----
     // Each slot defines WHERE on the HUD the 64x200 card goes.
-    const SLOT_Y_TOP = 200;
+    const SLOT_Y_TOP = 150;
     const SLOT_Y_BOT = 400;
     const SLOT_WIDTH = 128;
     const SLOT_X0 = 440; // slot 0 left
@@ -1359,6 +1410,332 @@ export class GameScene extends Phaser.Scene {
       .setDepth(100);
   }
 
+  // ============================================================
+  // XP BAR (top-center)
+  // ============================================================
+
+  /**
+   * Create the thin blue XP bar at the top-center of the screen.
+   * Layout:  [ Lv 5 ]  [========blue bar showing xp=========]
+   *                ^- level badge in front of the bar.
+   *
+   * Structure (left to right):
+   *   1. levelBadge  - rounded blue pill with "Lv N" text
+   *   2. xpBarBack   - dark backing rectangle (empty bar)
+   *   3. xpBarFill   - blue fill (current xp progress)
+   *   4. xpBarGain   - white overlay on newly gained portion
+   *   5. xpBarText   - "120 / 1000" centered text
+   */
+  private createXpBar(): void {
+    const W = this.cameras.main.width;
+    const OFFSET_X = -300;
+    const cx = W / 2 + OFFSET_X;
+
+    // ============================================================
+    // 🔧 TUNABLE XP BAR CONSTANTS — edit these to reposition!
+    // ============================================================
+    //
+    // BAR_W        Width of the XP bar in pixels.
+    // BAR_H        Height of the XP bar in pixels.
+    // BADGE_GAP    Gap between level text and bar left edge.
+    // ABOVE_HUD_GAP  How many px ABOVE the HUD image top edge.
+    //               Increase to push the bar higher above the HUD.
+    //               Set to 0 to sit directly on top of the HUD.
+    // OFFSET_X     Horizontal shift of the whole XP bar row.
+    //               0 = screen center (default).
+    //               Negative = shift LEFT  (e.g. -200 moves it left).
+    //               Positive = shift RIGHT (e.g. 200 moves it right).
+    //
+    // ============================================================
+    const BAR_W = Math.min(W * 0.35, 196);
+    const BAR_H = 6;
+    const BADGE_GAP = 6;
+    const ABOVE_HUD_GAP = -34;
+    const BACK_COLOR = 0x0a1a2a;
+    const FILL_COLOR = 0x2f8fff;
+
+    // Position the bar ABOVE the HUD image (above the cards).
+    // hudOriginY = top edge of the HUD image on screen.
+    const HUD_SCALE_TMP = 0.3;
+    const HUD_IMG_H_TMP = 479;
+    const hudTopY = this.cameras.main.height - HUD_IMG_H_TMP * HUD_SCALE_TMP;
+    const TOP_Y = hudTopY - ABOVE_HUD_GAP - BAR_H;
+
+    // Measure the level text so we can lay out: [Lv N]  [==bar==]
+    // We will create the text first, then position the bar to its right.
+    // For now compute approximate layout assuming text width ~ 36px.
+    const levelTextApproxW = 36;
+    const totalW = levelTextApproxW + BADGE_GAP + BAR_W;
+    const rowLeft = cx - totalW / 2;
+    const barX = rowLeft + levelTextApproxW + BADGE_GAP;
+    const levelTextX = rowLeft + levelTextApproxW / 2;
+    const cy = TOP_Y + BAR_H / 2;
+
+    this.xpBarFullWidth = BAR_W;
+    this.xpBarY = cy;
+
+    // ---- XP bar back (dark empty bar) ----
+    this.xpBarBack = this.add
+      .rectangle(barX, TOP_Y, BAR_W, BAR_H, BACK_COLOR)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(150);
+
+    // ---- XP bar fill (blue, grows left to right) ----
+    this.xpBarFill = this.add
+      .rectangle(barX, TOP_Y, 0, BAR_H, FILL_COLOR)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(151);
+
+    // ---- XP bar gain overlay (white, starts invisible) ----
+    this.xpBarGain = this.add
+      .rectangle(barX, TOP_Y, 0, BAR_H, 0xffffff)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(152)
+      .setAlpha(0);
+
+    // ---- Numeric text overlay inside the bar ----
+    this.xpBarText = this.add
+      .text(barX + BAR_W / 2, cy, "", {
+        color: "#ffffff",
+        fontSize: "10px",
+        fontFamily: "monospace",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(153);
+
+    // ---- Level text (gold, no background) ----
+    this.levelBadgeText = this.add
+      .text(levelTextX, cy, "Lv 1", {
+        color: "#ffd700",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(153);
+
+    // Dummy container reference (no background graphic anymore)
+    this.levelBadge = this.add
+      .container(0, 0, [this.levelBadgeText])
+      .setScrollFactor(0)
+      .setDepth(151);
+  }
+
+  /**
+   * Refresh the XP bar from a Player state object.
+   * Detects XP gain (currentXp increased without a level change) and triggers
+   *   - white flash on the gained portion that fades to reveal blue
+   *   - "+N xp" popup text at top-center
+   * Detects level-up and triggers a celebration toast.
+   *
+   * @param player - the synced Player state for the local player.
+   */
+  private updateXpBar(player: any): void {
+    if (!this.xpBarFill) return;
+
+    const level = Math.floor(player.level ?? 1);
+    const currentXp = Math.floor(player.currentXp ?? 0);
+    const xpToLevelUp = Math.max(1, Math.floor(player.xpToLevelUp ?? 1));
+
+    // ---- Update level badge text ----
+    this.levelBadgeText.setText("Lv " + level);
+
+    // ---- Compute fill ratio ----
+    const ratio = Phaser.Math.Clamp(currentXp / xpToLevelUp, 0, 1);
+    const fillW = this.xpBarFullWidth * ratio;
+    this.xpBarFill.setSize(fillW, this.xpBarFill.height);
+
+    // ---- Update numeric overlay ----
+    this.xpBarText.setText(currentXp + " / " + xpToLevelUp);
+
+    // ---- Detect XP gain / level-up ----
+    if (this.lastKnownLevel !== -1) {
+      // Normal XP gain (same level, xp went up)
+      if (level === this.lastKnownLevel && currentXp > this.lastKnownXp) {
+        const gained = currentXp - this.lastKnownXp;
+        this.flashXpBarGain(this.lastKnownXp, currentXp, xpToLevelUp);
+        this.showXpGainPopup(gained);
+      } else if (level > this.lastKnownLevel) {
+        // Level-up occurred. The server addXp() rolls excess XP into the
+        // new level, so show: (a) XP that completed the previous bar + (b)
+        // XP carried into the new level as a separate gain popup.
+        this.showLevelUpToast(level);
+        // Flash full bar white then reset for new level
+        this.flashLevelUpBar();
+        // Show popup for XP already in new level (if any)
+        if (currentXp > 0) {
+          this.flashXpBarGain(0, currentXp, xpToLevelUp);
+          this.showXpGainPopup(currentXp);
+        }
+      }
+      // XP loss (death penalty) - just silently update the bar
+    }
+
+    this.lastKnownXp = currentXp;
+    this.lastKnownLevel = level;
+  }
+
+  /**
+   * White flash overlay on the gained portion of the XP bar, fades out to
+   * reveal the blue fill underneath.
+   */
+  private flashXpBarGain(
+    fromXp: number,
+    toXp: number,
+    xpToLevelUp: number,
+  ): void {
+    if (!this.xpBarGain) return;
+    const startX = this.xpBarFill.x;
+    const fromRatio = Phaser.Math.Clamp(fromXp / xpToLevelUp, 0, 1);
+    const toRatio = Phaser.Math.Clamp(toXp / xpToLevelUp, 0, 1);
+    const gainX = startX + this.xpBarFullWidth * fromRatio;
+    const gainW = this.xpBarFullWidth * (toRatio - fromRatio);
+    if (gainW < 0.5) return;
+
+    // Position the white gain overlay over the newly gained portion
+    this.xpBarGain
+      .setPosition(gainX, this.xpBarFill.y)
+      .setSize(gainW, this.xpBarFill.height)
+      .setAlpha(1);
+
+    // Fade the white overlay out so the blue fill shows through
+    this.tweens.killTweensOf(this.xpBarGain);
+    this.tweens.add({
+      targets: this.xpBarGain,
+      alpha: 0,
+      duration: 600,
+      ease: "Cubic.out",
+      delay: 80,
+    });
+  }
+
+  /** Full-bar white flash used on level-up. */
+  private flashLevelUpBar(): void {
+    if (!this.xpBarGain) return;
+    this.xpBarGain
+      .setPosition(this.xpBarFill.x, this.xpBarFill.y)
+      .setSize(this.xpBarFullWidth, this.xpBarFill.height)
+      .setAlpha(1);
+    this.tweens.killTweensOf(this.xpBarGain);
+    this.tweens.add({
+      targets: this.xpBarGain,
+      alpha: 0,
+      duration: 800,
+      ease: "Cubic.out",
+      delay: 150,
+    });
+  }
+
+  /**
+   * Show a small "+N xp" popup at the top-center of the screen.
+   * The text rises and fades out over ~1 second.
+   * Uses a simple pool to avoid allocating a new Text each gain.
+   */
+  private showXpGainPopup(amount: number): void {
+    if (amount <= 0) return;
+    // Center the popup above the middle of the XP bar
+    const x = this.xpBarFill.x + this.xpBarFullWidth / 2;
+    const y = this.xpBarY + 18;
+
+    // Try to reuse an idle popup from the pool
+    let popup: Phaser.GameObjects.Text | null = null;
+    for (const p of this.xpGainPopups) {
+      if (p.alpha === 0 || !p.active) {
+        popup = p;
+        break;
+      }
+    }
+    if (!popup) {
+      // Cap pool size to avoid runaway allocations
+      if (this.xpGainPopups.length >= 8) {
+        // Reuse the oldest one
+        popup = this.xpGainPopups[0];
+      } else {
+        popup = this.add
+          .text(x, y, "", {
+            color: "#bfe3ff",
+            fontSize: "12px",
+            fontFamily: "monospace",
+            fontStyle: "bold",
+            stroke: "#000000",
+            strokeThickness: 3,
+          })
+          .setOrigin(0.5)
+          .setScrollFactor(0)
+          .setDepth(201);
+        this.xpGainPopups.push(popup);
+      }
+    }
+
+    popup
+      .setPosition(x, y)
+      .setText("+" + amount + " xp")
+      .setAlpha(1)
+      .setActive(true)
+      .setVisible(true);
+
+    this.tweens.killTweensOf(popup);
+    this.tweens.add({
+      targets: popup,
+      y: y - 24,
+      alpha: 0,
+      duration: 1000,
+      ease: "Cubic.out",
+      delay: 100,
+      onComplete: () => {
+        popup!.setActive(false);
+      },
+    });
+  }
+
+  /** Show a level-up celebration toast at top-center. */
+  private showLevelUpToast(level: number): void {
+    const msg = "LEVEL UP!  Lv " + level;
+    const x = this.cameras.main.width / 2;
+    const y = 36;
+    if (this.levelUpToast) {
+      this.levelUpToast.setText(msg).setPosition(x, y);
+    } else {
+      this.levelUpToast = this.add
+        .text(x, y, msg, {
+          color: "#ffd700",
+          fontSize: "18px",
+          fontFamily: "monospace",
+          fontStyle: "bold",
+          stroke: "#000000",
+          strokeThickness: 4,
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(201);
+    }
+    this.levelUpToast.setAlpha(1);
+    this.tweens.killTweensOf(this.levelUpToast);
+    // Quick scale pop on appear
+    this.levelUpToast.setScale(1.3);
+    this.tweens.add({
+      targets: this.levelUpToast,
+      scale: 1,
+      duration: 250,
+      ease: "Back.out",
+    });
+    this.time.delayedCall(1500, () => {
+      this.tweens.add({
+        targets: this.levelUpToast,
+        alpha: 0,
+        duration: 600,
+      });
+    });
+  }
   /** Update the HP bar + stats text from a Player state object. */
   private updateStatsHUD(player: any): void {
     if (!this.hpFill) return;
@@ -1773,7 +2150,7 @@ export class GameScene extends Phaser.Scene {
 
       // Animation: attack when attacking, otherwise idle (shown for move+stand).
       const attacking = entity.data.get("attacking") as boolean;
-      const isOrck = (entity.texture.key === "orck_sheet");
+      const isOrck = entity.texture.key === "orck_sheet";
       const atkKey = isOrck ? "orck_attack" : "tri_attack";
       const idleKey = isOrck ? "orck_idle" : "tri_idle";
       const eAnim = entity.anims.currentAnim;
@@ -1887,7 +2264,11 @@ export class GameScene extends Phaser.Scene {
     // ---- Players (GREEN circles, radius 10) ----
     gfx.lineStyle(1.5, 0x00ff00, 0.9);
     if (this.currentPlayer) {
-      gfx.strokeCircle(this.currentPlayer.x, this.currentPlayer.y, this.PLAYER_COLLISION_RADIUS);
+      gfx.strokeCircle(
+        this.currentPlayer.x,
+        this.currentPlayer.y,
+        this.PLAYER_COLLISION_RADIUS,
+      );
     }
     for (const sessionId in this.playerEntities) {
       if (sessionId === this.room?.sessionId) continue;
@@ -1922,9 +2303,15 @@ export class GameScene extends Phaser.Scene {
       const angle = e.rotation || 0;
       gfx.beginPath();
       gfx.moveTo(e.x, e.y);
-      gfx.lineTo(e.x + Math.cos(angle - halfAngle) * range, e.y + Math.sin(angle - halfAngle) * range);
+      gfx.lineTo(
+        e.x + Math.cos(angle - halfAngle) * range,
+        e.y + Math.sin(angle - halfAngle) * range,
+      );
       gfx.moveTo(e.x, e.y);
-      gfx.lineTo(e.x + Math.cos(angle + halfAngle) * range, e.y + Math.sin(angle + halfAngle) * range);
+      gfx.lineTo(
+        e.x + Math.cos(angle + halfAngle) * range,
+        e.y + Math.sin(angle + halfAngle) * range,
+      );
       gfx.strokePath();
       gfx.beginPath();
       gfx.arc(e.x, e.y, range, angle - halfAngle, angle + halfAngle);
@@ -1945,9 +2332,9 @@ export class GameScene extends Phaser.Scene {
       // 4 corners of the oriented rectangle
       const corners = [
         { lx: -halfH, ly: -halfW },
-        { lx:  halfH, ly: -halfW },
-        { lx:  halfH, ly:  halfW },
-        { lx: -halfH, ly:  halfW },
+        { lx: halfH, ly: -halfW },
+        { lx: halfH, ly: halfW },
+        { lx: -halfH, ly: halfW },
       ].map((c) => ({
         x: s.x + c.lx * cos - c.ly * sin,
         y: s.y + c.lx * sin + c.ly * cos,
@@ -2020,56 +2407,63 @@ export class GameScene extends Phaser.Scene {
     const cy = cam.height / 2;
 
     // Translucent black background
-    const bg = this.add.rectangle(cx, cy, cam.width, cam.height, 0x000000, 0.75)
+    const bg = this.add
+      .rectangle(cx, cy, cam.width, cam.height, 0x000000, 0.75)
       .setScrollFactor(0)
       .setDepth(2000);
 
     // Gold-lined box (wood-colored fill)
     const boxW = 360;
     const boxH = 220;
-    const box = this.add.rectangle(cx, cy, boxW, boxH, 0x3d2b1f, 0.95)
+    const box = this.add
+      .rectangle(cx, cy, boxW, boxH, 0x3d2b1f, 0.95)
       .setStrokeStyle(4, 0xd4a017, 1) // gold border
       .setScrollFactor(0)
       .setDepth(2001);
 
     // "YOU DIED" title
-    const title = this.add.text(cx, cy - 70, "YOU DIED", {
-      fontFamily: "Georgia, serif",
-      fontSize: "28px",
-      color: "#d4a017",
-      stroke: "#000000",
-      strokeThickness: 4,
-    })
+    const title = this.add
+      .text(cx, cy - 70, "YOU DIED", {
+        fontFamily: "Georgia, serif",
+        fontSize: "28px",
+        color: "#d4a017",
+        stroke: "#000000",
+        strokeThickness: 4,
+      })
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(2002);
 
     // Respawn button
-    const respawnBtn = this.add.rectangle(cx, cy + 10, 180, 44, 0x2d4a2b, 0.9)
+    const respawnBtn = this.add
+      .rectangle(cx, cy + 10, 180, 44, 0x2d4a2b, 0.9)
       .setStrokeStyle(2, 0xd4a017, 0.8)
       .setScrollFactor(0)
       .setDepth(2002)
       .setInteractive({ useHandCursor: true });
-    const respawnText = this.add.text(cx, cy + 10, "Respawn", {
-      fontFamily: "Georgia, serif",
-      fontSize: "18px",
-      color: "#ffffff",
-    })
+    const respawnText = this.add
+      .text(cx, cy + 10, "Respawn", {
+        fontFamily: "Georgia, serif",
+        fontSize: "18px",
+        color: "#ffffff",
+      })
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(2003);
 
     // Quit button
-    const quitBtn = this.add.rectangle(cx, cy + 64, 180, 44, 0x4a2b2b, 0.9)
+    const quitBtn = this.add
+      .rectangle(cx, cy + 64, 180, 44, 0x4a2b2b, 0.9)
       .setStrokeStyle(2, 0xd4a017, 0.8)
       .setScrollFactor(0)
       .setDepth(2002)
       .setInteractive({ useHandCursor: true });
-    const quitText = this.add.text(cx, cy + 64, "Quit", {
-      fontFamily: "Georgia, serif",
-      fontSize: "18px",
-      color: "#ffffff",
-    })
+    const quitText = this.add
+      .text(cx, cy + 64, "Quit", {
+        fontFamily: "Georgia, serif",
+        fontSize: "18px",
+        color: "#ffffff",
+      })
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(2003);
@@ -2091,9 +2485,16 @@ export class GameScene extends Phaser.Scene {
     quitBtn.on("pointerover", () => quitBtn.setFillStyle(0x6a3d3d, 0.95));
     quitBtn.on("pointerout", () => quitBtn.setFillStyle(0x4a2b2b, 0.9));
 
-    this.deathOverlay = this.add.container(0, 0, [
-      bg, box, title, respawnBtn, respawnText, quitBtn, quitText,
-    ])
+    this.deathOverlay = this.add
+      .container(0, 0, [
+        bg,
+        box,
+        title,
+        respawnBtn,
+        respawnText,
+        quitBtn,
+        quitText,
+      ])
       .setScrollFactor(0)
       .setDepth(2000);
   }
@@ -2111,7 +2512,7 @@ export class GameScene extends Phaser.Scene {
   // MAP TRANSITION
   // ============================================================
 
-    private transitionToScene(sceneKey: string): void {
+  private transitionToScene(sceneKey: string): void {
     if (this.transitioning) return;
     this.transitioning = true;
 
