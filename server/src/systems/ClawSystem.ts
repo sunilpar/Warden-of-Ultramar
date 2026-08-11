@@ -24,6 +24,7 @@ import {
   clawTier,
   clawInflictsBleed,
   computeSkillDamage,
+  applyCrit,
   type SkillId,
 } from "../config/skillDefs";
 
@@ -66,6 +67,8 @@ export class ClawSystem {
     skillLevel: number,
     damageMultiplier: number,
     casterRadius: number = 10,
+    critRate: number = 0,
+    critDamage: number = 1.5,
   ): boolean {
     const tier = clawTier(skillLevel);
     const halfAngle = CLAW_DEF.coneHalfAngle(skillLevel);
@@ -83,9 +86,10 @@ export class ClawSystem {
       this.state.enemies.forEach((enemy, id) => {
         if (id === ownerId || enemy.isDead) return;
         if (this.inCone(x, y, angle, halfAngle, range, enemy.x, enemy.y)) {
-          enemy.takeDamage(damage, "claw", ownerId);
+          const c = applyCrit(damage, critRate, critDamage);
+          enemy.takeDamage(c.damage, "claw", ownerId, c.isCrit);
           if (bleed) {
-            enemy.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel));
+            enemy.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel), ownerId);
           }
         }
       });
@@ -94,7 +98,8 @@ export class ClawSystem {
       this.state.players.forEach((player, id) => {
         if (id === ownerId || player.isDead) return;
         if (this.inCone(x, y, angle, halfAngle, range, player.x, player.y)) {
-          player.takeDamage(damage, "claw");
+          const c2 = applyCrit(damage, critRate, critDamage);
+          player.takeDamage(c2.damage, "claw", undefined, c2.isCrit);
           if (bleed) {
             player.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel));
           }
@@ -103,9 +108,10 @@ export class ClawSystem {
       this.state.enemies.forEach((enemy, id) => {
         if (id === ownerId || enemy.isDead) return;
         if (this.inCone(x, y, angle, halfAngle, range, enemy.x, enemy.y)) {
-          enemy.takeDamage(damage, "claw", ownerId);
+          const c = applyCrit(damage, critRate, critDamage);
+          enemy.takeDamage(c.damage, "claw", ownerId, c.isCrit);
           if (bleed) {
-            enemy.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel));
+            enemy.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel), ownerId);
           }
         }
       });

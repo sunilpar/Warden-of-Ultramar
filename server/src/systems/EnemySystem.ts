@@ -261,6 +261,8 @@ export class EnemySystem {
         enemy.attack,
         this.enemySkillLevel(enemy, skill),
         enemy.damageMultiplier,
+        (enemy as any).critRate ?? 0,
+        (enemy as any).critDamage ?? 1.5,
       );
     } else if (skill === "claw" && this.clawSystem) {
       this.clawSystem.castClaw(
@@ -273,6 +275,8 @@ export class EnemySystem {
         this.enemySkillLevel(enemy, skill),
         enemy.damageMultiplier,
         enemy.collisionRadius,
+        (enemy as any).critRate ?? 0,
+        (enemy as any).critDamage ?? 1.5,
       );
     } else if (skill === "slam" && this.slamSystem) {
       // Delay the slam hitbox until after the attack animation completes.
@@ -324,5 +328,26 @@ export class EnemySystem {
   /** Remove a dead enemy by id. */
   remove(id: string): void {
     this.state.enemies.delete(id);
+  }
+
+  /**
+   * Clean up all skill entities (slams, pending casts) owned by a
+   * dead enemy so they despawn immediately when the caster dies.
+   */
+  cleanupOnEnemyDeath(ownerId: string): void {
+    // Cancel any pending slam casts that haven't fired yet.
+    this.pendingSlams = this.pendingSlams.filter((s) => s.ownerId !== ownerId);
+    // Remove in-flight slams owned by this enemy.
+    const slamIds: string[] = [];
+    this.state.slams.forEach((slam, sid) => {
+      if (slam.ownerId === ownerId) slamIds.push(sid);
+    });
+    for (const sid of slamIds) this.state.slams.delete(sid);
+    // Remove in-flight projectiles owned by this enemy.
+    const projIds: string[] = [];
+    this.state.projectiles.forEach((proj, pid) => {
+      if (proj.ownerId === ownerId) projIds.push(pid);
+    });
+    for (const pid of projIds) this.state.projectiles.delete(pid);
   }
 }

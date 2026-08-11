@@ -46,11 +46,16 @@ import {
   CLAW_FRAMES_PER_ROW,
   type ClawTier,
   skillMods,
+  SKILL_CARDS,
 } from "../config/skillDefs";
+import { MAP_INFO, MODIFIER_DISPLAY } from "../config/modifiers";
 
 // ============================================================
 // Game Scene
 // ============================================================
+
+// Alias for skill card lookup in character screen
+const SKILL_CARDS_LOOKUP = SKILL_CARDS;
 
 export class GameScene extends Phaser.Scene {
   client = new Client(BACKEND_URL);
@@ -124,12 +129,33 @@ export class GameScene extends Phaser.Scene {
   private lastKnownLevel: number = -1;
   /** Reusable "+N xp" floating text objects (pooled to avoid per-gain alloc). */
   private xpGainPopups: Phaser.GameObjects.Text[] = [];
+  /** Pooled floating damage number texts (world-space). */
+  private damageTexts: Phaser.GameObjects.Text[] = [];
+  /** Per-entity last seen hitSeq (to detect new damage events). */
+  private entityHitSeqs: Record<string, number> = {};
   /** Reusable level-up celebration toast. */
   private levelUpToast!: Phaser.GameObjects.Text;
   /** Full unscaled width of the XP bar (px). */
   private xpBarFullWidth: number = 0;
   /** Screen-space Y of the XP bar (px). */
   private xpBarY: number = 0;
+
+  // ---- Map info button (top-right corner) + hover tooltip ----
+  private mapInfoButton!: Phaser.GameObjects.Image;
+  private mapInfoTooltip!: Phaser.GameObjects.Container;
+  private mapInfoTooltipBg!: Phaser.GameObjects.Graphics;
+
+  // ---- Character stats screen (toggle with C) ----
+  private charScreen!: Phaser.GameObjects.Container;
+  private charScreenVisible: boolean = false;
+  private charScreenKey!: Phaser.Input.Keyboard.Key;
+  private testSkillPointKey!: Phaser.Input.Keyboard.Key;
+  // Skill point badge (blinking) on the XP bar level text
+  private skillPointBadge!: Phaser.GameObjects.Container;
+  private skillPointBadgePulse: Phaser.Tweens.Tween | null = null;
+  private skillPointBadgeText!: Phaser.GameObjects.Text;
+  // Confirmation popup (reused)
+  private confirmPopup!: Phaser.GameObjects.Container;
 
   // ---- Aim / firing ----
   private aimAngle: number = 0;
@@ -214,6 +240,7 @@ export class GameScene extends Phaser.Scene {
     game2: {
       roomName: "game_room_2",
       mapData: LAYERED_MAP_2,
+      nextSceneKey: "game",  // Map2 exit goes back to Map1
     },
   };
 
@@ -352,6 +379,10 @@ export class GameScene extends Phaser.Scene {
     this.createStatsHUD();
     // ---- XP bar (top-center) ----
     this.createXpBar();
+    // ---- Map info button (top-right) ----
+    this.createMapInfoButton();
+    // ---- Character stats screen (press C) ----
+    this.createCharacterScreen();
     // Place the skill cards in slots 1-3 (initial level 1).
     this.refreshBolterCard();
     this.refreshSlamCard();
@@ -469,6 +500,15 @@ export class GameScene extends Phaser.Scene {
               "hitFlashUntil",
               player.hitFlashUntil ?? 0,
             );
+            // Detect damage taken by local player.
+            const pseq = player.hitSeq ?? 0;
+            const pprev = this.entityHitSeqs["__local__"] ?? 0;
+            if (pseq !== pprev) {
+              this.entityHitSeqs["__local__"] = pseq;
+              if (player.lastHitDamage > 0) {
+                this.showDamageNumber(this.currentPlayer.x, this.currentPlayer.y, player.lastHitDamage, !!player.lastHitCrit);
+              }
+            }
             // Sync slam level + card art
             const slamLvl =
               player.skillLevels && player.skillLevels.get
@@ -546,6 +586,12 @@ export class GameScene extends Phaser.Scene {
 
       this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
 
+            // Initialize data so render loop works from the first frame.
+      sprite.setData("hitFlashUntil", enemy.hitFlashUntil ?? 0);
+      sprite.setData("hp", enemy.currentHealth);
+      sprite.setData("maxHp", enemy.maxHealth);
+      sprite.setData("attacking", false);
+
       callbacks.onChange(enemy, () => {
         sprite.setData("serverX", enemy.x);
         sprite.setData("serverY", enemy.y);
@@ -555,6 +601,15 @@ export class GameScene extends Phaser.Scene {
         sprite.setData("hitFlashUntil", enemy.hitFlashUntil);
         sprite.setData("attacking", !!enemy.attacking);
         this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
+        // Detect new damage events via hitSeq counter.
+        const seq = enemy.hitSeq ?? 0;
+        const prev = this.entityHitSeqs[enemyId] ?? 0;
+        if (seq !== prev) {
+          this.entityHitSeqs[enemyId] = seq;
+          if (enemy.lastHitDamage > 0) {
+            this.showDamageNumber(enemy.x, enemy.y, enemy.lastHitDamage, !!enemy.lastHitCrit);
+          }
+        }
       });
     });
 
@@ -570,6 +625,7 @@ export class GameScene extends Phaser.Scene {
         delete this.enemyHpBars[enemyId];
       }
       delete this.enemyLastPos[enemyId];
+      delete this.entityHitSeqs[enemyId];
     });
 
     // ============================================================
@@ -656,8 +712,12 @@ export class GameScene extends Phaser.Scene {
         const range: number =
           cast.range || (tier === "big" ? 110 : tier === "mid" ? 85 : 60);
         const SPRITE_NATIVE = 64;
-        const halfSprite = SPRITE_NATIVE / 2; // 32
-        // Distance from the cast origin to the sprite center.
+        // Scale sprite to match hitbox size (range = hitbox radius)
+        // At base range (60px for small), scale = 1.0 (64px sprite ≈ 60px hitbox)
+        // At higher levels with larger hitboxes, scale up proportionally
+        const clawScale = Math.max(1.0, range / 60);
+        const scaledSpriteSize = SPRITE_NATIVE * clawScale;
+        const halfSprite = scaledSpriteSize / 2;
         const edgeDist = range - halfSprite;
         const edgeX = cast.x + Math.cos(cast.angle) * edgeDist;
         const edgeY = cast.y + Math.sin(cast.angle) * edgeDist;
@@ -667,7 +727,7 @@ export class GameScene extends Phaser.Scene {
         const sprite = this.add
           .sprite(edgeX, edgeY, "claw_sheet", startFrame)
           .setDepth(5)
-          .setScale(1)
+          .setScale(clawScale)
           .setRotation(cast.angle)
           .setTint(tint);
         sprite.anims.play(animKey);
@@ -689,10 +749,12 @@ export class GameScene extends Phaser.Scene {
     // ============================================================
     callbacks.onAdd("slams", (slam: any, slamId: string) => {
       const isUpgraded = slam.level >= 6;
+      // Scale slam sprite with hitbox size: base scale 1.5, +10% per level above 2
+      const slamScale = 1.5 * Math.pow(1.1, Math.max(0, slam.level - 2));
       const sprite = this.add
         .sprite(slam.x, slam.y, "slam_sheet", 0)
         .setDepth(4)
-        .setScale(1.5)
+        .setScale(slamScale)
         .setRotation(slam.angle);
       sprite.setData("slamLevel", slam.level);
       sprite.setData("isUpgraded", isUpgraded);
@@ -720,8 +782,11 @@ export class GameScene extends Phaser.Scene {
   // ============================================================
 
   async connect() {
+    // Read playerState from previous scene (passed via scene.launch)
+    const data = this.sys.settings.data as any;
+    const playerState = data?.playerState ?? null;
     try {
-      this.room = await this.client.joinOrCreate(this.roomName);
+      this.room = await this.client.joinOrCreate(this.roomName, { playerState });
     } catch (e) {
       console.error("Failed to connect:", e);
     }
@@ -1528,6 +1593,39 @@ export class GameScene extends Phaser.Scene {
       .container(0, 0, [this.levelBadgeText])
       .setScrollFactor(0)
       .setDepth(151);
+
+    // ---- Skill point badge (blinking dot top-right of level text) ----
+    const badgeX = levelTextX + 16;
+    const badgeY = cy - 10;
+    const badgeBg = this.add
+      .graphics()
+      .setScrollFactor(0)
+      .setDepth(154);
+    badgeBg.fillStyle(0xffd700, 1);
+    badgeBg.fillCircle(badgeX, badgeY, 6);
+    badgeBg.lineStyle(2, 0xffffff, 0.9);
+    badgeBg.strokeCircle(badgeX, badgeY, 6);
+    this.skillPointBadgeText = this.add
+      .text(badgeX, badgeY, "1", {
+        color: "#000000",
+        fontSize: "10px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(155);
+    this.skillPointBadge = this.add
+      .container(0, 0, [badgeBg, this.skillPointBadgeText])
+      .setScrollFactor(0)
+      .setDepth(154)
+      .setVisible(false);
+
+    // ---- Make level text clickable to open character screen ----
+    this.levelBadgeText.setInteractive({ useHandCursor: true });
+    this.levelBadgeText.on("pointerdown", () => {
+      if (!this.charScreenVisible) this.toggleCharacterScreen();
+    });
   }
 
   /**
@@ -1582,6 +1680,30 @@ export class GameScene extends Phaser.Scene {
 
     this.lastKnownXp = currentXp;
     this.lastKnownLevel = level;
+
+    // ---- Update skill point badge visibility ----
+    const sp = Math.floor(player.skillPoints ?? 0);
+    if (sp > 0) {
+      this.skillPointBadgeText.setText(String(sp));
+      this.skillPointBadge.setVisible(true);
+      if (!this.skillPointBadgePulse) {
+        this.skillPointBadgePulse = this.tweens.add({
+          targets: this.skillPointBadge,
+          alpha: { from: 0.4, to: 1.0 },
+          duration: 500,
+          yoyo: true,
+          repeat: -1,
+          ease: "Sine.inOut",
+        });
+      }
+    } else {
+      this.skillPointBadge.setVisible(false);
+      if (this.skillPointBadgePulse) {
+        this.skillPointBadgePulse.stop();
+        this.skillPointBadgePulse = null;
+        this.skillPointBadge.setAlpha(1);
+      }
+    }
   }
 
   /**
@@ -1697,6 +1819,62 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  /**
+   * Spawn a floating damage number at a world position.
+   * White for normal hits, gold + larger for critical hits.
+   */
+  private showDamageNumber(x: number, y: number, damage: number, isCrit: boolean): void {
+    if (damage <= 0) return;
+    // Random horizontal jitter so overlapping hits don't stack perfectly.
+    const jitterX = (Math.random() - 0.5) * 16;
+    const startY = y - 20;
+
+    // Reuse an idle text from the pool.
+    let txt: Phaser.GameObjects.Text | null = null;
+    for (const t of this.damageTexts) {
+      if (t.alpha === 0 || !t.active) { txt = t; break; }
+    }
+    if (!txt) {
+      if (this.damageTexts.length >= 30) {
+        txt = this.damageTexts[0];
+      } else {
+        txt = this.add
+          .text(x, startY, "", {
+            color: "#ffffff",
+            fontSize: "14px",
+            fontFamily: "monospace",
+            fontStyle: "bold",
+            stroke: "#000000",
+            strokeThickness: 3,
+          })
+          .setOrigin(0.5)
+          .setDepth(300);
+        this.damageTexts.push(txt);
+      }
+    }
+
+    const label = isCrit ? Math.round(damage) + "!" : String(Math.round(damage));
+    txt
+      .setPosition(x + jitterX, startY)
+      .setText(label)
+      .setFontSize(isCrit ? "20px" : "14px")
+      .setColor(isCrit ? "#ffd700" : "#ffffff")
+      .setAlpha(1)
+      .setActive(true)
+      .setVisible(true);
+
+    this.tweens.killTweensOf(txt);
+    this.tweens.add({
+      targets: txt,
+      y: startY - 32,
+      alpha: 0,
+      duration: isCrit ? 900 : 700,
+      ease: "Cubic.out",
+      delay: 80,
+      onComplete: () => { txt!.setActive(false); },
+    });
+  }
+
   /** Show a level-up celebration toast at top-center. */
   private showLevelUpToast(level: number): void {
     const msg = "LEVEL UP!  Lv " + level;
@@ -1763,6 +1941,543 @@ export class GameScene extends Phaser.Scene {
         ].join("\n"),
       );
     }
+  }
+
+  // ============================================================
+  // MAP INFO BUTTON + TOOLTIP
+  // ============================================================
+
+  private createMapInfoButton(): void {
+    const W = this.cameras.main.width;
+    const ICON_SIZE = 40;
+    const MARGIN = 50;
+
+    this.mapInfoButton = this.add
+      .image(W - ICON_SIZE / 2 - MARGIN, ICON_SIZE / 2 + 5, "map_info_icon")
+      .setDisplaySize(ICON_SIZE, ICON_SIZE)
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(150)
+      .setInteractive({ useHandCursor: true });
+
+    this.mapInfoTooltip = this.add.container(0, 0).setDepth(300).setVisible(false).setScrollFactor(0);
+
+    const tooltipW = 320;
+    const padding = 12;
+    let tooltipY = padding;
+
+    const roomName = this.roomName ?? "game_room";
+    const mapInfo = MAP_INFO[roomName] ?? { name: roomName, description: "" };
+
+    const nameText = this.add
+      .text(padding, tooltipY, mapInfo.name, {
+        color: "#ffd700",
+        fontSize: "16px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
+    this.mapInfoTooltip.add(nameText);
+    tooltipY += nameText.height + 6;
+
+    if (mapInfo.description) {
+      const descText = this.add
+        .text(padding, tooltipY, mapInfo.description, {
+          color: "#cccccc",
+          fontSize: "12px",
+          fontFamily: "monospace",
+          wordWrap: { width: tooltipW - padding * 2 },
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      this.mapInfoTooltip.add(descText);
+      tooltipY += descText.height + 8;
+    }
+
+    const modHeader = this.add
+      .text(padding, tooltipY, "Active Modifiers", {
+        color: "#ffffff",
+        fontSize: "12px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 2,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
+    this.mapInfoTooltip.add(modHeader);
+    tooltipY += modHeader.height + 4;
+
+    const modifiers: any[] = (this.room?.metadata?.modifiers as any[]) ?? [];
+    if (modifiers.length === 0) {
+      const noneText = this.add
+        .text(padding, tooltipY, "None", {
+          color: "#888888",
+          fontSize: "11px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      this.mapInfoTooltip.add(noneText);
+      tooltipY += noneText.height + 4;
+    } else {
+      for (const mod of modifiers) {
+        const disp = MODIFIER_DISPLAY[mod.id as keyof typeof MODIFIER_DISPLAY];
+        const color = disp?.color ?? "#ffffff";
+        const title = disp?.title ?? mod.title ?? mod.id;
+        const desc = disp?.description ?? mod.description ?? "";
+        const modText = this.add
+          .text(padding, tooltipY, "\u25cf " + title, {
+            color: color,
+            fontSize: "11px",
+            fontFamily: "monospace",
+            fontStyle: "bold",
+            stroke: "#000000",
+            strokeThickness: 2,
+          })
+          .setOrigin(0, 0)
+          .setScrollFactor(0);
+      this.mapInfoTooltip.add(modText);
+      tooltipY += modText.height + 2;
+      const modDesc = this.add
+        .text(padding + 14, tooltipY, desc, {
+          color: "#aaaaaa",
+          fontSize: "10px",
+          fontFamily: "monospace",
+          wordWrap: { width: tooltipW - padding * 2 - 14 },
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      this.mapInfoTooltip.add(modDesc);
+      tooltipY += modDesc.height + 4;
+      }
+    }
+
+    const tooltipH = tooltipY + padding;
+    this.mapInfoTooltipBg = this.add.graphics().setScrollFactor(0).setDepth(299);
+    this.mapInfoTooltipBg.fillStyle(0x0a0a14, 0.92);
+    this.mapInfoTooltipBg.fillRoundedRect(0, 0, tooltipW, tooltipH, 8);
+    this.mapInfoTooltipBg.lineStyle(2, 0x4a6a8a, 0.8);
+    this.mapInfoTooltipBg.strokeRoundedRect(0, 0, tooltipW, tooltipH, 8);
+    this.mapInfoTooltip.add(this.mapInfoTooltipBg);
+    this.mapInfoTooltip.sendToBack(this.mapInfoTooltipBg);
+
+    const tx = this.mapInfoButton.x - ICON_SIZE / 2 - tooltipW - 4;
+    const ty = this.mapInfoButton.y - ICON_SIZE / 2;
+    this.mapInfoTooltip.setPosition(tx, ty);
+
+    this.mapInfoButton.on("pointerover", () => { this.mapInfoTooltip.setVisible(true); });
+    this.mapInfoButton.on("pointerout", () => { this.mapInfoTooltip.setVisible(false); });
+  }
+
+  // ============================================================
+  // CHARACTER STATS SCREEN (press C to toggle)
+  // ============================================================
+
+  private createCharacterScreen(): void {
+    const W = this.cameras.main.width;
+    const H = this.cameras.main.height;
+    const PANEL_W = 520;
+    const PANEL_H = Math.min(H - 60, 600);
+    const px = Math.round((W - PANEL_W) / 2);
+    const py = Math.round((H - PANEL_H) / 2);
+
+    this.charScreen = this.add.container(0, 0).setDepth(400).setVisible(false).setScrollFactor(0);
+
+    // ---- Dim overlay ----
+    const overlay = this.add.rectangle(0, 0, W, H, 0x000000, 0.6).setOrigin(0, 0).setScrollFactor(0);
+    overlay.setInteractive(); // block clicks going through
+    overlay.on("pointerdown", () => {
+      if (this.charScreenVisible) this.toggleCharacterScreen();
+    });
+    this.charScreen.add(overlay);
+
+    // ---- Panel background ----
+    const panelBg = this.add.graphics().setScrollFactor(0);
+    panelBg.fillStyle(0x0a0a14, 0.95);
+    panelBg.fillRoundedRect(px, py, PANEL_W, PANEL_H, 12);
+    panelBg.lineStyle(2, 0x4a6a8a, 0.9);
+    panelBg.strokeRoundedRect(px, py, PANEL_W, PANEL_H, 12);
+    this.charScreen.add(panelBg);
+
+    // ---- Title ----
+    const titleText = this.add.text(px + PANEL_W / 2, py + 14, "CHARACTER", {
+        color: "#ffd700", fontSize: "20px", fontFamily: "monospace", fontStyle: "bold",
+        stroke: "#000000", strokeThickness: 4,
+      }).setOrigin(0.5, 0).setScrollFactor(0);
+    this.charScreen.add(titleText);
+
+    // ---- Close hint + skill points display ----
+    const closeHint = this.add.text(px + PANEL_W - 12, py + 8, "[C] Close", {
+        color: "#888888", fontSize: "11px", fontFamily: "monospace",
+        stroke: "#000000", strokeThickness: 2,
+      }).setOrigin(1, 0).setScrollFactor(0);
+    this.charScreen.add(closeHint);
+
+    // Skill points banner
+    const spBanner = this.add.text(px + 20, py + 8, "", {
+        color: "#ffd700", fontSize: "13px", fontFamily: "monospace", fontStyle: "bold",
+        stroke: "#000000", strokeThickness: 3,
+      }).setOrigin(0, 0).setScrollFactor(0);
+    this.charScreen.add(spBanner);
+    (this.charScreen as any)._spBanner = spBanner;
+
+    // Store layout constants for updates
+    (this.charScreen as any)._px = px;
+    (this.charScreen as any)._py = py;
+    (this.charScreen as any)._panelW = PANEL_W;
+    (this.charScreen as any)._panelH = PANEL_H;
+
+    // Dynamic content container (destroyed and rebuilt on each update)
+    (this.charScreen as any)._dynChildren = [];
+
+    // ---- C key to toggle ----
+    this.charScreenKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.C);
+    this.charScreenKey.on("down", () => { this.toggleCharacterScreen(); });
+
+    // ---- ESC key to close ----
+    const escKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
+    escKey.on("down", () => {
+      if (this.charScreenVisible) this.toggleCharacterScreen();
+    });
+
+    // ---- Key 9: test skill point ----
+    this.testSkillPointKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.NINE);
+    this.testSkillPointKey.on("down", () => {
+      if (this.room) this.room.send(8, {});
+    });
+
+    // ---- Confirmation popup (reused, hidden by default) ----
+    this.confirmPopup = this.add.container(0, 0).setDepth(500).setVisible(false).setScrollFactor(0);
+    const cOverlay = this.add.rectangle(0, 0, W, H, 0x000000, 0.3).setOrigin(0, 0).setScrollFactor(0);
+    cOverlay.setInteractive();
+    const cBg = this.add.graphics().setScrollFactor(0);
+    const cW = 300, cH = 120;
+    const cx2 = Math.round((W - cW) / 2), cy2 = Math.round((H - cH) / 2);
+    cBg.fillStyle(0x12121e, 0.97);
+    cBg.fillRoundedRect(cx2, cy2, cW, cH, 10);
+    cBg.lineStyle(2, 0x4a6a8a, 0.9);
+    cBg.strokeRoundedRect(cx2, cy2, cW, cH, 10);
+    const cText = this.add.text(W / 2, cy2 + 18, "", {
+        color: "#ffffff", fontSize: "14px", fontFamily: "monospace", align: "center",
+        wordWrap: { width: cW - 40 }, stroke: "#000000", strokeThickness: 3,
+      }).setOrigin(0.5, 0).setScrollFactor(0);
+    const cYes = this.add.text(W / 2 - 50, cy2 + cH - 32, "[ YES ]", {
+        color: "#66bb6a", fontSize: "14px", fontFamily: "monospace", fontStyle: "bold",
+        stroke: "#000000", strokeThickness: 3,
+      }).setOrigin(0.5).setScrollFactor(0).setInteractive({ useHandCursor: true });
+    const cNo = this.add.text(W / 2 + 50, cy2 + cH - 32, "[ NO ]", {
+        color: "#ef5350", fontSize: "14px", fontFamily: "monospace", fontStyle: "bold",
+        stroke: "#000000", strokeThickness: 3,
+      }).setOrigin(0.5).setScrollFactor(0).setInteractive({ useHandCursor: true });
+    this.confirmPopup.add([cOverlay, cBg, cText, cYes, cNo]);
+    (this.confirmPopup as any)._text = cText;
+    (this.confirmPopup as any)._yes = cYes;
+    (this.confirmPopup as any)._no = cNo;
+    (this.confirmPopup as any)._bg = cBg;
+    (this.confirmPopup as any)._cx = cx2;
+    (this.confirmPopup as any)._cy = cy2;
+    (this.confirmPopup as any)._cW = cW;
+    (this.confirmPopup as any)._cH = cH;
+    (this.confirmPopup as any)._W = W;
+    // Start hidden (no-op callback)
+    (this.confirmPopup as any)._callback = () => {};
+    cYes.on("pointerdown", () => {
+      const cb = (this.confirmPopup as any)._callback;
+      this.confirmPopup.setVisible(false);
+      (this.confirmPopup as any)._callback = () => {};
+      cb();
+    });
+    cNo.on("pointerdown", () => {
+      this.confirmPopup.setVisible(false);
+      (this.confirmPopup as any)._callback = () => {};
+    });
+  }
+
+  /** Show confirmation popup with a message and callback on YES.
+   *  Dynamically resizes the background and repositions the Yes/No buttons
+   *  so they never overlap the text. */
+  private showConfirm(message: string, onYes: () => void): void {
+    const pp: any = this.confirmPopup as any;
+    const cText: Phaser.GameObjects.Text = pp._text;
+    const cYes: Phaser.GameObjects.Text = pp._yes;
+    const cNo: Phaser.GameObjects.Text = pp._no;
+    const cBg: Phaser.GameObjects.Graphics = pp._bg;
+    const W: number = pp._W;
+    const cW: number = pp._cW;
+    const baseCy: number = pp._cy;
+
+    cText.setText(message);
+
+    // Measure the rendered text height to know how tall the popup needs to be.
+    const textHeight: number = cText.height;
+    // Minimum height so short messages still look good.
+    const minH: number = pp._cH;
+    // text starts at baseCy + 18; add 18px top + text + 16px gap + 32px buttons + 12px bottom
+    const neededH: number = Math.max(minH, 18 + textHeight + 16 + 32 + 12);
+
+    // Recenter the popup vertically based on new height.
+    const newCy: number = Math.round((this.cameras.main.height - neededH) / 2);
+
+    // Redraw the background at the new size.
+    cBg.clear();
+    cBg.fillStyle(0x12121e, 0.97);
+    cBg.fillRoundedRect(pp._cx, newCy, cW, neededH, 10);
+    cBg.lineStyle(2, 0x4a6a8a, 0.9);
+    cBg.strokeRoundedRect(pp._cx, newCy, cW, neededH, 10);
+
+    // Position the text at the top of the popup.
+    cText.setPosition(W / 2, newCy + 18);
+
+    // Position Yes/No buttons below the text, always clear of it.
+    const btnY: number = newCy + 18 + textHeight + 16;
+    cYes.setPosition(W / 2 - 50, btnY);
+    cNo.setPosition(W / 2 + 50, btnY);
+
+    pp._callback = onYes;
+    this.confirmPopup.setVisible(true);
+  }
+
+  private toggleCharacterScreen(): void {
+    this.charScreenVisible = !this.charScreenVisible;
+    if (this.charScreenVisible) {
+      // Hide map tooltip if open
+      this.mapInfoTooltip.setVisible(false);
+      this.updateCharacterScreen();
+    } else {
+      // Clean up dynamic children
+      const dyn: Phaser.GameObjects.GameObject[] = (this.charScreen as any)._dynChildren ?? [];
+      for (const d of dyn) d.destroy();
+      (this.charScreen as any)._dynChildren = [];
+    }
+    this.charScreen.setVisible(this.charScreenVisible);
+  }
+
+  /** Destroy all dynamic children of the char screen. */
+  private clearCharScreenDyn(): void {
+    const dyn: Phaser.GameObjects.GameObject[] = (this.charScreen as any)._dynChildren ?? [];
+    for (const d of dyn) d.destroy();
+    (this.charScreen as any)._dynChildren = [];
+  }
+
+  /** Add a GameObject to char screen and track it as dynamic. */
+  private addDyn(obj: Phaser.GameObjects.GameObject): Phaser.GameObjects.GameObject {
+    this.charScreen.add(obj);
+    ((this.charScreen as any)._dynChildren as Phaser.GameObjects.GameObject[]).push(obj);
+    return obj;
+  }
+
+  private updateCharacterScreen(): void {
+    const p = this.currentPlayerState;
+    if (!p) return;
+    const px: number = (this.charScreen as any)._px;
+    const py: number = (this.charScreen as any)._py;
+    const panelW: number = (this.charScreen as any)._panelW;
+
+    // Clear previous dynamic content
+    this.clearCharScreenDyn();
+
+    const sp = Math.floor(p.skillPoints ?? 0);
+    const spBanner: Phaser.GameObjects.Text = (this.charScreen as any)._spBanner;
+    spBanner.setText(sp > 0 ? "Skill Points: " + sp : "");
+
+    let y = py + 42;
+
+    // ---- STAT SECTION ----
+    const statHeader = this.add.text(px + 20, y, "STATS", {
+        color: "#ffd700", fontSize: "14px", fontFamily: "monospace", fontStyle: "bold",
+        stroke: "#000000", strokeThickness: 3,
+      }).setOrigin(0, 0).setScrollFactor(0);
+    this.addDyn(statHeader);
+    y += statHeader.height + 6;
+
+    const pct = (v: number) => Math.round(v * 100) + "%";
+    const stats: [string, string, string][] = [
+      ["Health",      Math.round(p.currentHealth ?? 0) + " / " + Math.round(p.maxHealth ?? 0),  "health"],
+      ["Base ATK",    String(Math.round(p.attack ?? 0)),  "attack"],
+      ["Crit Rate",   pct(p.critRate ?? 0),   "critRate"],
+      ["Crit Damage", pct(p.critDamage ?? 0), "critDamage"],
+      ["Move Speed",  "+" + Math.round(((p.moveSpeed ?? 120) / 120 - 1) * 100) + "%", "moveSpeed"],
+    ];
+
+    for (const [label, val, statId] of stats) {
+      // Stat label + value
+      const line = this.add.text(px + 20, y, label + ":  " + val, {
+          color: "#ffffff", fontSize: "13px", fontFamily: "monospace",
+          stroke: "#000000", strokeThickness: 2,
+        }).setOrigin(0, 0).setScrollFactor(0);
+      this.addDyn(line);
+
+      // Upgrade button (gold [+]) if player has skill points
+      if (sp > 0) {
+        const btnX = px + panelW - 50;
+        // Build upgrade description for this stat
+        let upgradeDesc = "";
+        if (statId === "health") upgradeDesc = "+500 Max Health";
+        else if (statId === "attack") upgradeDesc = "+100 Attack";
+        else if (statId === "critRate") upgradeDesc = "+2% Crit Rate";
+        else if (statId === "critDamage") upgradeDesc = "+20% Crit Damage";
+        else if (statId === "moveSpeed") upgradeDesc = "+5% Move Speed";
+        const btn = this.add.text(btnX, y, "[ + ]", {
+            color: "#ffd700", fontSize: "14px", fontFamily: "monospace", fontStyle: "bold",
+            stroke: "#000000", strokeThickness: 3,
+          }).setOrigin(0, 0).setScrollFactor(0).setInteractive({ useHandCursor: true });
+        this.addDyn(btn);
+        // Hover tooltip showing what the upgrade gives (ABOVE the button)
+        btn.on("pointerover", () => {
+          btn.setStyle({ color: "#ffffff" });
+          const tt = this.add.text(btnX + 20, y - 6, upgradeDesc, {
+              color: "#88ccff", fontSize: "11px", fontFamily: "monospace",
+              backgroundColor: "#0a0a14", padding: { x: 6, y: 4 },
+            }).setOrigin(0, 1).setScrollFactor(0).setDepth(450);
+          (this.charScreen as any)._statHoverTT = tt;
+          this.charScreen.add(tt);
+        });
+        btn.on("pointerout", () => {
+          btn.setStyle({ color: "#ffd700" });
+          const tt = (this.charScreen as any)._statHoverTT;
+          if (tt) { tt.destroy(); (this.charScreen as any)._statHoverTT = null; }
+        });
+        btn.on("pointerdown", () => {
+          const statLabel = label;
+          this.showConfirm("Increase " + statLabel + " by " + upgradeDesc + "?\nAre you sure?", () => {
+            if (this.room) this.room.send(6, { stat: statId });
+            this.time.delayedCall(200, () => { if (this.charScreenVisible) this.updateCharacterScreen(); });
+          });
+        });
+      }
+      y += line.height + 4;
+    }
+
+    y += 16;
+
+    // ---- CARD SECTION ----
+    const cardHeader = this.add.text(px + 20, y, "EQUIPPED CARDS", {
+        color: "#ffd700", fontSize: "14px", fontFamily: "monospace", fontStyle: "bold",
+        stroke: "#000000", strokeThickness: 3,
+      }).setOrigin(0, 0).setScrollFactor(0);
+    this.addDyn(cardHeader);
+    y += cardHeader.height + 10;
+
+    // Get equipped skills (level > 0)
+    const equipped: string[] = [];
+    if (p.skillLevels && p.skillLevels.forEach) {
+      p.skillLevels.forEach((lvl: number, skill: string) => {
+        if (lvl > 0) equipped.push(skill);
+      });
+    }
+
+    // Lay out cards horizontally (like in the HUD)
+    const cardDispW = 48;
+    const cardDispH = 75;
+    const cardGap = 12;
+    const cardStartX = px + 30;
+
+    for (let i = 0; i < equipped.length; i++) {
+      const skillId = equipped[i];
+      const skillLvl = p.skillLevels.get(skillId) ?? 1;
+      const cardX = cardStartX + i * (cardDispW + cardGap);
+      const cardInfo = SKILL_CARDS_LOOKUP[skillId as keyof typeof SKILL_CARDS_LOOKUP];
+
+      // Card sprite from spritesheet
+      const frame = cardFrameForLevel(skillId as any, skillLvl);
+      const cardImg = this.add
+        .image(cardX, y, "card_sheet", frame)
+        .setDisplaySize(cardDispW, cardDispH)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setInteractive({ useHandCursor: true });
+      this.addDyn(cardImg);
+
+      // Level badge on the card
+      const lvlBg = this.add
+        .graphics()
+        .setScrollFactor(0);
+      lvlBg.fillStyle(0x000000, 0.7);
+      lvlBg.fillRoundedRect(cardX + cardDispW / 2 - 14, y + cardDispH - 18, 28, 14, 4);
+      this.addDyn(lvlBg);
+      const lvlText = this.add
+        .text(cardX + cardDispW / 2, y + cardDispH - 11, "Lv" + skillLvl, {
+          color: "#ffd700", fontSize: "9px", fontFamily: "monospace", fontStyle: "bold",
+          stroke: "#000000", strokeThickness: 2,
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0);
+      this.addDyn(lvlText);
+
+      // Hover tooltip for card
+      const title = cardInfo?.title ?? skillId;
+      const desc = cardInfo?.description ?? "";
+      const mods = skillMods(skillId as any, skillLvl);
+      const hoverLines = [title + "  (Lv " + skillLvl + ")", desc, ...mods];
+      const hoverStr = hoverLines.join("\n");
+      cardImg.on("pointerover", () => {
+        const tt = this.add.text(cardX, y + cardDispH + 4, hoverStr, {
+            color: "#ffffff", fontSize: "11px", fontFamily: "monospace",
+            backgroundColor: "#0a0a14", padding: { x: 6, y: 4 },
+            wordWrap: { width: 220 },
+          }).setOrigin(0, 0).setScrollFactor(0).setDepth(450);
+        (this.charScreen as any)._hoverTT = tt;
+        this.charScreen.add(tt);
+      });
+      cardImg.on("pointerout", () => {
+        const tt = (this.charScreen as any)._hoverTT;
+        if (tt) { tt.destroy(); (this.charScreen as any)._hoverTT = null; }
+      });
+
+      // Click to upgrade card
+      cardImg.on("pointerdown", () => {
+        if (sp <= 0) return;
+        // Build upgrade description for the card
+        let cardUpgradeDesc = "";
+        if (skillId === "bolter") {
+          cardUpgradeDesc = "+10% damage, +2% projectile speed";
+          const nextChain = (l: number) => { if (l >= 10) return 4; if (l >= 7) return 3; if (l >= 3) return 2; return 0; };
+          const curChain = nextChain(skillLvl);
+          const newChain = nextChain(skillLvl + 1);
+          if (newChain > curChain) cardUpgradeDesc += ", chain to " + newChain + " enemies";
+        } else if (skillId === "claw") {
+          cardUpgradeDesc = "+20% damage";
+          if (skillLvl + 1 >= 5) {
+            cardUpgradeDesc += ", inflict bleed (10 dmg/tick, 10s)";
+          }
+          if (skillLvl + 1 >= 5) cardUpgradeDesc += ", +10% hitbox size";
+        } else if (skillId === "slam") {
+          cardUpgradeDesc = "+20% damage, +10% hitbox size";
+          if (skillLvl + 1 >= 5) cardUpgradeDesc += ", bypasses walls";
+        } else {
+          cardUpgradeDesc = "upgrade to level " + (skillLvl + 1);
+        }
+        this.showConfirm(title + ": " + cardUpgradeDesc + "\nAre you sure you want to upgrade the card?", () => {
+          if (this.room) this.room.send(7, { skill: skillId });
+          this.time.delayedCall(200, () => { if (this.charScreenVisible) this.updateCharacterScreen(); });
+        });
+      });
+    }
+
+    // ---- Level / XP info below cards ----
+    y += cardDispH + 20;
+    const level = Math.floor(p.level ?? 1);
+    const currentXp = Math.floor(p.currentXp ?? 0);
+    const xpToLevelUp = Math.floor(p.xpToLevelUp ?? 0);
+    const xpRemaining = Math.max(0, xpToLevelUp - currentXp);
+    const xpInfo = this.add.text(px + 20, y, [
+      "Level: " + level + "    XP: " + currentXp + " / " + xpToLevelUp,
+      "XP to next level: " + xpRemaining,
+    ].join("\n"), {
+        color: "#aaaaff", fontSize: "12px", fontFamily: "monospace",
+        stroke: "#000000", strokeThickness: 2,
+      }).setOrigin(0, 0).setScrollFactor(0);
+    this.addDyn(xpInfo);
   }
 
   // ============================================================
@@ -2566,9 +3281,35 @@ export class GameScene extends Phaser.Scene {
       }
       this.clawEntities = {};
 
+      // Serialize player state for the next map
+      let playerState: any = null;
+      if (this.currentPlayerState) {
+        const p = this.currentPlayerState;
+        const skillLevels: Record<string, number> = {};
+        if (p.skillLevels && p.skillLevels.forEach) {
+          p.skillLevels.forEach((lvl: number, skill: string) => {
+            skillLevels[skill] = lvl;
+          });
+        }
+        playerState = {
+          level: p.level,
+          currentXp: p.currentXp,
+          xpToLevelUp: p.xpToLevelUp,
+          maxHealth: p.maxHealth,
+          currentHealth: p.maxHealth,  // heal to full on transition
+          attack: p.attack,
+          critRate: p.critRate,
+          critDamage: p.critDamage,
+          baseMoveSpeed: p.baseMoveSpeed,
+          moveSpeed: p.moveSpeed,
+          skillLevels,
+          skillPoints: p.skillPoints ?? 0,
+        };
+      }
+
       // Start the destination scene under a black cover so the player
       // never sees the unloaded map.
-      this.scene.launch(sceneKey, { fadeIn: true });
+      this.scene.launch(sceneKey, { playerState, fadeIn: true });
       this.scene.stop();
     });
 

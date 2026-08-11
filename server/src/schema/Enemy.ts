@@ -61,6 +61,12 @@ export class Enemy extends Schema {
   // ---- Visual state (synced) ----
   /** Server timestamp (ms) until which the enemy flashes white (recent hit). */
   @type("number") hitFlashUntil: number = 0;
+  /** Last damage taken (for floating damage numbers on client). */
+  @type("number") lastHitDamage: number = 0;
+  /** Whether the last hit was a critical hit. */
+  @type("boolean") lastHitCrit: boolean = false;
+  /** Monotonic counter — increments every time damage is taken (so client can detect new hits). */
+  @type("number") hitSeq: number = 0;
   /** True while the enemy is playing its attack animation. */
   @type("boolean") attacking: boolean = false;
   /** Server timestamp (ms) until which the attack animation is considered active. */
@@ -94,6 +100,10 @@ export class Enemy extends Schema {
   attackCooldownUntil: number = 0;
   /** Bleed damage per second (server-only; applied while bleedUntil > now). */
   bleedDps: number = 0;
+  /** Attacker who applied the bleed (for XP credit on kill). */
+  bleedAttackerId: string = "";
+  /** Accumulator for 0.5-second bleed ticks. */
+  bleedTickAccum: number = 0;
 
   /** Tracks total damage dealt by each player (sessionId -> damage). */
   damageTrackers: Map<string, number> = new Map();
@@ -171,7 +181,7 @@ export class Enemy extends Schema {
    * Respects incomingDamageMultiplier. Returns actual damage applied
    * (shield + health).
    */
-  takeDamage(rawDamage: number, sourceSkillId?: SkillId, attackerId?: string): number {
+  takeDamage(rawDamage: number, sourceSkillId?: SkillId, attackerId?: string, isCrit: boolean = false): number {
     let dmg = rawDamage * this.incomingDamageMultiplier;
     // Shield absorbs first
     if (this.shield > 0) {
@@ -198,6 +208,10 @@ export class Enemy extends Schema {
     this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
     this.pausedUntil = Math.max(this.pausedUntil, now + fbMs);
 
+    // Record last hit for client-side damage numbers.
+    this.lastHitDamage = Math.round(dmg);
+    this.lastHitCrit = isCrit;
+    this.hitSeq += 1;
     return rawDamage * this.incomingDamageMultiplier;
   }
 
@@ -221,21 +235,30 @@ export class Enemy extends Schema {
    * Returns true if the enemy died from bleed this tick.
    */
   tickBleed(dt: number): boolean {
-    if (this.bleedUntil <= 0) return false;
+    if (this.bleedUntil <= 0) { this.bleedTickAccum = 0; return false; }
     const now = Date.now();
     if (now >= this.bleedUntil) {
       this.bleedUntil = 0;
       this.bleedDps = 0;
+      this.bleedTickAccum = 0;
       return false;
     }
-    this.takeDamage(this.bleedDps * dt);
-    return this.isDead;
+    // Tick bleed damage twice per second (every 0.5s)
+    this.bleedTickAccum += dt;
+    if (this.bleedTickAccum >= 0.5) {
+      this.bleedTickAccum -= 0.5;
+      this.takeDamage(this.bleedDps, "claw", this.bleedAttackerId);
+      return this.isDead;
+    }
+    return false;
   }
 
   /** Inflict bleed: set dps + extend/until timestamp. */
-  applyBleed(dps: number, durationSec: number): void {
+  applyBleed(dps: number, durationSec: number, attackerId?: string): void {
     this.bleedDps = dps;
     this.bleedUntil = Date.now() + durationSec * 1000;
+    this.bleedTickAccum = 0;
+    if (attackerId) this.bleedAttackerId = attackerId;
   }
 
   /** Advance all skill cooldowns by `dt` seconds (clamped at 0). */

@@ -39,4 +39,10 @@ export class Slam extends Schema {
   hitCooldowns: Map<string, number> = new Map();
   /** Session/id of the caster. */
   ownerId: string = "";
+  /** L5+ slams bypass walls. */
+  bypassWalls: boolean = false;
+  /** Crit rate of the caster (fraction 0..1). */
+  critRate: number = 0;
+  /** Crit damage multiplier of the caster (e.g. 1.5 = 150%). */
+  critDamage: number = 1.5;
 }

@@ -57,6 +57,8 @@ export class Player extends Schema {
   @type("number") level: number = 1;
   @type("number") currentXp: number = 0;
   @type("number") xpToLevelUp: number = PLAYER_STATS.LEVELING.LEVEL_1_XP;
+  /** Unspent skill points (1 per level-up). Spend on stat or card upgrades. */
+  @type("number") skillPoints: number = 0;
 
   // ---- Base stats (NOT synced — server-authoritative source of truth) ----
   /** Permanent base move speed before debuffs/buffs. */
@@ -87,6 +89,12 @@ export class Player extends Schema {
 
   /** Server timestamp (ms) until which the player flashes white (hit feedback). */
   @type("number") hitFlashUntil: number = 0;
+  /** Last damage taken (for floating damage numbers on client). */
+  @type("number") lastHitDamage: number = 0;
+  /** Whether the last hit was a critical hit. */
+  @type("boolean") lastHitCrit: boolean = false;
+  /** Monotonic counter — increments every time damage is taken (so client can detect new hits). */
+  @type("number") hitSeq: number = 0;
   /** Server timestamp (ms) until which the player is frozen (hit-stun). */
   pausedUntil: number = 0;
 
@@ -98,6 +106,7 @@ export class Player extends Schema {
   skillCooldowns: Map<SkillId, number> = new Map();
   /** Bleed damage per second (server-only; applied while bleedUntil > now). */
   bleedDps: number = 0;
+  bleedTickAccum: number = 0;
 
   // ============================================================
   // LIFECYCLE
@@ -115,6 +124,7 @@ export class Player extends Schema {
     this.level = 1;
     this.currentXp = 0;
     this.xpToLevelUp = PLAYER_STATS.LEVELING.LEVEL_1_XP;
+    this.skillPoints = 0;
     // Reset transient multipliers
     this.speedMultiplier = 1.0;
     this.damageMultiplier = 1.0;
@@ -143,16 +153,20 @@ export class Player extends Schema {
 
   /** Apply damage to the player (respects incomingDamageMultiplier).
    *  sourceSkillId controls the hit-feedback duration (flash + pause). */
-  takeDamage(rawDamage: number, sourceSkillId?: SkillId): number {
+  takeDamage(rawDamage: number, sourceSkillId?: SkillId, _attackerId?: string, isCrit: boolean = false): number {
     const dmg = rawDamage * this.incomingDamageMultiplier;
     this.currentHealth = Math.max(0, this.currentHealth - dmg);
-    // Hit feedback: white flash + hit-stun, duration per skill.
-    if (sourceSkillId) {
-      const fbMs = getSkillHitFeedback(sourceSkillId);
-      const now = Date.now();
-      this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
-      this.pausedUntil = Math.max(this.pausedUntil, now + fbMs);
-    }
+    // Hit feedback: white flash + hit-stun — ALWAYS show on damage.
+    const fbMs = sourceSkillId
+      ? getSkillHitFeedback(sourceSkillId)
+      : 120;
+    const now = Date.now();
+    this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
+    this.pausedUntil = Math.max(this.pausedUntil, now + fbMs);
+    // Record last hit for client-side damage numbers.
+    this.lastHitDamage = Math.round(dmg);
+    this.lastHitCrit = isCrit;
+    this.hitSeq += 1;
     return dmg;
   }
 
@@ -190,6 +204,7 @@ export class Player extends Schema {
   /** Advance exactly one level: grow stats + bump the XP threshold. */
   private levelUp(): void {
     this.level += 1;
+    this.skillPoints += 1;
     const g = PLAYER_STATS.LEVELING.GROWTH;
     this.maxHealth += g.MAX_HEALTH;
     this.attack += g.ATTACK;
@@ -292,20 +307,28 @@ export class Player extends Schema {
    * Returns true if the player died from bleed this tick.
    */
   tickBleed(dt: number): boolean {
-    if (this.bleedUntil <= 0) return false;
+    if (this.bleedUntil <= 0) { this.bleedTickAccum = 0; return false; }
     const now = Date.now();
     if (now >= this.bleedUntil) {
       this.bleedUntil = 0;
       this.bleedDps = 0;
+      this.bleedTickAccum = 0;
       return false;
     }
-    this.takeDamage(this.bleedDps * dt);
-    return this.isDead;
+    // Tick bleed damage twice per second (every 0.5s)
+    this.bleedTickAccum += dt;
+    if (this.bleedTickAccum >= 0.5) {
+      this.bleedTickAccum -= 0.5;
+      this.takeDamage(this.bleedDps, "claw");
+      return this.isDead;
+    }
+    return false;
   }
 
   /** Inflict bleed: set dps + until timestamp. */
   applyBleed(dps: number, durationSec: number): void {
     this.bleedDps = dps;
     this.bleedUntil = Date.now() + durationSec * 1000;
+    this.bleedTickAccum = 0;
   }
 }

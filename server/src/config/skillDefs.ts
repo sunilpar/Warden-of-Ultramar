@@ -1,28 +1,6 @@
 /**
  * Skill Definitions (Server-Authoritative Behavior)
  * =================================================
- * Central definition of how each skill BEHAVES. This is the server-side
- * source of truth for damage, cooldown, projectile speed, chain, color
- * tiers, etc. Skills are SHARED between players and enemies — the same
- * skill id behaves identically regardless of caster (only the caster's
- * stats + the skill's level change the numbers).
- *
- * The client has its own copy of the card-ART data (client skillDefs.ts);
- * behavior lives here so it's authoritative and identical for everyone.
- *
- * DAMAGE MODEL
- *   finalDamage = casterAttack
- *               * SKILL.attackFactor           (per-skill base factor)
- *               * levelFactor(skillLevel)      (growth with skill level)
- *               * casterDamageMultiplier       (buffs/debuffs, e.g. +200%)
- *
- * BOLTER (implemented now)
- *   - Fires a bullet toward the caster's aim direction.
- *   - Player bullets hit ENEMIES ONLY (never other players, never self).
- *   - Enemy bullets hit PLAYERS + OTHER ENEMIES (never the caster itself).
- *   - Chain (skill level > 3): on hit, damage is halved and the bullet
- *     continues in the same direction. Chain count = skillLevel - 3.
- *   - Color tiers (cosmetic, synced to client): 1-3 white, 3-5 yellow, 5+ blue.
  */
 
 export type SkillId =
@@ -36,48 +14,52 @@ export type SkillId =
   | "shock"
   | "heal";
 
-/** Max skill level (caps upgrading for testing). */
+/** Max skill level. */
 export const MAX_SKILL_LEVEL = 10;
 
-/** Visual color tier for a bolter bullet, derived from its skill level. */
 export type BolterColorTier = "yellow" | "blue" | "purple";
+
+// Helper to get a numeric value that might be a function
+function num(
+  v: number | ((skillLevel: number) => number),
+  skillLevel: number,
+): number {
+  if (typeof v === "function") return v(skillLevel);
+  return v;
+}
+
+// Helper to get a boolean value that might be a function
+function bool(
+  v: boolean | ((skillLevel: number) => boolean),
+  skillLevel: number,
+): boolean {
+  if (typeof v === "function") return v(skillLevel);
+  return v;
+}
 
 export interface SkillDef {
   id: SkillId;
-  /** Base cooldown in seconds (at skill level 1). */
   cooldown: number;
-  /** Base attack factor: finalDamage = casterAttack * attackFactor * levelFactor * dmgMult. */
   attackFactor: number;
-  /** Hit feedback duration in ms (white flash + hit-stun freeze). */
-  hitFeedbackMs?: number;
+  damageMultiplierPerLevel?: number;
+  hitFeedbackMs?: number | ((skillLevel: number) => number);
 }
 
 export interface BolterDef extends SkillDef {
   id: "bolter";
-  /** Projectile speed in px/sec. */
-  projectileSpeed: number;
-  /** Projectile radius in px (for hit detection). */
+  projectileSpeed: number | ((skillLevel: number) => number);
   projectileRadius: number;
-  /** Max travel distance in px before the bullet despawns. */
   maxRange: number;
-  /** Skill level above which chaining is enabled. */
   chainUnlockLevel: number;
-  /** Number of chain bounces = max(0, skillLevel - chainUnlockLevel). */
   chainCount: (skillLevel: number) => number;
 }
 
-
 export interface ClawDef extends SkillDef {
   id: "claw";
-  /** Cone half-angle (radians) per tier. Full cone = 2 * halfAngle. */
   coneHalfAngle: (skillLevel: number) => number;
-  /** Cone reach (px) per tier. */
   range: (skillLevel: number) => number;
-  /** Skill level at which bleed is unlocked. */
   bleedUnlockLevel: number;
-  /** Bleed damage per second (applied while active). */
   bleedDps: (skillLevel: number) => number;
-  /** Bleed duration in seconds. */
   bleedDuration: (skillLevel: number) => number;
 }
 
@@ -85,66 +67,153 @@ export interface SlamDef extends SkillDef {
   id: "slam";
   range: (skillLevel: number) => number;
   speed: number;
-  halfWidth: number;
-  halfHeight: number;
+  halfWidth: number | ((skillLevel: number) => number);
+  halfHeight: number | ((skillLevel: number) => number);
+  bypassWalls?: (skillLevel: number) => boolean;
   hitInterval: number;
 }
 
-export const SKILL_DEFS = {
-  bolter: {
-    id: "bolter",
-    cooldown: 0.5,
-    attackFactor: 2.0,
-    projectileSpeed: 520,
-    projectileRadius: 6,
-    maxRange: 900,
-    chainUnlockLevel: 3,
-    chainCount: (lvl: number) => Math.max(0, lvl - 3),
-    hitFeedbackMs: 100,
+/**
+ * Bolter:
+ * - +10% damage per level (default levelFactor)
+ * - Projectile speed: +2% per level
+ * - Chain counts: L3-6=2 chains, L7-9=3 chains, L10=4 chains
+ */
+const BOLTER: BolterDef = {
+  id: "bolter",
+  cooldown: 0.5,
+  attackFactor: 2.0,
+  projectileSpeed: (lvl: number) => Math.round(520 * Math.pow(1.02, lvl - 1)),
+  projectileRadius: 6,
+  maxRange: 900,
+  chainUnlockLevel: 3,
+  chainCount: (lvl: number) => {
+    if (lvl >= 10) return 4;
+    if (lvl >= 7) return 3;
+    if (lvl >= 3) return 2;
+    return 0;
   },
-  claw: {
-    id: "claw",
-    cooldown: 0.5,
-    attackFactor: 1.0,
-    coneHalfAngle: (lvl: number) => (clawTier(lvl) === "big" ? 0.9 : clawTier(lvl) === "mid" ? 0.7 : 0.5),
-    range: (lvl: number) => (clawTier(lvl) === "big" ? 110 : clawTier(lvl) === "mid" ? 85 : 60),
-    bleedUnlockLevel: 8,
-    bleedDps: (_lvl: number) => 20,
-    bleedDuration: (_lvl: number) => 4,
-    hitFeedbackMs: 120,
-  },
-  slam: {
-    id: "slam",
-    cooldown: 2.0,
-    attackFactor: 1.0,
-    range: (lvl: number) => (lvl >= 6 ? 200 : 120),
-    speed: 300,
-    halfWidth: 40,
-    halfHeight: 20,
-    hitInterval: 0.5,
-    hitFeedbackMs: 250,
-  },
-} as const;
+  hitFeedbackMs: 100,
+};
 
 /**
- * Per-skill damage growth with level. Linear multiplier: level 1 = 1.0x,
- * each level adds +10% (level 10 = 1.9x). Override per skill if needed.
+ * Claw:
+ * - +20% damage per level (damageMultiplierPerLevel)
+ * - Cone angle + range: +10% per level from L5-10
+ * - Hit feedback: +20% per level from L5-10
+ * - Bleed: L5 unlocks, 500 dps at L5, +100 dps per level, 10 sec at L5, +1 sec per level
  */
-export function levelFactor(_skillId: SkillId, skillLevel: number): number {
-  return 1.0 + 0.1 * Math.max(0, skillLevel - 1);
+const CLAW: ClawDef = {
+  id: "claw",
+  cooldown: 0.5,
+  attackFactor: 1.0,
+  damageMultiplierPerLevel: 0.2,
+  coneHalfAngle: (lvl: number) => {
+    const base = lvl >= 8 ? 0.9 : lvl >= 4 ? 0.7 : 0.5;
+    if (lvl >= 5 && lvl <= 10) {
+      const levelsAbove4 = lvl - 4;
+      return base * Math.pow(1.1, levelsAbove4);
+    }
+    return base;
+  },
+  range: (lvl: number) => {
+    const base = lvl >= 8 ? 110 : lvl >= 4 ? 85 : 60;
+    if (lvl >= 5 && lvl <= 10) {
+      const levelsAbove4 = lvl - 4;
+      return Math.round(base * Math.pow(1.1, levelsAbove4));
+    }
+    return base;
+  },
+  bleedUnlockLevel: 5,
+  bleedDps: (lvl: number) => {
+    if (lvl < 5) return 0;
+    return 10; // flat 10 damage per tick
+  },
+  bleedDuration: (lvl: number) => {
+    if (lvl < 5) return 0;
+    return 10; // flat 10 seconds
+  },
+  hitFeedbackMs: (lvl: number) => {
+    const base = 120;
+    if (lvl >= 5 && lvl <= 10) {
+      const levelsAbove4 = lvl - 4;
+      return Math.round(base * Math.pow(1.2, levelsAbove4));
+    }
+    return base;
+  },
+};
+
+/**
+ * Slam:
+ * - +20% damage per level (damageMultiplierPerLevel)
+ * - Hitbox: +10% per level from L3+
+ * - Hit feedback: +20% per level from L3-10
+ * - Bypass walls at L5+
+ */
+const SLAM: SlamDef = {
+  id: "slam",
+  cooldown: 2.0,
+  attackFactor: 1.0,
+  damageMultiplierPerLevel: 0.2,
+  range: (lvl: number) => (lvl >= 6 ? 200 : 120),
+  speed: 300,
+  halfWidth: (lvl: number) => {
+    const base = 40;
+    if (lvl >= 3) {
+      const levelsAbove2 = lvl - 2;
+      return Math.round(base * Math.pow(1.1, levelsAbove2));
+    }
+    return base;
+  },
+  halfHeight: (lvl: number) => {
+    const base = 20;
+    if (lvl >= 3) {
+      const levelsAbove2 = lvl - 2;
+      return Math.round(base * Math.pow(1.1, levelsAbove2));
+    }
+    return base;
+  },
+  bypassWalls: (lvl: number) => lvl >= 5,
+  hitInterval: 0.5,
+  hitFeedbackMs: (lvl: number) => {
+    const base = 250;
+    if (lvl >= 3 && lvl <= 10) {
+      const levelsAbove2 = lvl - 2;
+      return Math.round(base * Math.pow(1.2, levelsAbove2));
+    }
+    return base;
+  },
+};
+
+// Export as object with helper accessors that handle function values
+export const SKILL_DEFS: Record<string, SkillDef> & {
+  bolter: BolterDef;
+  claw: ClawDef;
+  slam: SlamDef;
+} = {
+  bolter: BOLTER,
+  claw: CLAW,
+  slam: SLAM,
+};
+
+/**
+ * Per-skill damage growth with level.
+ * Default: +10% per level.
+ * Override per skill via damageMultiplierPerLevel.
+ */
+export function levelFactor(skillId: SkillId, skillLevel: number): number {
+  const def = SKILL_DEFS[skillId];
+  const mult = def?.damageMultiplierPerLevel ?? 0.1;
+  return 1.0 + mult * Math.max(0, skillLevel - 1);
 }
 
-/**
- * Compute the final damage a skill deals given the caster's attack stat,
- * the skill level, and the caster's outgoing damage multiplier.
- */
 export function computeSkillDamage(
   skillId: SkillId,
   casterAttack: number,
   skillLevel: number,
   casterDamageMultiplier: number,
 ): number {
-  const def = (SKILL_DEFS as Record<string, SkillDef>)[skillId];
+  const def = SKILL_DEFS[skillId];
   const af = def ? def.attackFactor : 1.0;
   return (
     casterAttack *
@@ -154,23 +223,31 @@ export function computeSkillDamage(
   );
 }
 
-/** Bolter bullet color tier based on skill level (synced for rendering). */
+/**
+ * Roll a critical hit and return the damage multiplier + crit flag.
+ * Returns { damage, isCrit }.
+ */
+export function applyCrit(
+  damage: number,
+  critRate: number,
+  critDamage: number,
+): { damage: number; isCrit: boolean } {
+  if (critRate > 0 && Math.random() < critRate) {
+    return { damage: damage * critDamage, isCrit: true };
+  }
+  return { damage, isCrit: false };
+}
+
 export function bolterColorTier(skillLevel: number): BolterColorTier {
   if (skillLevel >= 8) return "purple";
   if (skillLevel >= 4) return "blue";
   return "yellow";
 }
 
-/** Chain damage multiplier for the Nth hit (0 = first target). Halve each. */
 export function chainDamageMultiplier(chainIndex: number): number {
   return Math.pow(0.5, chainIndex);
 }
 
-// ============================================================
-// CLAW TIER + BLEED
-// ============================================================
-
-/** Claw visual/damage tier. small (1-3), mid (4-7), big (8-10). */
 export type ClawTier = "small" | "mid" | "big";
 
 export function clawTier(skillLevel: number): ClawTier {
@@ -179,22 +256,58 @@ export function clawTier(skillLevel: number): ClawTier {
   return "small";
 }
 
-/** True if this skill level inflicts bleed (tier "big"). */
 export function clawInflictsBleed(skillLevel: number): boolean {
-  return skillLevel >= (SKILL_DEFS.claw as ClawDef).bleedUnlockLevel;
+  return skillLevel >= CLAW.bleedUnlockLevel;
 }
 
-/** The typed claw definition helper. */
-export const CLAW_DEF: ClawDef = SKILL_DEFS.claw as ClawDef;
-
-/** The bolter definition (typed helper). */
-export const BOLTER_DEF: BolterDef = SKILL_DEFS.bolter;
-
-/** The slam definition (typed helper). */
-export const SLAM_DEF: SlamDef = SKILL_DEFS.slam as SlamDef;
-
-/** Returns the hit-feedback duration (ms) for a given skill. */
-export function getSkillHitFeedback(skill: SkillId): number {
-  const def = (SKILL_DEFS as Record<string, { hitFeedbackMs?: number }>)[skill];
-  return def?.hitFeedbackMs ?? 80; // default 80ms
+/** Get bolter projectile speed (handles function or number). */
+export function getBolterSpeed(skillLevel: number): number {
+  return num(BOLTER.projectileSpeed, skillLevel);
 }
+
+/** Get slam halfWidth (handles function or number). */
+export function getSlamHalfWidth(skillLevel: number): number {
+  return num(SLAM.halfWidth, skillLevel);
+}
+
+/** Get slam halfHeight (handles function or number). */
+export function getSlamHalfHeight(skillLevel: number): number {
+  return num(SLAM.halfHeight, skillLevel);
+}
+
+/** Does this slam level bypass walls? */
+export function slamBypassesWalls(skillLevel: number): boolean {
+  return SLAM.bypassWalls ? bool(SLAM.bypassWalls, skillLevel) : false;
+}
+
+/** Get hit feedback ms for a skill at given level. */
+export function getSkillHitFeedback(skill: SkillId, skillLevel: number = 1): number {
+  const def = SKILL_DEFS[skill];
+  if (!def?.hitFeedbackMs) return 80;
+  return num(def.hitFeedbackMs, skillLevel);
+}
+
+/** Get claw cone half-angle for level. */
+export function getClawHalfAngle(skillLevel: number): number {
+  return CLAW.coneHalfAngle(skillLevel);
+}
+
+/** Get claw range for level. */
+export function getClawRange(skillLevel: number): number {
+  return CLAW.range(skillLevel);
+}
+
+/** Get claw bleed dps for level. */
+export function getClawBleedDps(skillLevel: number): number {
+  return CLAW.bleedDps(skillLevel);
+}
+
+/** Get claw bleed duration for level. */
+export function getClawBleedDuration(skillLevel: number): number {
+  return CLAW.bleedDuration(skillLevel);
+}
+
+// Typed helpers
+export const CLAW_DEF: ClawDef = CLAW;
+export const BOLTER_DEF: BolterDef = BOLTER;
+export const SLAM_DEF: SlamDef = SLAM;

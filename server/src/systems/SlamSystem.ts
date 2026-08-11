@@ -10,7 +10,7 @@ import { RoomState } from "../schema/RoomState";
 import { Player } from "../schema/Player";
 import { Enemy } from "../schema/Enemy";
 import { Slam, type SlamFaction } from "../schema/Slam";
-import { SLAM_DEF } from "../config/skillDefs";
+import { SLAM_DEF, applyCrit } from "../config/skillDefs";
 import type { CollisionResolver } from "./EnemySystem";
 
 export class SlamSystem {
@@ -63,6 +63,8 @@ export class SlamSystem {
     y: number,
     angle: number,
     skillLevel: number,
+    critRate: number = 0,
+    critDamage: number = 1.5,
   ): boolean {
     const range = SLAM_DEF.range(skillLevel);
     const vx = Math.cos(angle) * SLAM_DEF.speed;
@@ -79,9 +81,16 @@ export class SlamSystem {
     slam.faction = faction;
     slam.ownerId = ownerId;
     slam.remainingRange = range;
-    slam.halfWidth = SLAM_DEF.halfWidth;
-    slam.halfHeight = SLAM_DEF.halfHeight;
+    // halfWidth/halfHeight scale with skill level (+10% per level from L3+)
+    const hw = typeof SLAM_DEF.halfWidth === "function" ? SLAM_DEF.halfWidth(skillLevel) : SLAM_DEF.halfWidth;
+    const hh = typeof SLAM_DEF.halfHeight === "function" ? SLAM_DEF.halfHeight(skillLevel) : SLAM_DEF.halfHeight;
+    slam.halfWidth = hw;
+    slam.halfHeight = hh;
     slam.damage = 200; // base slam damage
+    // bypass walls at L5+
+    slam.bypassWalls = typeof SLAM_DEF.bypassWalls === "function" ? SLAM_DEF.bypassWalls(skillLevel) : false;
+    slam.critRate = critRate;
+    slam.critDamage = critDamage;
 
     const id = `slam_${this.nextId++}_${Date.now()}`;
     this.state.slams.set(id, slam);
@@ -109,7 +118,8 @@ export class SlamSystem {
         if (id === slam.ownerId || enemy.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
         if (this.rectContains(slam, enemy.x, enemy.y, enemy.collisionRadius)) {
-          enemy.takeDamage(slam.damage, "slam", slam.ownerId);
+          const c = applyCrit(slam.damage, slam.critRate, slam.critDamage);
+          enemy.takeDamage(c.damage, "slam", slam.ownerId, c.isCrit);
             slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });
@@ -119,7 +129,8 @@ export class SlamSystem {
         if (id === slam.ownerId || player.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
         if (this.rectContains(slam, player.x, player.y, 10)) {
-          player.takeDamage(slam.damage, "slam");
+          const c2 = applyCrit(slam.damage, slam.critRate, slam.critDamage);
+          player.takeDamage(c2.damage, "slam", undefined, c2.isCrit);
             slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });
@@ -127,7 +138,8 @@ export class SlamSystem {
         if (id === slam.ownerId || enemy.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
         if (this.rectContains(slam, enemy.x, enemy.y, enemy.collisionRadius)) {
-          enemy.takeDamage(slam.damage, "slam", slam.ownerId);
+          const c = applyCrit(slam.damage, slam.critRate, slam.critDamage);
+          enemy.takeDamage(c.damage, "slam", slam.ownerId, c.isCrit);
             slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });
@@ -186,8 +198,10 @@ export class SlamSystem {
     player.y = resolved.y;
   }
 
-  /** True if the slam center is inside a solid tile. */
+  /** True if the slam center is inside a solid tile (unless bypassWalls). */
   private hitsWall(slam: Slam): boolean {
+    // L5+ slams bypass walls
+    if ((slam as any).bypassWalls) return false;
     const res = this.mapSystem.resolveTileCollision(slam.x, slam.y, slam.halfHeight);
     return Math.hypot(res.x - slam.x, res.y - slam.y) > 0.01;
   }

@@ -135,6 +135,9 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 64,
       },
     );
+
+    // ---- Map info button icon ----
+    this.load.image("map_info_icon", "assets/40k icon2.png");
   }
   create() {
     // Draw the menu background stretched to fill the screen

@@ -46,6 +46,10 @@ export class Projectile extends Schema {
   hitSet: Set<string | number> = new Set();
   /** Session/id of the caster (never damage the caster itself). */
   ownerId: string = "";
+  /** Crit rate of the caster (fraction 0..1). */
+  critRate: number = 0;
+  /** Crit damage multiplier of the caster (e.g. 1.5 = 150%). */
+  critDamage: number = 1.5;
 }
 
 export interface CastAim {

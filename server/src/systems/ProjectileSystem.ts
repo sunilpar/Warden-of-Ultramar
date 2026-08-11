@@ -24,6 +24,7 @@ import {
   BOLTER_DEF,
   SKILL_DEFS,
   computeSkillDamage,
+  applyCrit,
   bolterColorTier,
   chainDamageMultiplier,
   type SkillId,
@@ -104,10 +105,13 @@ export class ProjectileSystem {
     attack: number,
     skillLevel: number,
     damageMultiplier: number,
+    critRate: number = 0,
+    critDamage: number = 1.5,
   ): boolean {
     const def = BOLTER_DEF;
-    const vx = Math.cos(angle) * def.projectileSpeed;
-    const vy = Math.sin(angle) * def.projectileSpeed;
+    const speed = typeof def.projectileSpeed === "function" ? def.projectileSpeed(skillLevel) : def.projectileSpeed;
+    const vx = Math.cos(angle) * speed;
+    const vy = Math.sin(angle) * speed;
     if (Math.hypot(vx, vy) < 0.0001) return false;
 
     const proj = new Projectile();
@@ -123,6 +127,8 @@ export class ProjectileSystem {
     proj.radius = def.projectileRadius;
     proj.remainingRange = def.maxRange;
     proj.chainRemaining = def.chainCount(skillLevel);
+    proj.critRate = critRate;
+    proj.critDamage = critDamage;
     proj.damage = computeSkillDamage(
       "bolter",
       attack,
@@ -200,14 +206,15 @@ export class ProjectileSystem {
 
   /** Apply the projectile's damage to a target id (player or enemy). */
   private applyDamage(proj: Projectile, targetId: string): void {
+    const { damage, isCrit } = applyCrit(proj.damage, proj.critRate, proj.critDamage);
     const player = this.state.players.get(targetId);
     if (player) {
-      player.takeDamage(proj.damage, "bolter");
+      player.takeDamage(damage, "bolter", undefined, isCrit);
       return;
     }
     const enemy = this.state.enemies.get(targetId);
     if (enemy) {
-      enemy.takeDamage(proj.damage, "bolter", proj.ownerId);
+      enemy.takeDamage(damage, "bolter", proj.ownerId, isCrit);
     }
   }
 

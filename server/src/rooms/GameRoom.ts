@@ -29,6 +29,13 @@ import { ClawSystem } from "../systems/ClawSystem";
 import { SlamSystem } from "../systems/SlamSystem";
 import { LAYERED_MAP } from "../config/layeredMap";
 import { SKILL_DEFS, MAX_SKILL_LEVEL, type SkillId } from "../config/skillDefs";
+import {
+  MAP_MODIFIERS,
+  MAP_INFO,
+  applyPlayerModifiers,
+  applyEnemyModifiers,
+  type ModifierId,
+} from "../config/modifiers";
 
 export class GameRoom extends Room {
   state = new RoomState();
@@ -42,6 +49,7 @@ export class GameRoom extends Room {
   private slamSystem!: SlamSystem;
   /** Spawn zones that have already triggered (one-time spawn each). */
   private spawnedZones = new Set<number>();
+  private activeModifiers: ModifierId[] = MAP_MODIFIERS["game_room"] ?? [];
   /** Last reported viewport (world rect) per player session. */
   private viewports = new Map<string, { x: number; y: number; w: number; h: number }>();
 
@@ -67,6 +75,21 @@ export class GameRoom extends Room {
       }
     });
 
+    // ---- Map metadata for client display ----
+    this.setMetadata({
+      mapName: MAP_INFO["game_room"]?.name ?? "Unknown",
+      mapDescription: MAP_INFO["game_room"]?.description ?? "",
+      modifiers: this.activeModifiers.map(id => {
+        const defs: Record<string, { id: string; title: string; description: string }> = {
+          swift_movement: { id, title: "Swift Movement", description: "All entities move 30% faster." },
+          veteran_enemies: { id, title: "Veteran Enemies", description: "Enemies have +50% HP and +25% ATK." },
+          rich_loot: { id, title: "Rich Loot", description: "Double XP, improved loot rarity." },
+          glass_cannon: { id, title: "Glass Cannon", description: "2x damage, 50% less health." },
+          regeneration: { id, title: "Regeneration", description: "Regenerate 5 HP/sec." },
+        };
+        return defs[id] ?? { id, title: id, description: "" };
+      }),
+    });
     console.log(
       "GameRoom created with layered map:",
       `${LAYERED_MAP.cols}x${LAYERED_MAP.rows} tiles`,
@@ -122,13 +145,13 @@ export class GameRoom extends Room {
         }
       }
       if (touched) {
-        this.enemySystem.spawn(
-          Math.random() < 0.5 ? "tyranid" : "orck",
+        const spawnId = this.enemySystem.spawn(Math.random() < 0.5 ? "tyranid" : "orck",
           z.x + z.width / 2,
           z.y + z.height / 2,
-          GAME_CONFIG.ENEMY.DEFAULT_LEVEL,
-        );
-        this.spawnedZones.add(i);
+          GAME_CONFIG.ENEMY.DEFAULT_LEVEL,);
+        const spawnedEnemy = this.state.enemies.get(spawnId);
+        if (spawnedEnemy) applyEnemyModifiers(spawnedEnemy, this.activeModifiers);
+              this.spawnedZones.add(i);
       }
     }
   }
@@ -195,6 +218,8 @@ export class GameRoom extends Room {
         // Award XP: killer gets 100%, other damagers get 50%.
         this.awardKillXp(enemy);
       }
+      // Despawn any slams/projectiles owned by this enemy.
+      if (this.enemySystem) this.enemySystem.cleanupOnEnemyDeath(id);
       this.state.enemies.delete(id);
     }
   }
@@ -229,6 +254,8 @@ export class GameRoom extends Room {
           player.attack,
           level,
           player.damageMultiplier,
+          player.critRate,
+          player.critDamage,
         );
         if (fired) {
           player.startSkillCooldown(skill, SKILL_DEFS.bolter.cooldown);
@@ -244,12 +271,16 @@ export class GameRoom extends Room {
           level,
           player.damageMultiplier,
           10,
+          player.critRate,
+          player.critDamage,
         );
         player.startSkillCooldown(skill, SKILL_DEFS.claw.cooldown);
       } else if (skill === "slam") {
         this.slamSystem.castSlam(
           client.sessionId, "player", player.x, player.y, msg.angle,
           level,
+          player.critRate,
+          player.critDamage,
         );
         player.startSkillCooldown(skill, SKILL_DEFS.slam.cooldown);
       }
@@ -289,35 +320,105 @@ export class GameRoom extends Room {
       player.setSkillLevel("slam", 1);
     },
 
-    // Map transition XP reward (map1 → map2: +{xp} XP).
+    // Map transition XP reward (map1 -> map2: +500 XP).
     5: (client: Client, _msg: any) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
       player.addXp(500);
-      console.log(`Player ${client.sessionId} earned ${500} XP for map transition (map1 → map2)`);
+      console.log(`Player ${client.sessionId} earned 500 XP for map transition (map1 -> map2)`);
     },
-  };
+
+      // ---- Spend skill point on a stat upgrade ----
+      6: (client: Client, msg: { stat: string }) => {
+        const player = this.state.players.get(client.sessionId);
+        if (!player || player.skillPoints <= 0) return;
+        const stat = msg.stat;
+        if (stat === "health") {
+          player.maxHealth += 500;
+          player.currentHealth += 500;
+        } else if (stat === "attack") {
+          player.attack += 100;
+        } else if (stat === "critRate") {
+          player.critRate += 0.02;
+        } else if (stat === "critDamage") {
+          player.critDamage += 0.20;
+        } else if (stat === "moveSpeed") {
+          player.speedMultiplier += 0.05;
+          player.recalcDerivedStats();
+        } else {
+          return;
+        }
+        player.skillPoints -= 1;
+        player.recalcDerivedStats();
+      },
+
+      // ---- Spend skill point on a card upgrade ----
+      7: (client: Client, msg: { skill: SkillId }) => {
+        const player = this.state.players.get(client.sessionId);
+        if (!player || player.skillPoints <= 0) return;
+        const cur = player.getSkillLevel(msg.skill);
+        if (cur <= 0) return;
+        if (cur >= MAX_SKILL_LEVEL) return;
+        player.upgradeSkill(msg.skill);
+        player.skillPoints -= 1;
+      },
+
+      // ---- Test: grant a skill point (debug key 9) ----
+      8: (client: Client, _msg: any) => {
+        const player = this.state.players.get(client.sessionId);
+        if (!player) return;
+        player.skillPoints += 1;
+        console.log(`Player ${client.sessionId} granted test skill point (total: ${player.skillPoints})`);
+      },
+    };
 
   // ============================================================
   // CONNECTION LIFECYCLE
   // ============================================================
 
-  onJoin(client: Client, _options: any) {
-    console.log("Player joined:", client.sessionId);
+  onJoin(client: Client, options: any) {
+    console.log("Player joined GameRoom:", client.sessionId);
 
     const player = new Player();
-    player.initBaseStats();
-    // Give the joining player the bolter at level 1 (slot 1 default).
-    player.setSkillLevel("bolter", 1);
-    player.setSkillLevel("claw", 1);
-    player.setSkillLevel("slam", 1);
+
+    // Check if this is a player transferring from another map
+    const ps = options?.playerState;
+    if (ps) {
+      // Restore player state from previous map
+      player.level = ps.level ?? 1;
+      player.currentXp = ps.currentXp ?? 0;
+      player.xpToLevelUp = ps.xpToLevelUp ?? 1000;
+      player.maxHealth = ps.maxHealth ?? 1000;
+      player.currentHealth = ps.currentHealth ?? player.maxHealth;
+      player.attack = ps.attack ?? 100;
+      player.critRate = ps.critRate ?? 0.1;
+      player.critDamage = ps.critDamage ?? 1.5;
+      player.baseMoveSpeed = ps.baseMoveSpeed ?? 120;
+      // Recompute speedMultiplier so percentage upgrades survive map transitions.
+      if (player.baseMoveSpeed > 0) {
+        player.speedMultiplier = (ps.moveSpeed ?? player.baseMoveSpeed) / player.baseMoveSpeed;
+      }      player.skillPoints = ps.skillPoints ?? 0;
+      // Restore skill levels
+      if (ps.skillLevels) {
+        for (const [skill, lvl] of Object.entries(ps.skillLevels)) {
+          player.setSkillLevel(skill as any, lvl as number);
+        }
+      }
+    } else {
+      // Fresh player
+      player.initBaseStats();
+      player.setSkillLevel("bolter", 1);
+      player.setSkillLevel("claw", 1);
+      player.setSkillLevel("slam", 1);
+    }
+
+    applyPlayerModifiers(player, this.activeModifiers);
     const spawn = this.mapSystem.getSpawnPoint();
     player.x = spawn.x;
     player.y = spawn.y;
 
     this.state.players.set(client.sessionId, player);
   }
-
   onLeave(client: Client, _code: number) {
     console.log("Player left:", client.sessionId);
     this.state.players.delete(client.sessionId);
