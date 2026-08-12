@@ -52,6 +52,8 @@ export class Player extends Schema {
   @type("number") critRate: number = PLAYER_STATS.BASE.CRIT_RATE;
   /** Crit damage multiplier (1.5 = 150% of base damage). */
   @type("number") critDamage: number = PLAYER_STATS.BASE.CRIT_DAMAGE;
+  /** Defence, fraction 0..1 (0.2 = take 20% less damage). Ignored on crits. */
+  @type("number") defence: number = PLAYER_STATS.BASE.DEFENCE;
 
   // ---- Progression (synced) ----
   @type("number") level: number = 1;
@@ -86,6 +88,12 @@ export class Player extends Schema {
   @type("number") slamCooldownEndsAt: number = 0;
   /** Server timestamp (ms) when claw comes off cooldown (for client HUD). */
   @type("number") clawCooldownEndsAt: number = 0;
+  /** Server timestamp (ms) when heal comes off cooldown (for client HUD, L5+). */
+  @type("number") healCooldownEndsAt: number = 0;
+  /** Kill count towards next heal charge (L1-4 mode). Resets to 0 at killsToRecharge. */
+  @type("number") healKills: number = 0;
+  /** True if heal is ready to cast (for client HUD display). */
+  @type("boolean") healReady: boolean = true;
 
   /** Server timestamp (ms) until which the player flashes white (hit feedback). */
   @type("number") hitFlashUntil: number = 0;
@@ -121,6 +129,7 @@ export class Player extends Schema {
     this.attack = PLAYER_STATS.BASE.ATTACK;
     this.critRate = PLAYER_STATS.BASE.CRIT_RATE;
     this.critDamage = PLAYER_STATS.BASE.CRIT_DAMAGE;
+    this.defence = PLAYER_STATS.BASE.DEFENCE;
     this.level = 1;
     this.currentXp = 0;
     this.xpToLevelUp = PLAYER_STATS.LEVELING.LEVEL_1_XP;
@@ -129,6 +138,10 @@ export class Player extends Schema {
     this.speedMultiplier = 1.0;
     this.damageMultiplier = 1.0;
     this.incomingDamageMultiplier = 1.0;
+    // Reset heal state
+    this.healKills = 0;
+    this.healReady = true;
+    this.healCooldownEndsAt = 0;
   }
 
   // ============================================================
@@ -153,13 +166,18 @@ export class Player extends Schema {
 
   /** Apply damage to the player (respects incomingDamageMultiplier).
    *  sourceSkillId controls the hit-feedback duration (flash + pause). */
-  takeDamage(rawDamage: number, sourceSkillId?: SkillId, _attackerId?: string, isCrit: boolean = false): number {
-    const dmg = rawDamage * this.incomingDamageMultiplier;
+  takeDamage(
+    rawDamage: number,
+    sourceSkillId?: SkillId,
+    _attackerId?: string,
+    isCrit: boolean = false,
+  ): number {
+    // Defence reduces incoming damage, but is ignored on critical hits.
+    const mitigated = isCrit ? rawDamage : rawDamage * (1.0 - this.defence);
+    const dmg = mitigated * this.incomingDamageMultiplier;
     this.currentHealth = Math.max(0, this.currentHealth - dmg);
     // Hit feedback: white flash + hit-stun — ALWAYS show on damage.
-    const fbMs = sourceSkillId
-      ? getSkillHitFeedback(sourceSkillId)
-      : 120;
+    const fbMs = sourceSkillId ? getSkillHitFeedback(sourceSkillId) : 120;
     const now = Date.now();
     this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
     this.pausedUntil = Math.max(this.pausedUntil, now + fbMs);
@@ -244,6 +262,7 @@ export class Player extends Schema {
     this.skillLevels.set("bolter", 1);
     this.skillLevels.set("claw", 1);
     this.skillLevels.set("slam", 1);
+    this.skillLevels.set("heal", 1);
     this.skillCooldowns.clear();
     // Clear bleed
     this.bleedUntil = 0;
@@ -276,14 +295,21 @@ export class Player extends Schema {
     });
   }
 
-  /** True if a skill is off cooldown. */
+  /** True if a skill is off cooldown / ready to cast. */
   isSkillReady(skill: SkillId): boolean {
+    if (skill === "heal") return this.healReady;
     return (this.skillCooldowns.get(skill) ?? 0) <= 0;
   }
 
   /** Put a skill on cooldown (seconds). Also stamps the synced end-time
    *  for the bolter so the client HUD can render a fill animation. */
   startSkillCooldown(skill: SkillId, cooldown: number): void {
+    if (skill === "heal") {
+      this.healReady = false;
+      this.healCooldownEndsAt = Date.now() + cooldown * 1000;
+      this.skillCooldowns.set("heal", cooldown);
+      return;
+    }
     this.skillCooldowns.set(skill, cooldown);
     const endsAt = Date.now() + cooldown * 1000;
     if (skill === "bolter") {
@@ -292,6 +318,32 @@ export class Player extends Schema {
       this.slamCooldownEndsAt = endsAt;
     } else if (skill === "claw") {
       this.clawCooldownEndsAt = endsAt;
+    }
+  }
+
+  /** Tick heal cooldown (called each fixedTick). When cooldown expires, heal becomes ready again. */
+  tickHealCooldown(dt: number): void {
+    const healLvl = this.getSkillLevel("heal");
+    if (healLvl <= 0) return;
+    const cd = this.skillCooldowns.get("heal") ?? 0;
+    if (cd > 0) {
+      const newCd = Math.max(0, cd - dt);
+      this.skillCooldowns.set("heal", newCd);
+      if (newCd <= 0) {
+        this.healReady = true;
+        this.healCooldownEndsAt = 0;
+      }
+    }
+  }
+
+  /** Register a kill towards the heal charge (L1-4 mode). */
+  addHealKill(): void {
+    const healLvl = this.getSkillLevel("heal");
+    if (healLvl <= 0 || healLvl >= 5) return;
+    this.healKills += 1;
+    if (this.healKills >= 5) {
+      this.healReady = true;
+      this.healKills = 0;
     }
   }
 
@@ -307,7 +359,10 @@ export class Player extends Schema {
    * Returns true if the player died from bleed this tick.
    */
   tickBleed(dt: number): boolean {
-    if (this.bleedUntil <= 0) { this.bleedTickAccum = 0; return false; }
+    if (this.bleedUntil <= 0) {
+      this.bleedTickAccum = 0;
+      return false;
+    }
     const now = Date.now();
     if (now >= this.bleedUntil) {
       this.bleedUntil = 0;

@@ -48,6 +48,12 @@ export interface EnemyBaseConfig {
   moveSpeed: number;
   /** Base attack power. */
   attack: number;
+  /** Defence, fraction 0..1 (0.1 = take 10% less damage). Default 0. */
+  defence?: number;
+  /** Crit chance, fraction 0..1 (0.2 = 20%). Default 0. */
+  critRate?: number;
+  /** Crit damage multiplier (1.5 = 150% of base damage). Default 1.5. */
+  critDamage?: number;
   /** Shield (absorbs damage before health). 0 for now. */
   shield: number;
   /** Collision radius (matches the circle-vs-tile resolution). */
@@ -79,6 +85,8 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     maxHealth: 600,
     moveSpeed: 60, // 1px per tick
     attack: 40,
+    defence: 0.1, // 10% damage reduction
+    critRate: 0.2, // 20% crit chance
     shield: 0,
     collisionRadius: 9,
     skillPool: ["claw"],
@@ -98,6 +106,8 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     maxHealth: 500,
     moveSpeed: 45, // slower than tyranid
     attack: 40,
+    defence: 0.1, // 10% damage reduction
+    critRate: 0.2, // 20% crit chance
     shield: 0,
     collisionRadius: 16, // larger hitbox than tyranid
     skillPool: ["slam"],
@@ -107,7 +117,7 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
       moveSpeed: 0,
       attack: 8,
     },
-    xpReward: 200,
+    xpReward: 100,
   },
 };
 

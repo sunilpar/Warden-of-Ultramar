@@ -15,6 +15,7 @@ export const PLAYER_STATS = {
     ATTACK: 100,
     CRIT_RATE: 0.1, // 10% (stored as a fraction, 0..1)
     CRIT_DAMAGE: 1.5, // 150% of base damage (ie +50% on a crit)
+    DEFENCE: 0.0, // 0% damage reduction by default
   },
 
   /** Leveling */

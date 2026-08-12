@@ -111,6 +111,12 @@ export class GameScene extends Phaser.Scene {
   private clawCooldownFill!: Phaser.GameObjects.Rectangle;
   private clawCooldownFillBaseH: number = 0;
 
+  // ---- Heal card (slot 4) ----
+  private healCard!: Phaser.GameObjects.Image;
+  private localHealLevel: number = 1;
+  private healCooldownFill!: Phaser.GameObjects.Rectangle;
+  private healCooldownFillBaseH: number = 0;
+
   // ---- Skill-on-cooldown toast (shown above the HUD in light grey) ----
   private cooldownToast!: Phaser.GameObjects.Text;
 
@@ -240,7 +246,7 @@ export class GameScene extends Phaser.Scene {
     game2: {
       roomName: "game_room_2",
       mapData: LAYERED_MAP_2,
-      nextSceneKey: "game",  // Map2 exit goes back to Map1
+      nextSceneKey: "game", // Map2 exit goes back to Map1
     },
   };
 
@@ -328,6 +334,18 @@ export class GameScene extends Phaser.Scene {
         this.room.send(1, { skill: "claw", angle });
       });
 
+    // ---- "1" key casts heal skill ----
+    this.input.keyboard
+      ?.addKey(Phaser.Input.Keyboard.KeyCodes.ONE)
+      ?.on("down", () => {
+        if (!this.currentPlayer || !this.room) return;
+        if (!this.isSkillReady("heal")) {
+          this.showCooldownToast();
+          return;
+        }
+        this.room.send(1, { skill: "heal", angle: this.aimAngle });
+      });
+
     // ---- Resolve this scene's map + room config from its scene key ----
     const cfg =
       GameScene.CONFIGS[this.sys.settings.key] ?? GameScene.CONFIGS["game"];
@@ -387,6 +405,7 @@ export class GameScene extends Phaser.Scene {
     this.refreshBolterCard();
     this.refreshSlamCard();
     this.refreshClawCard();
+    this.refreshHealCard();
 
     // ---- F3 to toggle hitbox overlay ----
     this.hitboxToggleKey = this.input.keyboard.addKey(
@@ -496,6 +515,13 @@ export class GameScene extends Phaser.Scene {
               "clawCdEndsAt",
               player.clawCooldownEndsAt ?? 0,
             );
+            // Heal readiness + cooldown
+            this.currentPlayer.setData("healReady", player.healReady ?? true);
+            this.currentPlayer.setData(
+              "healCdEndsAt",
+              player.healCooldownEndsAt ?? 0,
+            );
+            this.currentPlayer.setData("healKills", player.healKills ?? 0);
             this.currentPlayer.setData(
               "hitFlashUntil",
               player.hitFlashUntil ?? 0,
@@ -506,7 +532,12 @@ export class GameScene extends Phaser.Scene {
             if (pseq !== pprev) {
               this.entityHitSeqs["__local__"] = pseq;
               if (player.lastHitDamage > 0) {
-                this.showDamageNumber(this.currentPlayer.x, this.currentPlayer.y, player.lastHitDamage, !!player.lastHitCrit);
+                this.showDamageNumber(
+                  this.currentPlayer.x,
+                  this.currentPlayer.y,
+                  player.lastHitDamage,
+                  !!player.lastHitCrit,
+                );
               }
             }
             // Sync slam level + card art
@@ -526,6 +557,15 @@ export class GameScene extends Phaser.Scene {
             if (clawLvl !== this.localClawLevel) {
               this.localClawLevel = clawLvl;
               this.refreshClawCard();
+            }
+            // Sync heal level + card art
+            const healLvl =
+              player.skillLevels && player.skillLevels.get
+                ? (player.skillLevels.get("heal") ?? 1)
+                : 1;
+            if (healLvl !== this.localHealLevel) {
+              this.localHealLevel = healLvl;
+              this.refreshHealCard();
             }
           }
         });
@@ -579,17 +619,28 @@ export class GameScene extends Phaser.Scene {
       const hpFill = this.add
         .rectangle(-hpW / 2, -42, hpW, hpH, 0xff3333)
         .setOrigin(0, 0.5);
+      // Enemy level text shown in front of (left of) the HP bar
+      const lvText = this.add
+        .text(-hpW / 2 - 4, -42, String(enemy.level ?? 1), {
+          color: "#ffffff",
+          fontSize: "9px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(1, 0.5);
       const hpBar = this.add
-        .container(enemy.x, enemy.y, [hpBg, hpFill])
+        .container(enemy.x, enemy.y, [hpBg, hpFill, lvText])
         .setDepth(5);
       this.enemyHpBars[enemyId] = hpBar;
 
       this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
 
-            // Initialize data so render loop works from the first frame.
+      // Initialize data so render loop works from the first frame.
       sprite.setData("hitFlashUntil", enemy.hitFlashUntil ?? 0);
       sprite.setData("hp", enemy.currentHealth);
       sprite.setData("maxHp", enemy.maxHealth);
+      sprite.setData("level", enemy.level ?? 1);
       sprite.setData("attacking", false);
 
       callbacks.onChange(enemy, () => {
@@ -598,6 +649,7 @@ export class GameScene extends Phaser.Scene {
         sprite.setData("facingRight", !!enemy.facingRight);
         sprite.setData("hp", enemy.currentHealth);
         sprite.setData("maxHp", enemy.maxHealth);
+        sprite.setData("level", enemy.level ?? 1);
         sprite.setData("hitFlashUntil", enemy.hitFlashUntil);
         sprite.setData("attacking", !!enemy.attacking);
         this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
@@ -607,13 +659,32 @@ export class GameScene extends Phaser.Scene {
         if (seq !== prev) {
           this.entityHitSeqs[enemyId] = seq;
           if (enemy.lastHitDamage > 0) {
-            this.showDamageNumber(enemy.x, enemy.y, enemy.lastHitDamage, !!enemy.lastHitCrit);
+            this.showDamageNumber(
+              enemy.x,
+              enemy.y,
+              enemy.lastHitDamage,
+              !!enemy.lastHitCrit,
+            );
           }
         }
       });
     });
 
-    callbacks.onRemove("enemies", (_enemy: any, enemyId: string) => {
+    callbacks.onRemove("enemies", (enemy: any, enemyId: string) => {
+      // Show killing blow damage number (often missed when enemy is one-shot)
+      if (enemy && enemy.lastHitDamage > 0) {
+        this.showDamageNumber(
+          enemy.x ?? this.enemyLastPos[enemyId]?.x ?? 0,
+          enemy.y ?? this.enemyLastPos[enemyId]?.y ?? 0,
+          enemy.lastHitDamage,
+          !!enemy.lastHitCrit,
+        );
+      }
+      // Spawn blood splat VFX at enemy death position
+      const dx = enemy?.x ?? this.enemyLastPos[enemyId]?.x ?? 0;
+      const dy = enemy?.y ?? this.enemyLastPos[enemyId]?.y ?? 0;
+      this.spawnBloodSplat(dx, dy);
+
       const entity = this.enemyEntities[enemyId];
       if (entity) {
         entity.destroy();
@@ -733,6 +804,39 @@ export class GameScene extends Phaser.Scene {
         sprite.anims.play(animKey);
         (sprite as any).castData = cast; // store for debug hitbox overlay
         this.clawEntities[castId] = sprite;
+      } else if (cast.skillId === "heal") {
+        // Heal VFX: green flash for self-heal (range=0), green circle for AoE
+        const radius = cast.range ?? 0;
+        if (radius > 0) {
+          // AoE heal circle — expanding green ring
+          const circle = this.add
+            .circle(cast.x, cast.y, radius, 0x00ff00, 0.2)
+            .setStrokeStyle(3, 0x00ff00, 0.8)
+            .setDepth(6);
+          this.tweens.add({
+            targets: circle,
+            alpha: 0,
+            scale: 1.3,
+            duration: 700,
+            ease: "Cubic.out",
+            onComplete: () => circle.destroy(),
+          });
+          this.clawEntities[castId] = circle as any;
+        } else {
+          // Self-heal green flash
+          const flash = this.add
+            .circle(cast.x, cast.y, 24, 0x00ff00, 0.6)
+            .setDepth(6);
+          this.tweens.add({
+            targets: flash,
+            alpha: 0,
+            scale: 2.5,
+            duration: 500,
+            ease: "Cubic.out",
+            onComplete: () => flash.destroy(),
+          });
+          this.clawEntities[castId] = flash as any;
+        }
       }
     });
 
@@ -785,10 +889,24 @@ export class GameScene extends Phaser.Scene {
     // Read playerState from previous scene (passed via scene.launch)
     const data = this.sys.settings.data as any;
     const playerState = data?.playerState ?? null;
+    console.log(
+      `[CONNECT] Scene "${this.sys.settings.key}" connecting to room "${this.roomName}" with playerState=${playerState ? "yes" : "no"}`,
+    );
     try {
-      this.room = await this.client.joinOrCreate(this.roomName, { playerState });
+      // Add a timeout so we don't hang on the loading screen forever
+      const roomPromise = this.client.joinOrCreate(this.roomName, {
+        playerState,
+      });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Room connection timeout")), 10000),
+      );
+      this.room = await Promise.race([roomPromise, timeoutPromise]);
+      console.log(
+        `[CONNECT] Connected to room "${this.roomName}" successfully`,
+      );
     } catch (e) {
       console.error("Failed to connect:", e);
+      this.room = null;
     }
   }
 
@@ -1108,6 +1226,31 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Place / refresh the heal card art in HUD slot 4. */
+  private refreshHealCard(): void {
+    if (!this.cardSlots || this.cardSlots.length < 4) return;
+    const slot = this.cardSlots[3];
+    const frame = cardFrameForLevel("heal", this.localHealLevel);
+    if (this.healCard) {
+      this.healCard.setFrame(frame);
+    } else {
+      this.healCard = this.add
+        .image(slot.x, slot.y, "card_sheet", frame)
+        .setOrigin(0, 0)
+        .setDisplaySize(slot.width, slot.height)
+        .setScrollFactor(0)
+        .setDepth(102);
+
+      this.healCooldownFill = this.add
+        .rectangle(slot.x, slot.y, slot.width, slot.height, 0x00ff00, 0.45)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(103)
+        .setVisible(false);
+      this.healCooldownFillBaseH = slot.height;
+    }
+  }
+
   /** Update the cooldown dim/fill overlay based on bolterCooldownEndsAt. */
   private updateBolterCooldownOverlay(): void {
     if (!this.bolterCard || !this.bolterCooldownFill || !this.currentPlayer)
@@ -1181,6 +1324,44 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Update heal card overlay: dim when not ready, show charge/cooldown fill. */
+  private updateHealCooldownOverlay(): void {
+    if (!this.healCard || !this.healCooldownFill || !this.currentPlayer) return;
+    const ready = (this.currentPlayer.data.get("healReady") as boolean) ?? true;
+    if (ready) {
+      this.healCard.setAlpha(1);
+      this.healCooldownFill.setVisible(false);
+      return;
+    }
+    // Not ready — check if it's cooldown-based (L5+) or kill-based (L1-4)
+    const endsAt = (this.currentPlayer.data.get("healCdEndsAt") as number) ?? 0;
+    const now = Date.now();
+    this.healCard.setAlpha(0.45);
+    this.healCooldownFill.setVisible(true);
+    if (endsAt > now) {
+      // Cooldown-based (L5+)
+      const totalMs = 10000;
+      const remaining = endsAt - now;
+      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
+      const h = this.healCooldownFillBaseH * fillPct;
+      this.healCooldownFill.setSize(this.healCard.displayWidth, h);
+      this.healCooldownFill.setPosition(
+        this.healCard.x,
+        this.healCard.y + this.healCooldownFillBaseH - h,
+      );
+    } else {
+      // Kill-based (L1-4): show partial fill based on kills
+      const kills = (this.currentPlayer.data.get("healKills") as number) ?? 0;
+      const fillPct = kills / 5;
+      const h = this.healCooldownFillBaseH * fillPct;
+      this.healCooldownFill.setSize(this.healCard.displayWidth, h);
+      this.healCooldownFill.setPosition(
+        this.healCard.x,
+        this.healCard.y + this.healCooldownFillBaseH - h,
+      );
+    }
+  }
+
   private showBolterTooltip(slot: Phaser.GameObjects.Rectangle): void {
     const mods = skillMods("bolter", this.localBolterLevel);
     const atk = this.currentPlayer ? Math.round(this.localPlayerAttack()) : 0;
@@ -1224,10 +1405,12 @@ export class GameScene extends Phaser.Scene {
     return (this.currentPlayer.data.get("attack") as number) ?? 100;
   }
 
-  /** True if a skill is off cooldown (client-side check using the synced
-   *  bolterCooldownEndsAt for the bolter). Claw has no synced end-time. */
-  private isSkillReady(skill: "bolter" | "claw" | "slam"): boolean {
+  /** True if a skill is off cooldown (client-side check using synced data). */
+  private isSkillReady(skill: "bolter" | "claw" | "slam" | "heal"): boolean {
     if (!this.currentPlayer) return true;
+    if (skill === "heal") {
+      return (this.currentPlayer.data.get("healReady") as boolean) ?? true;
+    }
     const key = skill + "CdEndsAt";
     const endsAt = (this.currentPlayer.data.get(key) as number) ?? 0;
     return endsAt <= Date.now();
@@ -1597,10 +1780,7 @@ export class GameScene extends Phaser.Scene {
     // ---- Skill point badge (blinking dot top-right of level text) ----
     const badgeX = levelTextX + 16;
     const badgeY = cy - 10;
-    const badgeBg = this.add
-      .graphics()
-      .setScrollFactor(0)
-      .setDepth(154);
+    const badgeBg = this.add.graphics().setScrollFactor(0).setDepth(154);
     badgeBg.fillStyle(0xffd700, 1);
     badgeBg.fillCircle(badgeX, badgeY, 6);
     badgeBg.lineStyle(2, 0xffffff, 0.9);
@@ -1823,7 +2003,12 @@ export class GameScene extends Phaser.Scene {
    * Spawn a floating damage number at a world position.
    * White for normal hits, gold + larger for critical hits.
    */
-  private showDamageNumber(x: number, y: number, damage: number, isCrit: boolean): void {
+  private showDamageNumber(
+    x: number,
+    y: number,
+    damage: number,
+    isCrit: boolean,
+  ): void {
     if (damage <= 0) return;
     // Random horizontal jitter so overlapping hits don't stack perfectly.
     const jitterX = (Math.random() - 0.5) * 16;
@@ -1832,7 +2017,10 @@ export class GameScene extends Phaser.Scene {
     // Reuse an idle text from the pool.
     let txt: Phaser.GameObjects.Text | null = null;
     for (const t of this.damageTexts) {
-      if (t.alpha === 0 || !t.active) { txt = t; break; }
+      if (t.alpha === 0 || !t.active) {
+        txt = t;
+        break;
+      }
     }
     if (!txt) {
       if (this.damageTexts.length >= 30) {
@@ -1853,7 +2041,9 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    const label = isCrit ? Math.round(damage) + "!" : String(Math.round(damage));
+    const label = isCrit
+      ? Math.round(damage) + "!"
+      : String(Math.round(damage));
     txt
       .setPosition(x + jitterX, startY)
       .setText(label)
@@ -1871,7 +2061,9 @@ export class GameScene extends Phaser.Scene {
       duration: isCrit ? 900 : 700,
       ease: "Cubic.out",
       delay: 80,
-      onComplete: () => { txt!.setActive(false); },
+      onComplete: () => {
+        txt!.setActive(false);
+      },
     });
   }
 
@@ -1960,7 +2152,11 @@ export class GameScene extends Phaser.Scene {
       .setDepth(150)
       .setInteractive({ useHandCursor: true });
 
-    this.mapInfoTooltip = this.add.container(0, 0).setDepth(300).setVisible(false).setScrollFactor(0);
+    this.mapInfoTooltip = this.add
+      .container(0, 0)
+      .setDepth(300)
+      .setVisible(false)
+      .setScrollFactor(0);
 
     const tooltipW = 320;
     const padding = 12;
@@ -2044,26 +2240,29 @@ export class GameScene extends Phaser.Scene {
           })
           .setOrigin(0, 0)
           .setScrollFactor(0);
-      this.mapInfoTooltip.add(modText);
-      tooltipY += modText.height + 2;
-      const modDesc = this.add
-        .text(padding + 14, tooltipY, desc, {
-          color: "#aaaaaa",
-          fontSize: "10px",
-          fontFamily: "monospace",
-          wordWrap: { width: tooltipW - padding * 2 - 14 },
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(0, 0)
-        .setScrollFactor(0);
-      this.mapInfoTooltip.add(modDesc);
-      tooltipY += modDesc.height + 4;
+        this.mapInfoTooltip.add(modText);
+        tooltipY += modText.height + 2;
+        const modDesc = this.add
+          .text(padding + 14, tooltipY, desc, {
+            color: "#aaaaaa",
+            fontSize: "10px",
+            fontFamily: "monospace",
+            wordWrap: { width: tooltipW - padding * 2 - 14 },
+            stroke: "#000000",
+            strokeThickness: 2,
+          })
+          .setOrigin(0, 0)
+          .setScrollFactor(0);
+        this.mapInfoTooltip.add(modDesc);
+        tooltipY += modDesc.height + 4;
       }
     }
 
     const tooltipH = tooltipY + padding;
-    this.mapInfoTooltipBg = this.add.graphics().setScrollFactor(0).setDepth(299);
+    this.mapInfoTooltipBg = this.add
+      .graphics()
+      .setScrollFactor(0)
+      .setDepth(299);
     this.mapInfoTooltipBg.fillStyle(0x0a0a14, 0.92);
     this.mapInfoTooltipBg.fillRoundedRect(0, 0, tooltipW, tooltipH, 8);
     this.mapInfoTooltipBg.lineStyle(2, 0x4a6a8a, 0.8);
@@ -2075,8 +2274,12 @@ export class GameScene extends Phaser.Scene {
     const ty = this.mapInfoButton.y - ICON_SIZE / 2;
     this.mapInfoTooltip.setPosition(tx, ty);
 
-    this.mapInfoButton.on("pointerover", () => { this.mapInfoTooltip.setVisible(true); });
-    this.mapInfoButton.on("pointerout", () => { this.mapInfoTooltip.setVisible(false); });
+    this.mapInfoButton.on("pointerover", () => {
+      this.mapInfoTooltip.setVisible(true);
+    });
+    this.mapInfoButton.on("pointerout", () => {
+      this.mapInfoTooltip.setVisible(false);
+    });
   }
 
   // ============================================================
@@ -2091,10 +2294,17 @@ export class GameScene extends Phaser.Scene {
     const px = Math.round((W - PANEL_W) / 2);
     const py = Math.round((H - PANEL_H) / 2);
 
-    this.charScreen = this.add.container(0, 0).setDepth(400).setVisible(false).setScrollFactor(0);
+    this.charScreen = this.add
+      .container(0, 0)
+      .setDepth(400)
+      .setVisible(false)
+      .setScrollFactor(0);
 
     // ---- Dim overlay ----
-    const overlay = this.add.rectangle(0, 0, W, H, 0x000000, 0.6).setOrigin(0, 0).setScrollFactor(0);
+    const overlay = this.add
+      .rectangle(0, 0, W, H, 0x000000, 0.6)
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
     overlay.setInteractive(); // block clicks going through
     overlay.on("pointerdown", () => {
       if (this.charScreenVisible) this.toggleCharacterScreen();
@@ -2110,24 +2320,44 @@ export class GameScene extends Phaser.Scene {
     this.charScreen.add(panelBg);
 
     // ---- Title ----
-    const titleText = this.add.text(px + PANEL_W / 2, py + 14, "CHARACTER", {
-        color: "#ffd700", fontSize: "20px", fontFamily: "monospace", fontStyle: "bold",
-        stroke: "#000000", strokeThickness: 4,
-      }).setOrigin(0.5, 0).setScrollFactor(0);
+    const titleText = this.add
+      .text(px + PANEL_W / 2, py + 14, "CHARACTER", {
+        color: "#ffd700",
+        fontSize: "20px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 4,
+      })
+      .setOrigin(0.5, 0)
+      .setScrollFactor(0);
     this.charScreen.add(titleText);
 
     // ---- Close hint + skill points display ----
-    const closeHint = this.add.text(px + PANEL_W - 12, py + 8, "[C] Close", {
-        color: "#888888", fontSize: "11px", fontFamily: "monospace",
-        stroke: "#000000", strokeThickness: 2,
-      }).setOrigin(1, 0).setScrollFactor(0);
+    const closeHint = this.add
+      .text(px + PANEL_W - 12, py + 8, "[C] Close", {
+        color: "#888888",
+        fontSize: "11px",
+        fontFamily: "monospace",
+        stroke: "#000000",
+        strokeThickness: 2,
+      })
+      .setOrigin(1, 0)
+      .setScrollFactor(0);
     this.charScreen.add(closeHint);
 
     // Skill points banner
-    const spBanner = this.add.text(px + 20, py + 8, "", {
-        color: "#ffd700", fontSize: "13px", fontFamily: "monospace", fontStyle: "bold",
-        stroke: "#000000", strokeThickness: 3,
-      }).setOrigin(0, 0).setScrollFactor(0);
+    const spBanner = this.add
+      .text(px + 20, py + 8, "", {
+        color: "#ffd700",
+        fontSize: "13px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
     this.charScreen.add(spBanner);
     (this.charScreen as any)._spBanner = spBanner;
 
@@ -2141,44 +2371,85 @@ export class GameScene extends Phaser.Scene {
     (this.charScreen as any)._dynChildren = [];
 
     // ---- C key to toggle ----
-    this.charScreenKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.C);
-    this.charScreenKey.on("down", () => { this.toggleCharacterScreen(); });
+    this.charScreenKey = this.input.keyboard.addKey(
+      Phaser.Input.Keyboard.KeyCodes.C,
+    );
+    this.charScreenKey.on("down", () => {
+      this.toggleCharacterScreen();
+    });
 
     // ---- ESC key to close ----
-    const escKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
+    const escKey = this.input.keyboard.addKey(
+      Phaser.Input.Keyboard.KeyCodes.ESC,
+    );
     escKey.on("down", () => {
       if (this.charScreenVisible) this.toggleCharacterScreen();
     });
 
     // ---- Key 9: test skill point ----
-    this.testSkillPointKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.NINE);
+    this.testSkillPointKey = this.input.keyboard.addKey(
+      Phaser.Input.Keyboard.KeyCodes.NINE,
+    );
     this.testSkillPointKey.on("down", () => {
       if (this.room) this.room.send(8, {});
     });
 
     // ---- Confirmation popup (reused, hidden by default) ----
-    this.confirmPopup = this.add.container(0, 0).setDepth(500).setVisible(false).setScrollFactor(0);
-    const cOverlay = this.add.rectangle(0, 0, W, H, 0x000000, 0.3).setOrigin(0, 0).setScrollFactor(0);
+    this.confirmPopup = this.add
+      .container(0, 0)
+      .setDepth(500)
+      .setVisible(false)
+      .setScrollFactor(0);
+    const cOverlay = this.add
+      .rectangle(0, 0, W, H, 0x000000, 0.3)
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
     cOverlay.setInteractive();
     const cBg = this.add.graphics().setScrollFactor(0);
-    const cW = 300, cH = 120;
-    const cx2 = Math.round((W - cW) / 2), cy2 = Math.round((H - cH) / 2);
+    const cW = 300,
+      cH = 120;
+    const cx2 = Math.round((W - cW) / 2),
+      cy2 = Math.round((H - cH) / 2);
     cBg.fillStyle(0x12121e, 0.97);
     cBg.fillRoundedRect(cx2, cy2, cW, cH, 10);
     cBg.lineStyle(2, 0x4a6a8a, 0.9);
     cBg.strokeRoundedRect(cx2, cy2, cW, cH, 10);
-    const cText = this.add.text(W / 2, cy2 + 18, "", {
-        color: "#ffffff", fontSize: "14px", fontFamily: "monospace", align: "center",
-        wordWrap: { width: cW - 40 }, stroke: "#000000", strokeThickness: 3,
-      }).setOrigin(0.5, 0).setScrollFactor(0);
-    const cYes = this.add.text(W / 2 - 50, cy2 + cH - 32, "[ YES ]", {
-        color: "#66bb6a", fontSize: "14px", fontFamily: "monospace", fontStyle: "bold",
-        stroke: "#000000", strokeThickness: 3,
-      }).setOrigin(0.5).setScrollFactor(0).setInteractive({ useHandCursor: true });
-    const cNo = this.add.text(W / 2 + 50, cy2 + cH - 32, "[ NO ]", {
-        color: "#ef5350", fontSize: "14px", fontFamily: "monospace", fontStyle: "bold",
-        stroke: "#000000", strokeThickness: 3,
-      }).setOrigin(0.5).setScrollFactor(0).setInteractive({ useHandCursor: true });
+    const cText = this.add
+      .text(W / 2, cy2 + 18, "", {
+        color: "#ffffff",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        align: "center",
+        wordWrap: { width: cW - 40 },
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5, 0)
+      .setScrollFactor(0);
+    const cYes = this.add
+      .text(W / 2 - 50, cy2 + cH - 32, "[ YES ]", {
+        color: "#66bb6a",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setInteractive({ useHandCursor: true });
+    const cNo = this.add
+      .text(W / 2 + 50, cy2 + cH - 32, "[ NO ]", {
+        color: "#ef5350",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setInteractive({ useHandCursor: true });
     this.confirmPopup.add([cOverlay, cBg, cText, cYes, cNo]);
     (this.confirmPopup as any)._text = cText;
     (this.confirmPopup as any)._yes = cYes;
@@ -2255,7 +2526,8 @@ export class GameScene extends Phaser.Scene {
       this.updateCharacterScreen();
     } else {
       // Clean up dynamic children
-      const dyn: Phaser.GameObjects.GameObject[] = (this.charScreen as any)._dynChildren ?? [];
+      const dyn: Phaser.GameObjects.GameObject[] =
+        (this.charScreen as any)._dynChildren ?? [];
       for (const d of dyn) d.destroy();
       (this.charScreen as any)._dynChildren = [];
     }
@@ -2264,15 +2536,20 @@ export class GameScene extends Phaser.Scene {
 
   /** Destroy all dynamic children of the char screen. */
   private clearCharScreenDyn(): void {
-    const dyn: Phaser.GameObjects.GameObject[] = (this.charScreen as any)._dynChildren ?? [];
+    const dyn: Phaser.GameObjects.GameObject[] =
+      (this.charScreen as any)._dynChildren ?? [];
     for (const d of dyn) d.destroy();
     (this.charScreen as any)._dynChildren = [];
   }
 
   /** Add a GameObject to char screen and track it as dynamic. */
-  private addDyn(obj: Phaser.GameObjects.GameObject): Phaser.GameObjects.GameObject {
+  private addDyn(
+    obj: Phaser.GameObjects.GameObject,
+  ): Phaser.GameObjects.GameObject {
     this.charScreen.add(obj);
-    ((this.charScreen as any)._dynChildren as Phaser.GameObjects.GameObject[]).push(obj);
+    (
+      (this.charScreen as any)._dynChildren as Phaser.GameObjects.GameObject[]
+    ).push(obj);
     return obj;
   }
 
@@ -2287,34 +2564,57 @@ export class GameScene extends Phaser.Scene {
     this.clearCharScreenDyn();
 
     const sp = Math.floor(p.skillPoints ?? 0);
-    const spBanner: Phaser.GameObjects.Text = (this.charScreen as any)._spBanner;
+    const spBanner: Phaser.GameObjects.Text = (this.charScreen as any)
+      ._spBanner;
     spBanner.setText(sp > 0 ? "Skill Points: " + sp : "");
 
     let y = py + 42;
 
     // ---- STAT SECTION ----
-    const statHeader = this.add.text(px + 20, y, "STATS", {
-        color: "#ffd700", fontSize: "14px", fontFamily: "monospace", fontStyle: "bold",
-        stroke: "#000000", strokeThickness: 3,
-      }).setOrigin(0, 0).setScrollFactor(0);
+    const statHeader = this.add
+      .text(px + 20, y, "STATS", {
+        color: "#ffd700",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
     this.addDyn(statHeader);
     y += statHeader.height + 6;
 
     const pct = (v: number) => Math.round(v * 100) + "%";
     const stats: [string, string, string][] = [
-      ["Health",      Math.round(p.currentHealth ?? 0) + " / " + Math.round(p.maxHealth ?? 0),  "health"],
-      ["Base ATK",    String(Math.round(p.attack ?? 0)),  "attack"],
-      ["Crit Rate",   pct(p.critRate ?? 0),   "critRate"],
+      [
+        "Health",
+        Math.round(p.currentHealth ?? 0) + " / " + Math.round(p.maxHealth ?? 0),
+        "health",
+      ],
+      ["Base ATK", String(Math.round(p.attack ?? 0)), "attack"],
+      ["Defence", pct(p.defence ?? 0), "defence"],
+      ["Crit Rate", pct(p.critRate ?? 0), "critRate"],
       ["Crit Damage", pct(p.critDamage ?? 0), "critDamage"],
-      ["Move Speed",  "+" + Math.round(((p.moveSpeed ?? 120) / 120 - 1) * 100) + "%", "moveSpeed"],
+      [
+        "Move Speed",
+        "+" + Math.round(((p.moveSpeed ?? 120) / 120 - 1) * 100) + "%",
+        "moveSpeed",
+      ],
     ];
 
     for (const [label, val, statId] of stats) {
       // Stat label + value
-      const line = this.add.text(px + 20, y, label + ":  " + val, {
-          color: "#ffffff", fontSize: "13px", fontFamily: "monospace",
-          stroke: "#000000", strokeThickness: 2,
-        }).setOrigin(0, 0).setScrollFactor(0);
+      const line = this.add
+        .text(px + 20, y, label + ":  " + val, {
+          color: "#ffffff",
+          fontSize: "13px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
       this.addDyn(line);
 
       // Upgrade button (gold [+]) if player has skill points
@@ -2323,36 +2623,60 @@ export class GameScene extends Phaser.Scene {
         // Build upgrade description for this stat
         let upgradeDesc = "";
         if (statId === "health") upgradeDesc = "+500 Max Health";
-        else if (statId === "attack") upgradeDesc = "+100 Attack";
+        else if (statId === "attack") upgradeDesc = "+20 Attack";
+        else if (statId === "defence") upgradeDesc = "+2% Defence";
         else if (statId === "critRate") upgradeDesc = "+2% Crit Rate";
         else if (statId === "critDamage") upgradeDesc = "+20% Crit Damage";
         else if (statId === "moveSpeed") upgradeDesc = "+5% Move Speed";
-        const btn = this.add.text(btnX, y, "[ + ]", {
-            color: "#ffd700", fontSize: "14px", fontFamily: "monospace", fontStyle: "bold",
-            stroke: "#000000", strokeThickness: 3,
-          }).setOrigin(0, 0).setScrollFactor(0).setInteractive({ useHandCursor: true });
+        const btn = this.add
+          .text(btnX, y, "[ + ]", {
+            color: "#ffd700",
+            fontSize: "14px",
+            fontFamily: "monospace",
+            fontStyle: "bold",
+            stroke: "#000000",
+            strokeThickness: 3,
+          })
+          .setOrigin(0, 0)
+          .setScrollFactor(0)
+          .setInteractive({ useHandCursor: true });
         this.addDyn(btn);
         // Hover tooltip showing what the upgrade gives (ABOVE the button)
         btn.on("pointerover", () => {
           btn.setStyle({ color: "#ffffff" });
-          const tt = this.add.text(btnX + 20, y - 6, upgradeDesc, {
-              color: "#88ccff", fontSize: "11px", fontFamily: "monospace",
-              backgroundColor: "#0a0a14", padding: { x: 6, y: 4 },
-            }).setOrigin(0, 1).setScrollFactor(0).setDepth(450);
+          const tt = this.add
+            .text(btnX + 20, y - 6, upgradeDesc, {
+              color: "#88ccff",
+              fontSize: "11px",
+              fontFamily: "monospace",
+              backgroundColor: "#0a0a14",
+              padding: { x: 6, y: 4 },
+            })
+            .setOrigin(0, 1)
+            .setScrollFactor(0)
+            .setDepth(450);
           (this.charScreen as any)._statHoverTT = tt;
           this.charScreen.add(tt);
         });
         btn.on("pointerout", () => {
           btn.setStyle({ color: "#ffd700" });
           const tt = (this.charScreen as any)._statHoverTT;
-          if (tt) { tt.destroy(); (this.charScreen as any)._statHoverTT = null; }
+          if (tt) {
+            tt.destroy();
+            (this.charScreen as any)._statHoverTT = null;
+          }
         });
         btn.on("pointerdown", () => {
           const statLabel = label;
-          this.showConfirm("Increase " + statLabel + " by " + upgradeDesc + "?\nAre you sure?", () => {
-            if (this.room) this.room.send(6, { stat: statId });
-            this.time.delayedCall(200, () => { if (this.charScreenVisible) this.updateCharacterScreen(); });
-          });
+          this.showConfirm(
+            "Increase " + statLabel + " by " + upgradeDesc + "?\nAre you sure?",
+            () => {
+              if (this.room) this.room.send(6, { stat: statId });
+              this.time.delayedCall(200, () => {
+                if (this.charScreenVisible) this.updateCharacterScreen();
+              });
+            },
+          );
         });
       }
       y += line.height + 4;
@@ -2361,10 +2685,17 @@ export class GameScene extends Phaser.Scene {
     y += 16;
 
     // ---- CARD SECTION ----
-    const cardHeader = this.add.text(px + 20, y, "EQUIPPED CARDS", {
-        color: "#ffd700", fontSize: "14px", fontFamily: "monospace", fontStyle: "bold",
-        stroke: "#000000", strokeThickness: 3,
-      }).setOrigin(0, 0).setScrollFactor(0);
+    const cardHeader = this.add
+      .text(px + 20, y, "EQUIPPED CARDS", {
+        color: "#ffd700",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
     this.addDyn(cardHeader);
     y += cardHeader.height + 10;
 
@@ -2386,7 +2717,8 @@ export class GameScene extends Phaser.Scene {
       const skillId = equipped[i];
       const skillLvl = p.skillLevels.get(skillId) ?? 1;
       const cardX = cardStartX + i * (cardDispW + cardGap);
-      const cardInfo = SKILL_CARDS_LOOKUP[skillId as keyof typeof SKILL_CARDS_LOOKUP];
+      const cardInfo =
+        SKILL_CARDS_LOOKUP[skillId as keyof typeof SKILL_CARDS_LOOKUP];
 
       // Card sprite from spritesheet
       const frame = cardFrameForLevel(skillId as any, skillLvl);
@@ -2399,16 +2731,24 @@ export class GameScene extends Phaser.Scene {
       this.addDyn(cardImg);
 
       // Level badge on the card
-      const lvlBg = this.add
-        .graphics()
-        .setScrollFactor(0);
+      const lvlBg = this.add.graphics().setScrollFactor(0);
       lvlBg.fillStyle(0x000000, 0.7);
-      lvlBg.fillRoundedRect(cardX + cardDispW / 2 - 14, y + cardDispH - 18, 28, 14, 4);
+      lvlBg.fillRoundedRect(
+        cardX + cardDispW / 2 - 14,
+        y + cardDispH - 18,
+        28,
+        14,
+        4,
+      );
       this.addDyn(lvlBg);
       const lvlText = this.add
         .text(cardX + cardDispW / 2, y + cardDispH - 11, "Lv" + skillLvl, {
-          color: "#ffd700", fontSize: "9px", fontFamily: "monospace", fontStyle: "bold",
-          stroke: "#000000", strokeThickness: 2,
+          color: "#ffd700",
+          fontSize: "9px",
+          fontFamily: "monospace",
+          fontStyle: "bold",
+          stroke: "#000000",
+          strokeThickness: 2,
         })
         .setOrigin(0.5)
         .setScrollFactor(0);
@@ -2421,17 +2761,27 @@ export class GameScene extends Phaser.Scene {
       const hoverLines = [title + "  (Lv " + skillLvl + ")", desc, ...mods];
       const hoverStr = hoverLines.join("\n");
       cardImg.on("pointerover", () => {
-        const tt = this.add.text(cardX, y + cardDispH + 4, hoverStr, {
-            color: "#ffffff", fontSize: "11px", fontFamily: "monospace",
-            backgroundColor: "#0a0a14", padding: { x: 6, y: 4 },
+        const tt = this.add
+          .text(cardX, y + cardDispH + 4, hoverStr, {
+            color: "#ffffff",
+            fontSize: "11px",
+            fontFamily: "monospace",
+            backgroundColor: "#0a0a14",
+            padding: { x: 6, y: 4 },
             wordWrap: { width: 220 },
-          }).setOrigin(0, 0).setScrollFactor(0).setDepth(450);
+          })
+          .setOrigin(0, 0)
+          .setScrollFactor(0)
+          .setDepth(450);
         (this.charScreen as any)._hoverTT = tt;
         this.charScreen.add(tt);
       });
       cardImg.on("pointerout", () => {
         const tt = (this.charScreen as any)._hoverTT;
-        if (tt) { tt.destroy(); (this.charScreen as any)._hoverTT = null; }
+        if (tt) {
+          tt.destroy();
+          (this.charScreen as any)._hoverTT = null;
+        }
       });
 
       // Click to upgrade card
@@ -2441,10 +2791,16 @@ export class GameScene extends Phaser.Scene {
         let cardUpgradeDesc = "";
         if (skillId === "bolter") {
           cardUpgradeDesc = "+10% damage, +2% projectile speed";
-          const nextChain = (l: number) => { if (l >= 10) return 4; if (l >= 7) return 3; if (l >= 3) return 2; return 0; };
+          const nextChain = (l: number) => {
+            if (l >= 10) return 4;
+            if (l >= 7) return 3;
+            if (l >= 3) return 2;
+            return 0;
+          };
           const curChain = nextChain(skillLvl);
           const newChain = nextChain(skillLvl + 1);
-          if (newChain > curChain) cardUpgradeDesc += ", chain to " + newChain + " enemies";
+          if (newChain > curChain)
+            cardUpgradeDesc += ", chain to " + newChain + " enemies";
         } else if (skillId === "claw") {
           cardUpgradeDesc = "+20% damage";
           if (skillLvl + 1 >= 5) {
@@ -2457,10 +2813,18 @@ export class GameScene extends Phaser.Scene {
         } else {
           cardUpgradeDesc = "upgrade to level " + (skillLvl + 1);
         }
-        this.showConfirm(title + ": " + cardUpgradeDesc + "\nAre you sure you want to upgrade the card?", () => {
-          if (this.room) this.room.send(7, { skill: skillId });
-          this.time.delayedCall(200, () => { if (this.charScreenVisible) this.updateCharacterScreen(); });
-        });
+        this.showConfirm(
+          title +
+            ": " +
+            cardUpgradeDesc +
+            "\nAre you sure you want to upgrade the card?",
+          () => {
+            if (this.room) this.room.send(7, { skill: skillId });
+            this.time.delayedCall(200, () => {
+              if (this.charScreenVisible) this.updateCharacterScreen();
+            });
+          },
+        );
       });
     }
 
@@ -2470,13 +2834,24 @@ export class GameScene extends Phaser.Scene {
     const currentXp = Math.floor(p.currentXp ?? 0);
     const xpToLevelUp = Math.floor(p.xpToLevelUp ?? 0);
     const xpRemaining = Math.max(0, xpToLevelUp - currentXp);
-    const xpInfo = this.add.text(px + 20, y, [
-      "Level: " + level + "    XP: " + currentXp + " / " + xpToLevelUp,
-      "XP to next level: " + xpRemaining,
-    ].join("\n"), {
-        color: "#aaaaff", fontSize: "12px", fontFamily: "monospace",
-        stroke: "#000000", strokeThickness: 2,
-      }).setOrigin(0, 0).setScrollFactor(0);
+    const xpInfo = this.add
+      .text(
+        px + 20,
+        y,
+        [
+          "Level: " + level + "    XP: " + currentXp + " / " + xpToLevelUp,
+          "XP to next level: " + xpRemaining,
+        ].join("\n"),
+        {
+          color: "#aaaaff",
+          fontSize: "12px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 2,
+        },
+      )
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
     this.addDyn(xpInfo);
   }
 
@@ -2892,11 +3267,17 @@ export class GameScene extends Phaser.Scene {
       if (hpBar) {
         hpBar.setPosition(entity.x, entity.y);
         const fill = hpBar.getAt(1) as Phaser.GameObjects.Rectangle;
+        const lvText = hpBar.getAt(2) as Phaser.GameObjects.Text;
         const hp = entity.data.get("hp") as number;
         const maxHp = entity.data.get("maxHp") as number;
         if (fill && maxHp > 0) {
           const pct = Math.max(0, hp / maxHp);
           fill.scaleX = pct;
+        }
+        if (lvText) {
+          const lv = entity.data.get("level") as number;
+          const newText = String(lv ?? 1);
+          if (lvText.text !== newText) lvText.setText(newText);
         }
       }
     }
@@ -2949,6 +3330,7 @@ export class GameScene extends Phaser.Scene {
     this.updateBolterCooldownOverlay();
     this.updateSlamCooldownOverlay();
     this.updateClawCooldownOverlay();
+    this.updateHealCooldownOverlay();
     // ---- Sync viewport to server (for viewport-activated spawning) ----
     // ---- Update live entity hitbox overlay ----
     this.updateEntityHitboxes();
@@ -3085,18 +3467,56 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  /** Spawn a blood splat mist effect at the given position. */
+  private spawnBloodSplat(x: number, y: number): void {
+    // Central dark-red burst
+    const splat = this.add.circle(x, y, 8, 0x8b0000, 0.7).setDepth(6);
+    this.tweens.add({
+      targets: splat,
+      scale: 3,
+      alpha: 0,
+      duration: 450,
+      ease: "Cubic.out",
+      onComplete: () => splat.destroy(),
+    });
+    // Scattered small blood particles
+    for (let i = 0; i < 6; i++) {
+      const angle = (Math.PI * 2 * i) / 6 + Math.random() * 0.5;
+      const dist = 12 + Math.random() * 16;
+      const px = x + Math.cos(angle) * dist;
+      const py = y + Math.sin(angle) * dist;
+      const drop = this.add
+        .circle(px, py, 2 + Math.random() * 2, 0xaa1111, 0.6)
+        .setDepth(6);
+      this.tweens.add({
+        targets: drop,
+        x: x + Math.cos(angle) * (dist + 10),
+        y: y + Math.sin(angle) * (dist + 10),
+        alpha: 0,
+        duration: 350 + Math.random() * 200,
+        ease: "Cubic.out",
+        onComplete: () => drop.destroy(),
+      });
+    }
+  }
+
   /**
    * Returns true if the local player's center is inside this map's exit zone.
    */
   private isOnExitTile(): boolean {
     if (!this.currentPlayer) return false;
     const ex = this.mapData.exitPoint;
-    return (
+    const inside =
       this.currentPlayer.x >= ex.x &&
       this.currentPlayer.x <= ex.x + ex.width &&
       this.currentPlayer.y >= ex.y &&
-      this.currentPlayer.y <= ex.y + ex.height
-    );
+      this.currentPlayer.y <= ex.y + ex.height;
+    if (inside) {
+      console.log(
+        `[EXIT] Player at (${this.currentPlayer.x}, ${this.currentPlayer.y}) inside exit zone (${ex.x},${ex.y},${ex.width},${ex.height}), nextScene=${this.nextSceneKey}, transitioning=${this.transitioning}`,
+      );
+    }
+    return inside;
   }
 
   /**
@@ -3185,6 +3605,39 @@ export class GameScene extends Phaser.Scene {
 
     // Button actions
     respawnBtn.on("pointerdown", () => {
+      // If dead in map2 (game2), transition back to map1 with fresh state.
+      if (this.sys.settings.key === "game2") {
+        this.hideDeathScreen();
+        // Leave the room and start a fresh map1 scene (no playerState = fresh player)
+        try {
+          this.room?.leave();
+        } catch (_e) {
+          /* ignore */
+        }
+        this.room = null;
+        // Clear all local entity sprites
+        for (const id in this.playerEntities) {
+          this.playerEntities[id]?.destroy();
+          delete this.playerEntities[id];
+        }
+        for (const id in this.enemyEntities) {
+          this.enemyEntities[id]?.destroy();
+          delete this.enemyEntities[id];
+        }
+        for (const id in this.projectileEntities) {
+          this.projectileEntities[id]?.destroy();
+          delete this.projectileEntities[id];
+        }
+        for (const id in this.clawEntities) {
+          this.clawEntities[id]?.destroy();
+          delete this.clawEntities[id];
+        }
+        // Launch a fresh game scene (no playerState = base stats)
+        this.scene.launch("game", { playerState: null, fadeIn: true });
+        this.scene.stop();
+        return;
+      }
+      // Normal respawn (same map)
       if (this.room) {
         this.room.send(4, {});
       }
@@ -3230,6 +3683,9 @@ export class GameScene extends Phaser.Scene {
   private transitionToScene(sceneKey: string): void {
     if (this.transitioning) return;
     this.transitioning = true;
+    console.log(
+      `[TRANSITION] Starting transition from "${this.sys.settings.key}" to "${sceneKey}"`,
+    );
 
     const cam = this.cameras.main;
     // Duration of each fade half (ms). Total dark time ~= 2 * FADE_MS
@@ -3296,8 +3752,9 @@ export class GameScene extends Phaser.Scene {
           currentXp: p.currentXp,
           xpToLevelUp: p.xpToLevelUp,
           maxHealth: p.maxHealth,
-          currentHealth: p.maxHealth,  // heal to full on transition
+          currentHealth: p.currentHealth, // carry actual HP, not full
           attack: p.attack,
+          defence: p.defence ?? 0,
           critRate: p.critRate,
           critDamage: p.critDamage,
           baseMoveSpeed: p.baseMoveSpeed,
@@ -3309,6 +3766,9 @@ export class GameScene extends Phaser.Scene {
 
       // Start the destination scene under a black cover so the player
       // never sees the unloaded map.
+      console.log(
+        `[TRANSITION] Launching "${sceneKey}" with playerState, fadeIn: true`,
+      );
       this.scene.launch(sceneKey, { playerState, fadeIn: true });
       this.scene.stop();
     });

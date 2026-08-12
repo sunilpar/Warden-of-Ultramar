@@ -16,10 +16,7 @@
  */
 import { Schema, type } from "@colyseus/schema";
 import { type SkillId, getSkillHitFeedback } from "../config/skillDefs";
-import {
-  ENEMY_STATS,
-  type EnemyTypeId,
-} from "../config/enemyStats";
+import { ENEMY_STATS, type EnemyTypeId } from "../config/enemyStats";
 
 export class Enemy extends Schema {
   // ---- Identity (synced) ----
@@ -50,6 +47,12 @@ export class Enemy extends Schema {
 
   // ---- Combat (synced) ----
   @type("number") attack: number = 0;
+  /** Defence, fraction 0..1 (0.1 = take 10% less damage). Ignored on crits. */
+  @type("number") defence: number = 0;
+  /** Crit chance, fraction 0..1 (0.2 = 20%). */
+  @type("number") critRate: number = 0;
+  /** Crit damage multiplier (1.5 = 150% of base damage). */
+  @type("number") critDamage: number = 1.5;
   /** XP awarded when this enemy is killed. */
   @type("number") xpReward: number = 0;
 
@@ -131,6 +134,9 @@ export class Enemy extends Schema {
     this.baseMoveSpeed = cfg.moveSpeed + cfg.growth.moveSpeed * extraLevels;
     this.attack = cfg.attack + cfg.growth.attack * extraLevels;
     this.shield = cfg.shield;
+    this.defence = cfg.defence ?? 0;
+    this.critRate = cfg.critRate ?? 0;
+    this.critDamage = cfg.critDamage ?? 1.5;
     this.xpReward = cfg.xpReward;
     this.collisionRadius = cfg.collisionRadius;
 
@@ -181,8 +187,15 @@ export class Enemy extends Schema {
    * Respects incomingDamageMultiplier. Returns actual damage applied
    * (shield + health).
    */
-  takeDamage(rawDamage: number, sourceSkillId?: SkillId, attackerId?: string, isCrit: boolean = false): number {
-    let dmg = rawDamage * this.incomingDamageMultiplier;
+  takeDamage(
+    rawDamage: number,
+    sourceSkillId?: SkillId,
+    attackerId?: string,
+    isCrit: boolean = false,
+  ): number {
+    // Defence reduces incoming damage, but is ignored on critical hits.
+    const mitigated = isCrit ? rawDamage : rawDamage * (1.0 - this.defence);
+    let dmg = mitigated * this.incomingDamageMultiplier;
     // Shield absorbs first
     if (this.shield > 0) {
       const absorbed = Math.min(this.shield, dmg);
@@ -201,9 +214,7 @@ export class Enemy extends Schema {
 
     // Hit feedback: white flash + brief hit-stun pause.
     // Duration scales with skill power (e.g. slam > claw > bolter).
-    const fbMs = sourceSkillId
-      ? getSkillHitFeedback(sourceSkillId)
-      : 120;
+    const fbMs = sourceSkillId ? getSkillHitFeedback(sourceSkillId) : 120;
     const now = Date.now();
     this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
     this.pausedUntil = Math.max(this.pausedUntil, now + fbMs);
@@ -212,7 +223,7 @@ export class Enemy extends Schema {
     this.lastHitDamage = Math.round(dmg);
     this.lastHitCrit = isCrit;
     this.hitSeq += 1;
-    return rawDamage * this.incomingDamageMultiplier;
+    return mitigated * this.incomingDamageMultiplier;
   }
 
   /** Heal the enemy (clamped to maxHealth). Returns amount healed. */
@@ -235,7 +246,10 @@ export class Enemy extends Schema {
    * Returns true if the enemy died from bleed this tick.
    */
   tickBleed(dt: number): boolean {
-    if (this.bleedUntil <= 0) { this.bleedTickAccum = 0; return false; }
+    if (this.bleedUntil <= 0) {
+      this.bleedTickAccum = 0;
+      return false;
+    }
     const now = Date.now();
     if (now >= this.bleedUntil) {
       this.bleedUntil = 0;

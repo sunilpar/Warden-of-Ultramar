@@ -13,11 +13,16 @@ import { RoomState } from "../schema/RoomState";
 import { Player } from "../schema/Player";
 import { Enemy } from "../schema/Enemy";
 import { GAME_CONFIG } from "../config/game";
-import { ENEMY_STATS, type EnemyTypeId, type SkillId } from "../config/enemyStats";
+import {
+  ENEMY_STATS,
+  type EnemyTypeId,
+  type SkillId,
+} from "../config/enemyStats";
 import { SKILL_DEFS } from "../config/skillDefs";
 import type { ProjectileSystem } from "./ProjectileSystem";
 import type { ClawSystem } from "./ClawSystem";
 import { SlamSystem } from "./SlamSystem";
+import type { HealSystem } from "./HealSystem";
 
 /** Collision resolver signature (shared by MapSystem / MapSystem2). */
 export interface CollisionResolver {
@@ -34,6 +39,7 @@ export class EnemySystem {
   private projectileSystem: ProjectileSystem | null = null;
   private clawSystem: ClawSystem | null = null;
   private slamSystem: SlamSystem | null = null;
+  private healSystem: HealSystem | null = null;
 
   /** Pending slam casts (delayed until after attack animation). */
   private pendingSlams: {
@@ -43,6 +49,10 @@ export class EnemySystem {
     angle: number;
     level: number;
     castAt: number;
+    attack: number;
+    damageMultiplier: number;
+    critRate: number;
+    critDamage: number;
   }[] = [];
 
   constructor(
@@ -65,6 +75,11 @@ export class EnemySystem {
     this.slamSystem = ss;
   }
 
+  /** Inject the HealSystem (called by the room after both are created). */
+  setHealSystem(hs: HealSystem): void {
+    this.healSystem = hs;
+  }
+
   update(dt: number): void {
     // Process pending slam casts (delayed after attack animation).
     const now = Date.now();
@@ -72,7 +87,18 @@ export class EnemySystem {
     this.pendingSlams = this.pendingSlams.filter((s) => s.castAt > now);
     for (const s of ready) {
       if (this.slamSystem) {
-        this.slamSystem.castSlam(s.ownerId, "enemy", s.x, s.y, s.angle, s.level);
+        this.slamSystem.castSlam(
+          s.ownerId,
+          "enemy",
+          s.x,
+          s.y,
+          s.angle,
+          s.level,
+          s.attack,
+          s.damageMultiplier,
+          s.critRate,
+          s.critDamage,
+        );
       }
     }
 
@@ -261,8 +287,8 @@ export class EnemySystem {
         enemy.attack,
         this.enemySkillLevel(enemy, skill),
         enemy.damageMultiplier,
-        (enemy as any).critRate ?? 0,
-        (enemy as any).critDamage ?? 1.5,
+        enemy.critRate,
+        enemy.critDamage,
       );
     } else if (skill === "claw" && this.clawSystem) {
       this.clawSystem.castClaw(
@@ -275,8 +301,8 @@ export class EnemySystem {
         this.enemySkillLevel(enemy, skill),
         enemy.damageMultiplier,
         enemy.collisionRadius,
-        (enemy as any).critRate ?? 0,
-        (enemy as any).critDamage ?? 1.5,
+        enemy.critRate,
+        enemy.critDamage,
       );
     } else if (skill === "slam" && this.slamSystem) {
       // Delay the slam hitbox until after the attack animation completes.
@@ -288,7 +314,13 @@ export class EnemySystem {
         angle,
         level: this.enemySkillLevel(enemy, skill),
         castAt: now + 500,
+        attack: enemy.attack,
+        damageMultiplier: enemy.damageMultiplier,
+        critRate: enemy.critRate,
+        critDamage: enemy.critDamage,
       });
+    } else if (skill === "heal" && this.healSystem) {
+      this.healSystem.castEnemyHeal(enemy, this.enemySkillLevel(enemy, skill));
     }
     enemy.startCooldown(skill);
   }
@@ -306,7 +338,7 @@ export class EnemySystem {
   /** Cooldown lookup for a skill (kept for parity). */
   private skillCooldown(skill: SkillId): number {
     const def = (SKILL_DEFS as Record<string, { cooldown: number }>)[skill];
-    return def ? def.cooldown : ENEMY_STATS.tyranid.skillCooldown[skill] ?? 0;
+    return def ? def.cooldown : (ENEMY_STATS.tyranid.skillCooldown[skill] ?? 0);
   }
 
   // ============================================================

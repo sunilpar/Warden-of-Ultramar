@@ -10,7 +10,7 @@ import { RoomState } from "../schema/RoomState";
 import { Player } from "../schema/Player";
 import { Enemy } from "../schema/Enemy";
 import { Slam, type SlamFaction } from "../schema/Slam";
-import { SLAM_DEF, applyCrit } from "../config/skillDefs";
+import { SLAM_DEF, applyCrit, computeSkillDamage } from "../config/skillDefs";
 import type { CollisionResolver } from "./EnemySystem";
 
 export class SlamSystem {
@@ -63,6 +63,8 @@ export class SlamSystem {
     y: number,
     angle: number,
     skillLevel: number,
+    casterAttack: number = 100,
+    casterDamageMultiplier: number = 1.0,
     critRate: number = 0,
     critDamage: number = 1.5,
   ): boolean {
@@ -82,13 +84,27 @@ export class SlamSystem {
     slam.ownerId = ownerId;
     slam.remainingRange = range;
     // halfWidth/halfHeight scale with skill level (+10% per level from L3+)
-    const hw = typeof SLAM_DEF.halfWidth === "function" ? SLAM_DEF.halfWidth(skillLevel) : SLAM_DEF.halfWidth;
-    const hh = typeof SLAM_DEF.halfHeight === "function" ? SLAM_DEF.halfHeight(skillLevel) : SLAM_DEF.halfHeight;
+    const hw =
+      typeof SLAM_DEF.halfWidth === "function"
+        ? SLAM_DEF.halfWidth(skillLevel)
+        : SLAM_DEF.halfWidth;
+    const hh =
+      typeof SLAM_DEF.halfHeight === "function"
+        ? SLAM_DEF.halfHeight(skillLevel)
+        : SLAM_DEF.halfHeight;
     slam.halfWidth = hw;
     slam.halfHeight = hh;
-    slam.damage = 200; // base slam damage
+    slam.damage = computeSkillDamage(
+      "slam",
+      casterAttack,
+      skillLevel,
+      casterDamageMultiplier,
+    );
     // bypass walls at L5+
-    slam.bypassWalls = typeof SLAM_DEF.bypassWalls === "function" ? SLAM_DEF.bypassWalls(skillLevel) : false;
+    slam.bypassWalls =
+      typeof SLAM_DEF.bypassWalls === "function"
+        ? SLAM_DEF.bypassWalls(skillLevel)
+        : false;
     slam.critRate = critRate;
     slam.critDamage = critDamage;
 
@@ -120,7 +136,7 @@ export class SlamSystem {
         if (this.rectContains(slam, enemy.x, enemy.y, enemy.collisionRadius)) {
           const c = applyCrit(slam.damage, slam.critRate, slam.critDamage);
           enemy.takeDamage(c.damage, "slam", slam.ownerId, c.isCrit);
-            slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
+          slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });
     } else {
@@ -131,7 +147,7 @@ export class SlamSystem {
         if (this.rectContains(slam, player.x, player.y, 10)) {
           const c2 = applyCrit(slam.damage, slam.critRate, slam.critDamage);
           player.takeDamage(c2.damage, "slam", undefined, c2.isCrit);
-            slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
+          slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });
       this.state.enemies.forEach((enemy, id) => {
@@ -140,7 +156,7 @@ export class SlamSystem {
         if (this.rectContains(slam, enemy.x, enemy.y, enemy.collisionRadius)) {
           const c = applyCrit(slam.damage, slam.critRate, slam.critDamage);
           enemy.takeDamage(c.damage, "slam", slam.ownerId, c.isCrit);
-            slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
+          slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
         }
       });
     }
@@ -193,7 +209,11 @@ export class SlamSystem {
     player.y += Math.sin(angle) * force;
     player.x = Math.max(0, Math.min(this.mapSystem.width, player.x));
     player.y = Math.max(0, Math.min(this.mapSystem.height, player.y));
-    const resolved = this.mapSystem.resolveTileCollision(player.x, player.y, 10);
+    const resolved = this.mapSystem.resolveTileCollision(
+      player.x,
+      player.y,
+      10,
+    );
     player.x = resolved.x;
     player.y = resolved.y;
   }
@@ -202,7 +222,11 @@ export class SlamSystem {
   private hitsWall(slam: Slam): boolean {
     // L5+ slams bypass walls
     if ((slam as any).bypassWalls) return false;
-    const res = this.mapSystem.resolveTileCollision(slam.x, slam.y, slam.halfHeight);
+    const res = this.mapSystem.resolveTileCollision(
+      slam.x,
+      slam.y,
+      slam.halfHeight,
+    );
     return Math.hypot(res.x - slam.x, res.y - slam.y) > 0.01;
   }
 }

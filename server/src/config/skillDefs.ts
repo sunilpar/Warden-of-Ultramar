@@ -40,8 +40,13 @@ function bool(
 export interface SkillDef {
   id: SkillId;
   cooldown: number;
+  /** Additive damage bonus over base attack (0.2 = +20%). Damage = attack * (1 + attackFactor). */
   attackFactor: number;
   damageMultiplierPerLevel?: number;
+  /** Base crit chance at skill level 1 (0.1 = 10%). */
+  baseCritRate?: number;
+  /** Crit chance added per skill level above 1 (0.01 = +1% per level). */
+  critRatePerLevel?: number;
   hitFeedbackMs?: number | ((skillLevel: number) => number);
 }
 
@@ -73,8 +78,25 @@ export interface SlamDef extends SkillDef {
   hitInterval: number;
 }
 
+export interface HealDef extends SkillDef {
+  id: "heal";
+  /** Heal amount at level 1 (L1-4 only; L5+ stays fixed). */
+  baseHeal: number;
+  /** Heal increase per level (L1-4 only). */
+  healPerLevel: number;
+  /** Level at which heal becomes AoE. */
+  aoeUnlockLevel: number;
+  /** AoE radius in pixels. Grows with level from aoeUnlockLevel. */
+  aoeRadius: (skillLevel: number) => number;
+  /** Kills required to recharge (L1 to aoeUnlockLevel-1). */
+  killsToRecharge: number;
+  /** Cooldown in seconds (aoeUnlockLevel and above). */
+  cooldown: number;
+}
+
 /**
  * Bolter:
+ * - +20% base damage over attack (attackFactor)
  * - +10% damage per level (default levelFactor)
  * - Projectile speed: +2% per level
  * - Chain counts: L3-6=2 chains, L7-9=3 chains, L10=4 chains
@@ -82,7 +104,9 @@ export interface SlamDef extends SkillDef {
 const BOLTER: BolterDef = {
   id: "bolter",
   cooldown: 0.5,
-  attackFactor: 2.0,
+  attackFactor: 0.2, // +20% damage over base attack
+  baseCritRate: 0.1, // 10% crit at level 1
+  critRatePerLevel: 0.01, // +1% crit per level
   projectileSpeed: (lvl: number) => Math.round(520 * Math.pow(1.02, lvl - 1)),
   projectileRadius: 6,
   maxRange: 900,
@@ -106,8 +130,10 @@ const BOLTER: BolterDef = {
 const CLAW: ClawDef = {
   id: "claw",
   cooldown: 0.5,
-  attackFactor: 1.0,
+  attackFactor: 0.0,
   damageMultiplierPerLevel: 0.2,
+  baseCritRate: 0.15, // 15% crit at level 1
+  critRatePerLevel: 0.01, // +1% crit per level
   coneHalfAngle: (lvl: number) => {
     const base = lvl >= 8 ? 0.9 : lvl >= 4 ? 0.7 : 0.5;
     if (lvl >= 5 && lvl <= 10) {
@@ -153,8 +179,10 @@ const CLAW: ClawDef = {
 const SLAM: SlamDef = {
   id: "slam",
   cooldown: 2.0,
-  attackFactor: 1.0,
+  attackFactor: 0.0,
   damageMultiplierPerLevel: 0.2,
+  baseCritRate: 0.1, // 10% crit at level 1
+  critRatePerLevel: 0.01, // +1% crit per level
   range: (lvl: number) => (lvl >= 6 ? 200 : 120),
   speed: 300,
   halfWidth: (lvl: number) => {
@@ -185,16 +213,50 @@ const SLAM: SlamDef = {
   },
 };
 
+/**
+ * Heal:
+ * - L1-4: Self-only. Charged by kills (5 kills per use). Heals 100 + 100/level.
+ * - L5-10: AoE circle, heals all players + enemies in radius. Cooldown-based.
+ *           Heal amount frozen at L4 value; only radius grows (+20px/level).
+ */
+const HEAL: HealDef = {
+  id: "heal",
+  cooldown: 10.0,
+  attackFactor: 0.0,
+  baseHeal: 100,
+  healPerLevel: 100,
+  aoeUnlockLevel: 5,
+  aoeRadius: (lvl: number) => {
+    if (lvl < 5) return 0;
+    return 80 + (lvl - 5) * 20;
+  },
+  killsToRecharge: 5,
+};
+
 // Export as object with helper accessors that handle function values
 export const SKILL_DEFS: Record<string, SkillDef> & {
   bolter: BolterDef;
   claw: ClawDef;
   slam: SlamDef;
+  heal: HealDef;
 } = {
   bolter: BOLTER,
   claw: CLAW,
   slam: SLAM,
+  heal: HEAL,
 };
+
+/** Heal amount for a given level. L1-4 scales, L5+ frozen at L4 value. */
+export function healAmount(skillLevel: number): number {
+  const lvl = Math.max(1, skillLevel);
+  const effectiveLvl = lvl >= HEAL.aoeUnlockLevel ? HEAL.aoeUnlockLevel - 1 : lvl;
+  return HEAL.baseHeal + HEAL.healPerLevel * (effectiveLvl - 1);
+}
+
+/** AoE radius for heal at a given level (0 if below unlock level). */
+export function healRadius(skillLevel: number): number {
+  return HEAL.aoeRadius(skillLevel);
+}
 
 /**
  * Per-skill damage growth with level.
@@ -214,10 +276,11 @@ export function computeSkillDamage(
   casterDamageMultiplier: number,
 ): number {
   const def = SKILL_DEFS[skillId];
-  const af = def ? def.attackFactor : 1.0;
+  // attackFactor is now an additive percentage bonus (0.2 = +20% damage)
+  const af = def ? def.attackFactor : 0.0;
   return (
     casterAttack *
-    af *
+    (1.0 + af) *
     levelFactor(skillId, skillLevel) *
     casterDamageMultiplier
   );
@@ -242,6 +305,22 @@ export function bolterColorTier(skillLevel: number): BolterColorTier {
   if (skillLevel >= 8) return "purple";
   if (skillLevel >= 4) return "blue";
   return "yellow";
+}
+
+/**
+ * Compute the crit rate for a given skill at a given level.
+ * Combines the player's base crit rate with the skill's own crit rate
+ * (baseCritRate + critRatePerLevel * (level - 1)).
+ */
+export function skillCritRate(
+  skillId: SkillId,
+  skillLevel: number,
+  playerCritRate: number,
+): number {
+  const def = SKILL_DEFS[skillId];
+  const base = def?.baseCritRate ?? 0;
+  const perLvl = def?.critRatePerLevel ?? 0;
+  return playerCritRate + base + perLvl * Math.max(0, skillLevel - 1);
 }
 
 export function chainDamageMultiplier(chainIndex: number): number {
@@ -281,7 +360,10 @@ export function slamBypassesWalls(skillLevel: number): boolean {
 }
 
 /** Get hit feedback ms for a skill at given level. */
-export function getSkillHitFeedback(skill: SkillId, skillLevel: number = 1): number {
+export function getSkillHitFeedback(
+  skill: SkillId,
+  skillLevel: number = 1,
+): number {
   const def = SKILL_DEFS[skill];
   if (!def?.hitFeedbackMs) return 80;
   return num(def.hitFeedbackMs, skillLevel);
