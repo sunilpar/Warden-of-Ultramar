@@ -57,6 +57,28 @@ import { MAP_INFO, MODIFIER_DISPLAY } from "../config/modifiers";
 // Alias for skill card lookup in character screen
 const SKILL_CARDS_LOOKUP = SKILL_CARDS;
 
+/**
+ * Format large numbers with suffixes: k, mil, bil, tril, quadr, etc.
+ * Below 100,000 the raw number is shown. Above that, suffixes apply.
+ */
+function formatNumber(n: number): string {
+  if (n < 100_000) return Math.floor(n).toString();
+  const tiers: [number, string][] = [
+    [1e15, "quadr"],
+    [1e12, "tril"],
+    [1e9, "bil"],
+    [1e6, "mil"],
+    [1e3, "k"],
+  ];
+  for (const [threshold, suffix] of tiers) {
+    if (n >= threshold) {
+      const val = n / threshold;
+      return (val >= 100 ? val.toFixed(0) : val >= 10 ? val.toFixed(1) : val.toFixed(2)) + " " + suffix;
+    }
+  }
+  return Math.floor(n).toString();
+}
+
 export class GameScene extends Phaser.Scene {
   client = new Client(BACKEND_URL);
   room: any = null;
@@ -264,6 +286,78 @@ export class GameScene extends Phaser.Scene {
   // ============================================================
 
   async create() {
+    // ---- Clear ALL stale state from any previous run of this scene ----
+    // When the scene is stopped and relaunched (e.g. map2 -> map1),
+    // Phaser destroys all game objects but the TS class fields still
+    // hold references to them. Using those references crashes.
+    // We must null-out every field that holds a game object or
+    // per-scene mutable state so that create() can build fresh ones.
+    this.currentPlayer = null as any;
+    this.currentPlayerState = null;
+    this.transitioning = false;
+    this.wasDead = false;
+    this.room = null;
+    this.playerEntities = {};
+    this.enemyEntities = {};
+    this.projectileEntities = {};
+    this.clawEntities = {};
+    this.slamEntities = {};
+    this.enemyHpBars = {};
+    this.enemyLastPos = {};
+    this.projLastPos = {};
+    this.entityHitSeqs = {};
+    this.cardSlots = [];
+    this.hudHitboxCards = [];
+    this.xpGainPopups = [];
+    this.damageTexts = [];
+    this.animationsCreated = false;
+    this.enemyAnimationsCreated = false;
+    this.bolterMuzzleAnimCreated = false;
+    this.clawAnimCreated = false;
+    this.slamAnimCreated = false;
+    this.lastKnownXp = -1;
+    this.lastKnownLevel = -1;
+    this.localBolterLevel = 1;
+    this.localSlamLevel = 1;
+    this.localClawLevel = 1;
+    this.localHealLevel = 1;
+    // Null out game object references so create* methods rebuild them
+    this.bolterCard = null as any;
+    this.bolterCooldownFill = null as any;
+    this.bolterTooltip = null as any;
+    this.slamCard = null as any;
+    this.slamCooldownFill = null as any;
+    this.clawCard = null as any;
+    this.clawCooldownFill = null as any;
+    this.healCard = null as any;
+    this.healCooldownFill = null as any;
+    this.hudImage = null as any;
+    this.hpFill = null as any;
+    this.hpText = null as any;
+    this.statsText = null as any;
+    this.debugFPS = null as any;
+    this.xpBarBack = null as any;
+    this.xpBarFill = null as any;
+    this.xpBarGain = null as any;
+    this.levelBadge = null as any;
+    this.levelBadgeText = null as any;
+    this.xpBarText = null as any;
+    this.levelUpToast = null as any;
+    this.mapInfoButton = null as any;
+    this.mapInfoTooltip = null as any;
+    this.mapInfoTooltipBg = null as any;
+    this.charScreen = null as any;
+    this.charScreenVisible = false;
+    this.skillPointBadge = null as any;
+    this.skillPointBadgeText = null as any;
+    this.confirmPopup = null as any;
+    this.upgradeToast = null as any;
+    this.cooldownToast = null as any;
+    this.debugHitboxes = null;
+    this.debugEntityHitboxes = null;
+    this.hitboxToggleButton = null as any;
+    this.deathOverlay = null;
+
     // ---- Set up keyboard input (WASD) ----
     this.wasdKeys = this.input.keyboard.addKeys({
       left: Phaser.Input.Keyboard.KeyCodes.A,
@@ -313,12 +407,12 @@ export class GameScene extends Phaser.Scene {
       this.room.send(1, { skill: "bolter", angle });
     });
 
-    // ---- "0" key upgrades the bolter (debug) ----
+    // ---- "0" key levels up the player (debug — test enemy scaling) ----
     this.input.keyboard
       ?.addKey(Phaser.Input.Keyboard.KeyCodes.ZERO)
       ?.on("down", () => {
         if (!this.room) return;
-        this.room.send(2, { skill: "bolter" });
+        this.room.send(9, {});
       });
 
     // ---- Space key casts claw skill ----
@@ -526,6 +620,8 @@ export class GameScene extends Phaser.Scene {
               "hitFlashUntil",
               player.hitFlashUntil ?? 0,
             );
+            this.currentPlayer.setData("hitboxW", player.hitboxW ?? 10);
+            this.currentPlayer.setData("hitboxH", player.hitboxH ?? 10);
             // Detect damage taken by local player.
             const pseq = player.hitSeq ?? 0;
             const pprev = this.entityHitSeqs["__local__"] ?? 0;
@@ -576,6 +672,8 @@ export class GameScene extends Phaser.Scene {
           sprite.setData("serverX", player.x);
           sprite.setData("serverY", player.y);
           sprite.setData("hitFlashUntil", player.hitFlashUntil ?? 0);
+          sprite.setData("hitboxW", player.hitboxW ?? 10);
+          sprite.setData("hitboxH", player.hitboxH ?? 10);
         });
       }
     });
@@ -638,6 +736,8 @@ export class GameScene extends Phaser.Scene {
 
       // Initialize data so render loop works from the first frame.
       sprite.setData("hitFlashUntil", enemy.hitFlashUntil ?? 0);
+      sprite.setData("hitboxW", enemy.hitboxW ?? 12);
+      sprite.setData("hitboxH", enemy.hitboxH ?? 12);
       sprite.setData("hp", enemy.currentHealth);
       sprite.setData("maxHp", enemy.maxHealth);
       sprite.setData("level", enemy.level ?? 1);
@@ -651,6 +751,8 @@ export class GameScene extends Phaser.Scene {
         sprite.setData("maxHp", enemy.maxHealth);
         sprite.setData("level", enemy.level ?? 1);
         sprite.setData("hitFlashUntil", enemy.hitFlashUntil);
+        sprite.setData("hitboxW", enemy.hitboxW ?? 12);
+        sprite.setData("hitboxH", enemy.hitboxH ?? 12);
         sprite.setData("attacking", !!enemy.attacking);
         this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
         // Detect new damage events via hitSeq counter.
@@ -892,14 +994,21 @@ export class GameScene extends Phaser.Scene {
     console.log(
       `[CONNECT] Scene "${this.sys.settings.key}" connecting to room "${this.roomName}" with playerState=${playerState ? "yes" : "no"}`,
     );
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
+      // When carrying playerState (a map transition), always CREATE a fresh
+      // room instance so enemies spawn correctly. Otherwise joinOrCreate
+      // might rejoin a stale room that has all spawn zones exhausted.
+      const roomPromise = playerState
+        ? this.client.create(this.roomName, { playerState })
+        : this.client.joinOrCreate(this.roomName, { playerState });
       // Add a timeout so we don't hang on the loading screen forever
-      const roomPromise = this.client.joinOrCreate(this.roomName, {
-        playerState,
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error("Room connection timeout")),
+          10000,
+        );
       });
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Room connection timeout")), 10000),
-      );
       this.room = await Promise.race([roomPromise, timeoutPromise]);
       console.log(
         `[CONNECT] Connected to room "${this.roomName}" successfully`,
@@ -907,6 +1016,8 @@ export class GameScene extends Phaser.Scene {
     } catch (e) {
       console.error("Failed to connect:", e);
       this.room = null;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
   }
 
@@ -1833,7 +1944,7 @@ export class GameScene extends Phaser.Scene {
     this.xpBarFill.setSize(fillW, this.xpBarFill.height);
 
     // ---- Update numeric overlay ----
-    this.xpBarText.setText(currentXp + " / " + xpToLevelUp);
+    this.xpBarText.setText(formatNumber(currentXp) + " / " + formatNumber(xpToLevelUp));
 
     // ---- Detect XP gain / level-up ----
     if (this.lastKnownLevel !== -1) {
@@ -1980,7 +2091,7 @@ export class GameScene extends Phaser.Scene {
 
     popup
       .setPosition(x, y)
-      .setText("+" + amount + " xp")
+      .setText("+" + formatNumber(amount) + " xp")
       .setAlpha(1)
       .setActive(true)
       .setVisible(true);
@@ -2128,7 +2239,7 @@ export class GameScene extends Phaser.Scene {
       const pct = (v: number) => `${Math.round(v * 100)}%`;
       this.statsText.setText(
         [
-          `Lv ${Math.floor(player.level)}  XP ${Math.floor(player.currentXp)}/${Math.floor(player.xpToLevelUp)}`,
+          `Lv ${Math.floor(player.level)}  XP ${formatNumber(player.currentXp)}/${formatNumber(player.xpToLevelUp)}`,
           `ATK ${Math.round(player.attack)}  CRIT ${pct(player.critRate)} / ${pct(player.critDamage)}`,
         ].join("\n"),
       );
@@ -2839,8 +2950,8 @@ export class GameScene extends Phaser.Scene {
         px + 20,
         y,
         [
-          "Level: " + level + "    XP: " + currentXp + " / " + xpToLevelUp,
-          "XP to next level: " + xpRemaining,
+          "Level: " + level + "    XP: " + formatNumber(currentXp) + " / " + formatNumber(xpToLevelUp),
+          "XP to next level: " + formatNumber(xpRemaining),
         ].join("\n"),
         {
           color: "#aaaaff",
@@ -3153,7 +3264,16 @@ export class GameScene extends Phaser.Scene {
     // ---- Map exit transition ----
     // When the player steps onto this map's exit tile, move them to the
     // next room/scene. `transitioning` guards against re-entry.
-    if (!this.transitioning && this.nextSceneKey && this.isOnExitTile()) {
+    // Extra guard: ensure the player sprite is active and positioned
+    // (not stale from the previous scene before server state arrives).
+    if (
+      !this.transitioning &&
+      this.nextSceneKey &&
+      this.currentPlayer &&
+      this.currentPlayer.active &&
+      (this.currentPlayer.x !== 0 || this.currentPlayer.y !== 0) &&
+      this.isOnExitTile()
+    ) {
       this.transitionToScene(this.nextSceneKey);
       return;
     }
@@ -3358,27 +3478,33 @@ export class GameScene extends Phaser.Scene {
 
     if (!this.showHitboxes) return;
 
-    // ---- Players (GREEN circles, radius 10) ----
+    // ---- Players (GREEN rectangles, from synced hitboxW/H) ----
     gfx.lineStyle(1.5, 0x00ff00, 0.9);
     if (this.currentPlayer) {
-      gfx.strokeCircle(
-        this.currentPlayer.x,
-        this.currentPlayer.y,
-        this.PLAYER_COLLISION_RADIUS,
+      const pw = (this.currentPlayer.data.get("hitboxW") as number) ?? 10;
+      const ph = (this.currentPlayer.data.get("hitboxH") as number) ?? 10;
+      gfx.strokeRect(
+        this.currentPlayer.x - pw,
+        this.currentPlayer.y - ph,
+        pw * 2,
+        ph * 2,
       );
     }
     for (const sessionId in this.playerEntities) {
       if (sessionId === this.room?.sessionId) continue;
       const sp = this.playerEntities[sessionId];
-      gfx.strokeCircle(sp.x, sp.y, this.PLAYER_COLLISION_RADIUS);
+      const pw = (sp.data.get("hitboxW") as number) ?? 10;
+      const ph = (sp.data.get("hitboxH") as number) ?? 10;
+      gfx.strokeRect(sp.x - pw, sp.y - ph, pw * 2, ph * 2);
     }
 
-    // ---- Enemies (RED circles, actual collision radius) ----
+    // ---- Enemies (RED rectangles, from synced hitboxW/H) ----
     gfx.lineStyle(1.5, 0xff0000, 0.9);
     for (const id in this.enemyEntities) {
       const sp = this.enemyEntities[id];
-      const radius = sp.texture.key === "orck_sheet" ? 16 : 9;
-      gfx.strokeCircle(sp.x, sp.y, radius);
+      const ew = (sp.data.get("hitboxW") as number) ?? 12;
+      const eh = (sp.data.get("hitboxH") as number) ?? 12;
+      gfx.strokeRect(sp.x - ew, sp.y - eh, ew * 2, eh * 2);
     }
 
     // ---- Bolter projectiles (BLUE circles, radius 6) ----
@@ -3695,7 +3821,7 @@ export class GameScene extends Phaser.Scene {
     // Once the camera has fully faded to black, swap scenes.
     cam.once("camerafadeoutcomplete", () => {
       // Leave the old room (it auto-disposes when empty).
-      // Award map transition XP before leaving.
+      // Transition XP is applied in the serialized playerState below.
       try {
         this.room?.send(5, {});
       } catch (_e) {
@@ -3747,10 +3873,22 @@ export class GameScene extends Phaser.Scene {
             skillLevels[skill] = lvl;
           });
         }
+        // Apply map transition XP bonus directly to the serialized state
+        const TRANSITION_XP = this.sys.settings.key === "game2" ? 1000 : 500;
+        let txp = (p.currentXp ?? 0) + TRANSITION_XP;
+        let tLevel = p.level ?? 1;
+        let tXpToLevel = p.xpToLevelUp ?? 1000;
+        let tSkillPoints = p.skillPoints ?? 0;
+        while (txp >= tXpToLevel) {
+          txp -= tXpToLevel;
+          tLevel += 1;
+          tSkillPoints += 1;
+          tXpToLevel = Math.round(tXpToLevel * 1.5);
+        }
         playerState = {
-          level: p.level,
-          currentXp: p.currentXp,
-          xpToLevelUp: p.xpToLevelUp,
+          level: tLevel,
+          currentXp: txp,
+          xpToLevelUp: tXpToLevel,
           maxHealth: p.maxHealth,
           currentHealth: p.currentHealth, // carry actual HP, not full
           attack: p.attack,
@@ -3758,9 +3896,10 @@ export class GameScene extends Phaser.Scene {
           critRate: p.critRate,
           critDamage: p.critDamage,
           baseMoveSpeed: p.baseMoveSpeed,
+          speedMultiplier: p.speedMultiplier ?? 1.0,
           moveSpeed: p.moveSpeed,
           skillLevels,
-          skillPoints: p.skillPoints ?? 0,
+          skillPoints: tSkillPoints,
         };
       }
 

@@ -17,6 +17,7 @@ import { SkillCast } from "../schema/SkillCast";
 import {
   SKILL_DEFS,
   healAmount,
+  healPercent,
   healRadius,
 } from "../config/skillDefs";
 import type { SkillId } from "../config/skillDefs";
@@ -38,18 +39,25 @@ export class HealSystem {
     const def = SKILL_DEFS.heal;
     const amount = healAmount(level);
     const radius = healRadius(level);
+    const pct = healPercent(level);
 
     if (level >= def.aoeUnlockLevel) {
       // AoE heal: heal all players + enemies in radius
       this.state.players.forEach((p) => {
         if (p.isDead) return;
         const dist = Math.hypot(p.x - player.x, p.y - player.y);
-        if (dist <= radius) p.heal(amount);
+        if (dist <= radius) {
+          const healAmt = pct > 0 ? Math.round(p.maxHealth * pct) : amount;
+          p.heal(healAmt);
+        }
       });
       this.state.enemies.forEach((e) => {
         if (e.isDead) return;
         const dist = Math.hypot(e.x - player.x, e.y - player.y);
-        if (dist <= radius) e.heal(amount);
+        if (dist <= radius) {
+          const healAmt = pct > 0 ? Math.round(e.maxHealth * pct) : amount;
+          e.heal(healAmt);
+        }
       });
       // Cooldown-based
       player.startSkillCooldown("heal", def.cooldown);
@@ -76,17 +84,24 @@ export class HealSystem {
     const def = SKILL_DEFS.heal;
     const amount = healAmount(level);
     const radius = healRadius(level);
+    const pct = healPercent(level);
 
     if (level >= def.aoeUnlockLevel) {
       this.state.players.forEach((p) => {
         if (p.isDead) return;
         const dist = Math.hypot(p.x - enemy.x, p.y - enemy.y);
-        if (dist <= radius) p.heal(amount);
+        if (dist <= radius) {
+          const healAmt = pct > 0 ? Math.round(p.maxHealth * pct) : amount;
+          p.heal(healAmt);
+        }
       });
       this.state.enemies.forEach((e) => {
         if (e.isDead) return;
         const dist = Math.hypot(e.x - enemy.x, e.y - enemy.y);
-        if (dist <= radius) e.heal(amount);
+        if (dist <= radius) {
+          const healAmt = pct > 0 ? Math.round(e.maxHealth * pct) : amount;
+          e.heal(healAmt);
+        }
       });
       this.spawnHealVfx(enemy.x, enemy.y, radius, "enemy");
     } else {

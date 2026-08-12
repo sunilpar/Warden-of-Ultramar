@@ -160,12 +160,26 @@ export class GameRoom2 extends Room {
   }
 
   /**
+   * Returns the highest level among all currently connected players.
+   * Falls back to GAME_CONFIG.ENEMY.DEFAULT_LEVEL (1) if no players.
+   * Used to scale enemy stats on spawn.
+   */
+  private getHighestPlayerLevel(): number {
+    let maxLevel = GAME_CONFIG.ENEMY.DEFAULT_LEVEL;
+    this.state.players.forEach((p) => {
+      if (p.level > maxLevel) maxLevel = p.level;
+    });
+    return maxLevel;
+  }
+
+  /**
    * Spawn one enemy at the center of each spawn zone the FIRST time any
    * player's viewport touches it. Each zone spawns exactly once.
    */
   private checkSpawnZones(): void {
     const zones = LAYERED_MAP_2.enemySpawnZones;
     if (zones.length === 0 || this.viewports.size === 0) return;
+    const enemyLevel = this.getHighestPlayerLevel();
     for (let i = 0; i < zones.length; i++) {
       if (this.spawnedZones.has(i)) continue;
       const z = zones[i];
@@ -186,7 +200,7 @@ export class GameRoom2 extends Room {
           Math.random() < 0.5 ? "tyranid" : "orck",
           z.x + z.width / 2,
           z.y + z.height / 2,
-          GAME_CONFIG.ENEMY.DEFAULT_LEVEL,
+          enemyLevel,
         );
         const spawnedEnemy = this.state.enemies.get(spawnId);
         if (spawnedEnemy)
@@ -420,6 +434,15 @@ export class GameRoom2 extends Room {
         `Player ${client.sessionId} granted test skill point (total: ${player.skillPoints})`,
       );
     },
+    // ---- Debug: force a level-up (press 0) ----
+    9: (client: Client, _msg: any) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+      player.addXp(player.xpToLevelUp);
+      console.log(
+        `Player ${client.sessionId} forced level-up (now level ${player.level})`,
+      );
+    },
   };
 
   // ============================================================
@@ -445,11 +468,8 @@ export class GameRoom2 extends Room {
       player.critRate = ps.critRate ?? 0.1;
       player.critDamage = ps.critDamage ?? 1.5;
       player.baseMoveSpeed = ps.baseMoveSpeed ?? 120;
-      // Recompute speedMultiplier so percentage upgrades survive map transitions.
-      if (player.baseMoveSpeed > 0) {
-        player.speedMultiplier =
-          (ps.moveSpeed ?? player.baseMoveSpeed) / player.baseMoveSpeed;
-      }
+      // Use the speedMultiplier directly from the serialized state.
+      player.speedMultiplier = ps.speedMultiplier ?? 1.0;
       player.skillPoints = ps.skillPoints ?? 0;
       // Restore skill levels
       if (ps.skillLevels) {

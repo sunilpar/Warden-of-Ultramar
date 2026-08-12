@@ -19,7 +19,7 @@ export class PlayerSystem {
   update(dt: number): void {
     this.state.players.forEach((player) => {
       // Skip movement while in hit-stun (pausedUntil).
-      if (Date.now() < (player as any).pausedUntil) {
+      if (false) { // hit-stun removed
         player.inputQueue.length = 0;
         return;
       }
@@ -57,9 +57,7 @@ export class PlayerSystem {
         player.y = Math.max(0, Math.min(this.mapSystem.height, player.y));
 
         // Resolve tile collisions (O(1) grid lookup)
-        const resolved = this.mapSystem.resolveTileCollision(
-          player.x, player.y, GAME_CONFIG.PLAYER.COLLISION_RADIUS,
-        );
+        const resolved = this.mapSystem.resolveRectTileCollision(player.x, player.y, player.hitboxW, player.hitboxH);
         player.x = resolved.x;
         player.y = resolved.y;
 

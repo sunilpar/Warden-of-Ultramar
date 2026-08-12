@@ -133,7 +133,7 @@ export class SlamSystem {
       this.state.enemies.forEach((enemy, id) => {
         if (id === slam.ownerId || enemy.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
-        if (this.rectContains(slam, enemy.x, enemy.y, enemy.collisionRadius)) {
+        if (this.rectContains(slam, enemy.x, enemy.y, Math.max(enemy.hitboxW, enemy.hitboxH))) {
           const c = applyCrit(slam.damage, slam.critRate, slam.critDamage);
           enemy.takeDamage(c.damage, "slam", slam.ownerId, c.isCrit);
           slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
@@ -144,7 +144,7 @@ export class SlamSystem {
       this.state.players.forEach((player, id) => {
         if (id === slam.ownerId || player.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
-        if (this.rectContains(slam, player.x, player.y, 10)) {
+        if (this.rectContains(slam, player.x, player.y, Math.max(player.hitboxW, player.hitboxH))) {
           const c2 = applyCrit(slam.damage, slam.critRate, slam.critDamage);
           player.takeDamage(c2.damage, "slam", undefined, c2.isCrit);
           slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);
@@ -153,7 +153,7 @@ export class SlamSystem {
       this.state.enemies.forEach((enemy, id) => {
         if (id === slam.ownerId || enemy.isDead) return;
         if (slam.hitCooldowns.has(id)) return;
-        if (this.rectContains(slam, enemy.x, enemy.y, enemy.collisionRadius)) {
+        if (this.rectContains(slam, enemy.x, enemy.y, Math.max(enemy.hitboxW, enemy.hitboxH))) {
           const c = applyCrit(slam.damage, slam.critRate, slam.critDamage);
           enemy.takeDamage(c.damage, "slam", slam.ownerId, c.isCrit);
           slam.hitCooldowns.set(id, SLAM_DEF.hitInterval);

@@ -56,8 +56,12 @@ export interface EnemyBaseConfig {
   critDamage?: number;
   /** Shield (absorbs damage before health). 0 for now. */
   shield: number;
-  /** Collision radius (matches the circle-vs-tile resolution). */
+  /** Collision radius (legacy fallback for circle-based collision). */
   collisionRadius: number;
+  /** Hitbox half-width (rectangle hitbox). */
+  hitboxW: number;
+  /** Hitbox half-height (rectangle hitbox). */
+  hitboxH: number;
   /** Skills this enemy may use. */
   skillPool: SkillId[];
   /** Per-skill cooldown in SECONDS (keyed by SkillId). 0 = no cooldown. */
@@ -82,13 +86,15 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     title: "Tyranid",
     description:
       "A relentless xenos beast that closes the distance and tears its prey apart with melee claws.",
-    maxHealth: 600,
+    maxHealth: 200,
     moveSpeed: 60, // 1px per tick
-    attack: 40,
-    defence: 0.1, // 10% damage reduction
+    attack: 20,
+    defence: 0.01, // 10% damage reduction
     critRate: 0.2, // 20% crit chance
     shield: 0,
     collisionRadius: 9,
+    hitboxW: 16,
+    hitboxH: 8,
     skillPool: ["claw"],
     skillCooldown: { claw: 1.5 },
     growth: {
@@ -96,7 +102,7 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
       moveSpeed: 0, // speed doesn't grow with level
       attack: 8,
     },
-    xpReward: 200,
+    xpReward: 100,
   },
   orck: {
     id: "orck",
@@ -105,11 +111,13 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
       "A hulking greenskin brute. Slower but tougher than a tyranid, with a larger frame.",
     maxHealth: 500,
     moveSpeed: 45, // slower than tyranid
-    attack: 40,
-    defence: 0.1, // 10% damage reduction
-    critRate: 0.2, // 20% crit chance
+    attack: 50,
+    defence: 0.01,
+    critRate: 0.2,
     shield: 0,
     collisionRadius: 16, // larger hitbox than tyranid
+    hitboxW: 15,
+    hitboxH: 30,
     skillPool: ["slam"],
     skillCooldown: { slam: 2.0 },
     growth: {
@@ -117,7 +125,7 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
       moveSpeed: 0,
       attack: 8,
     },
-    xpReward: 100,
+    xpReward: 300,
   },
 };
 

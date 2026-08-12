@@ -174,7 +174,7 @@ export class ProjectileSystem {
         if (hit !== null) return;
         if (proj.hitSet.has(id)) return;
         if (enemy.isDead) return;
-        if (this.circleOverlap(proj.x, proj.y, r, enemy.x, enemy.y, enemy.collisionRadius)) {
+        if (this.rectOverlap(proj.x, proj.y, r, r, enemy.x, enemy.y, enemy.hitboxW, enemy.hitboxH)) {
           hit = id;
         }
       });
@@ -187,7 +187,7 @@ export class ProjectileSystem {
       if (hit !== null) return;
       if (proj.hitSet.has(id)) return;
       if (player.isDead) return;
-      if (this.circleOverlap(proj.x, proj.y, r, player.x, player.y, 10)) {
+      if (this.rectOverlap(proj.x, proj.y, r, r, player.x, player.y, player.hitboxW, player.hitboxH)) {
         hit = id;
       }
     });
@@ -197,7 +197,7 @@ export class ProjectileSystem {
       if (hit !== null) return;
       if (proj.hitSet.has(id)) return;
       if (enemy.isDead) return;
-      if (this.circleOverlap(proj.x, proj.y, r, enemy.x, enemy.y, enemy.collisionRadius)) {
+      if (this.rectOverlap(proj.x, proj.y, r, r, enemy.x, enemy.y, enemy.hitboxW, enemy.hitboxH)) {
         hit = id;
       }
     });
@@ -231,5 +231,19 @@ export class ProjectileSystem {
     const dx = ax - bx;
     const dy = ay - by;
     return dx * dx + dy * dy <= rr * rr;
+  }
+
+  /**
+   * AABB overlap test between two rectangles.
+   * (ax,ay) center with half (aw,ah); (bx,by) center with half (bw,bh).
+   */
+  private rectOverlap(
+    ax: number, ay: number, aw: number, ah: number,
+    bx: number, by: number, bw: number, bh: number,
+  ): boolean {
+    return (
+      Math.abs(ax - bx) <= aw + bw &&
+      Math.abs(ay - by) <= ah + bh
+    );
   }
 }

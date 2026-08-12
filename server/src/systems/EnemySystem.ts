@@ -126,7 +126,7 @@ export class EnemySystem {
    *  Stops ATTACK_RANGE_PX before the target and plays the attack animation. */
   private updateTyranid(enemy: Enemy, _dt: number): void {
     const now = Date.now();
-    const isPaused = now < enemy.pausedUntil;
+    const isPaused = false; // hit-stun removed
 
     const target = this.findNearestPlayer(enemy);
     if (!target) {
@@ -169,7 +169,7 @@ export class EnemySystem {
    *  Orcks have an empty skill pool so tryUseSkill is a no-op. */
   private updateOrck(enemy: Enemy, _dt: number): void {
     const now = Date.now();
-    const isPaused = now < enemy.pausedUntil;
+    const isPaused = false; // hit-stun removed
 
     const target = this.findNearestPlayer(enemy);
     if (!target) {

@@ -150,7 +150,7 @@ const CLAW: ClawDef = {
     }
     return base;
   },
-  bleedUnlockLevel: 5,
+  bleedUnlockLevel: 10,
   bleedDps: (lvl: number) => {
     if (lvl < 5) return 0;
     return 10; // flat 10 damage per tick
@@ -256,6 +256,16 @@ export function healAmount(skillLevel: number): number {
 /** AoE radius for heal at a given level (0 if below unlock level). */
 export function healRadius(skillLevel: number): number {
   return HEAL.aoeRadius(skillLevel);
+}
+
+/**
+ * Heal percentage of max HP for L7-10. Returns 0 for L1-6 (use flat healAmount instead).
+ * L7: 30%, L8: 40%, L9: 50%, L10: 60%.
+ */
+export function healPercent(skillLevel: number): number {
+  if (skillLevel < 7) return 0;
+  const table: Record<number, number> = { 7: 0.30, 8: 0.40, 9: 0.50, 10: 0.60 };
+  return table[skillLevel] ?? 0.60;
 }
 
 /**

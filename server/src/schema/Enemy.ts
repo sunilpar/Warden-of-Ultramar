@@ -89,6 +89,10 @@ export class Enemy extends Schema {
   // ---- AI / skill state (NOT synced; server-only) ----
   /** Collision radius (used by tile resolution). */
   collisionRadius: number = 9;
+  /** Hitbox half-width (rectangle, synced for debug overlay). */
+  @type("number") hitboxW: number = 12;
+  /** Hitbox half-height (rectangle, synced for debug overlay). */
+  @type("number") hitboxH: number = 12;
   /** Skills this enemy may cast (copied from config). */
   skillPool: SkillId[] = [];
   /**
@@ -105,6 +109,10 @@ export class Enemy extends Schema {
   bleedDps: number = 0;
   /** Attacker who applied the bleed (for XP credit on kill). */
   bleedAttackerId: string = "";
+  /** Damage per bleed tick (10% of claw damage). */
+  bleedTickDamage: number = 0;
+  /** Whether the bleed is a critical bleed (from crit claw hit). */
+  bleedIsCrit: boolean = false;
   /** Accumulator for 0.5-second bleed ticks. */
   bleedTickAccum: number = 0;
 
@@ -127,18 +135,28 @@ export class Enemy extends Schema {
     this.description = cfg.description;
     this.level = level;
 
-    // Base stats grown by level (level 1 = base; each extra level adds growth)
+    // ---- Percentage-based scaling per level ----
+    // Each stat scales as: base * (1 + rate * extraLevels)
+    // Defence scales additively and is capped at 0.75 (75%).
+    // MoveSpeed scales by percentage (always relative to base).
     const extraLevels = Math.max(0, level - 1);
-    this.maxHealth = cfg.maxHealth + cfg.growth.maxHealth * extraLevels;
+    const hpMult  = 1 + 0.60 * extraLevels; // +60% HP per level
+    const atkMult = 1 + 0.20 * extraLevels; // +20% ATK per level
+    const xpMult  = Math.pow(level, 1.5) / 4; // scales with player XP curve (~20 kills per level)
+    // Move speed does NOT scale with level � stays at base.
+
+    this.maxHealth     = Math.round(cfg.maxHealth * hpMult);
     this.currentHealth = this.maxHealth;
-    this.baseMoveSpeed = cfg.moveSpeed + cfg.growth.moveSpeed * extraLevels;
-    this.attack = cfg.attack + cfg.growth.attack * extraLevels;
-    this.shield = cfg.shield;
-    this.defence = cfg.defence ?? 0;
-    this.critRate = cfg.critRate ?? 0;
-    this.critDamage = cfg.critDamage ?? 1.5;
-    this.xpReward = cfg.xpReward;
+    this.baseMoveSpeed = cfg.moveSpeed;
+    this.attack        = Math.round(cfg.attack * atkMult);
+    this.shield        = cfg.shield;
+    this.defence       = Math.min(0.75, (cfg.defence ?? 0) + 0.005 * extraLevels);
+    this.critRate      = (cfg.critRate ?? 0) + 0.02 * extraLevels;
+    this.critDamage    = cfg.critDamage ?? 1.5;
+    this.xpReward      = Math.round(cfg.xpReward * xpMult);
     this.collisionRadius = cfg.collisionRadius;
+    this.hitboxW = cfg.hitboxW ?? cfg.collisionRadius;
+    this.hitboxH = cfg.hitboxH ?? cfg.collisionRadius;
 
     // Skill pool + reset cooldowns (ready immediately)
     this.skillPool = [...cfg.skillPool];
@@ -193,8 +211,9 @@ export class Enemy extends Schema {
     attackerId?: string,
     isCrit: boolean = false,
   ): number {
-    // Defence reduces incoming damage, but is ignored on critical hits.
-    const mitigated = isCrit ? rawDamage : rawDamage * (1.0 - this.defence);
+    // Defence reduces incoming damage. Crits bypass only 50% of defence.
+    const effectiveDefence = isCrit ? this.defence * 0.5 : this.defence;
+    const mitigated = rawDamage * (1.0 - effectiveDefence);
     let dmg = mitigated * this.incomingDamageMultiplier;
     // Shield absorbs first
     if (this.shield > 0) {
@@ -214,10 +233,10 @@ export class Enemy extends Schema {
 
     // Hit feedback: white flash + brief hit-stun pause.
     // Duration scales with skill power (e.g. slam > claw > bolter).
-    const fbMs = sourceSkillId ? getSkillHitFeedback(sourceSkillId) : 120;
+    const fbMs = Math.max(150, sourceSkillId ? getSkillHitFeedback(sourceSkillId) : 150);
     const now = Date.now();
     this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
-    this.pausedUntil = Math.max(this.pausedUntil, now + fbMs);
+    // Hit-stun removed � only flash, no movement freeze.
 
     // Record last hit for client-side damage numbers.
     this.lastHitDamage = Math.round(dmg);
@@ -242,7 +261,7 @@ export class Enemy extends Schema {
   // ============================================================
 
   /**
-   * Advance bleed DoT: apply bleedDps * dt damage while active.
+   * Advance bleed DoT: apply bleedTickDamage every 0.5s while active.
    * Returns true if the enemy died from bleed this tick.
    */
   tickBleed(dt: number): boolean {
@@ -254,6 +273,7 @@ export class Enemy extends Schema {
     if (now >= this.bleedUntil) {
       this.bleedUntil = 0;
       this.bleedDps = 0;
+      this.bleedTickDamage = 0;
       this.bleedTickAccum = 0;
       return false;
     }
@@ -261,15 +281,17 @@ export class Enemy extends Schema {
     this.bleedTickAccum += dt;
     if (this.bleedTickAccum >= 0.5) {
       this.bleedTickAccum -= 0.5;
-      this.takeDamage(this.bleedDps, "claw", this.bleedAttackerId);
+      this.takeDamage(this.bleedTickDamage, "claw", this.bleedAttackerId, this.bleedIsCrit);
       return this.isDead;
     }
     return false;
   }
 
-  /** Inflict bleed: set dps + extend/until timestamp. */
-  applyBleed(dps: number, durationSec: number, attackerId?: string): void {
-    this.bleedDps = dps;
+  /** Inflict bleed: set tick damage + crit status + until timestamp. */
+  applyBleed(tickDamage: number, durationSec: number, attackerId?: string, isCritBleed?: boolean): void {
+    this.bleedTickDamage = tickDamage;
+    this.bleedDps = tickDamage * 2; // backwards compat (dps = tickDamage * 2 ticks/sec)
+    this.bleedIsCrit = isCritBleed ?? false;
     this.bleedUntil = Date.now() + durationSec * 1000;
     this.bleedTickAccum = 0;
     if (attackerId) this.bleedAttackerId = attackerId;

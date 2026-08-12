@@ -85,11 +85,11 @@ export class ClawSystem {
     if (faction === "player") {
       this.state.enemies.forEach((enemy, id) => {
         if (id === ownerId || enemy.isDead) return;
-        if (this.inCone(x, y, angle, halfAngle, range, enemy.x, enemy.y)) {
+        if (this.inCone(x, y, angle, halfAngle, range, enemy.x, enemy.y, Math.max(enemy.hitboxW, enemy.hitboxH))) {
           const c = applyCrit(damage, critRate, critDamage);
           enemy.takeDamage(c.damage, "claw", ownerId, c.isCrit);
           if (bleed) {
-            enemy.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel), ownerId);
+            enemy.applyBleed(Math.round(c.damage * 0.1), CLAW_DEF.bleedDuration(skillLevel), ownerId, c.isCrit);
           }
         }
       });
@@ -97,21 +97,21 @@ export class ClawSystem {
       // Enemy claw: hits players + other enemies (never caster).
       this.state.players.forEach((player, id) => {
         if (id === ownerId || player.isDead) return;
-        if (this.inCone(x, y, angle, halfAngle, range, player.x, player.y)) {
+        if (this.inCone(x, y, angle, halfAngle, range, player.x, player.y, Math.max(player.hitboxW, player.hitboxH))) {
           const c2 = applyCrit(damage, critRate, critDamage);
           player.takeDamage(c2.damage, "claw", undefined, c2.isCrit);
           if (bleed) {
-            player.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel));
+            player.applyBleed(Math.round(c2.damage * 0.1), CLAW_DEF.bleedDuration(skillLevel), undefined, c2.isCrit);
           }
         }
       });
       this.state.enemies.forEach((enemy, id) => {
         if (id === ownerId || enemy.isDead) return;
-        if (this.inCone(x, y, angle, halfAngle, range, enemy.x, enemy.y)) {
+        if (this.inCone(x, y, angle, halfAngle, range, enemy.x, enemy.y, Math.max(enemy.hitboxW, enemy.hitboxH))) {
           const c = applyCrit(damage, critRate, critDamage);
           enemy.takeDamage(c.damage, "claw", ownerId, c.isCrit);
           if (bleed) {
-            enemy.applyBleed(CLAW_DEF.bleedDps(skillLevel), CLAW_DEF.bleedDuration(skillLevel), ownerId);
+            enemy.applyBleed(Math.round(c.damage * 0.1), CLAW_DEF.bleedDuration(skillLevel), ownerId, c.isCrit);
           }
         }
       });
@@ -149,17 +149,24 @@ export class ClawSystem {
     range: number,
     px: number,
     py: number,
+    targetRadius?: number,
   ): boolean {
+    // Expand range by target radius so edge-of-cone hits feel fair
+    const effectiveRange = targetRadius ? range + targetRadius : range;
     const dx = px - ox;
     const dy = py - oy;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist > range) return false;
+    if (dist > effectiveRange) return false;
     if (dist < 0.0001) return true; // caster on top of target
     const pointAngle = Math.atan2(dy, dx);
     let delta = pointAngle - angle;
     // Normalize delta to [-PI, PI]
     while (delta > Math.PI) delta -= 2 * Math.PI;
     while (delta < -Math.PI) delta += 2 * Math.PI;
-    return Math.abs(delta) <= halfAngle;
+    // Expand half-angle slightly by target radius for fairness
+    const effectiveHalfAngle = targetRadius
+      ? halfAngle + Math.atan2(targetRadius, Math.max(dist, 1))
+      : halfAngle;
+    return Math.abs(delta) <= effectiveHalfAngle;
   }
 }

@@ -105,6 +105,10 @@ export class Player extends Schema {
   @type("number") hitSeq: number = 0;
   /** Server timestamp (ms) until which the player is frozen (hit-stun). */
   pausedUntil: number = 0;
+  /** Hitbox half-width (rectangle, synced for debug overlay). */
+  @type("number") hitboxW: number = 9;
+  /** Hitbox half-height (rectangle, synced for debug overlay). */
+  @type("number") hitboxH: number = 15;
 
   /** Server timestamp (ms) until which the player is bleeding (DoT). */
   @type("number") bleedUntil: number = 0;
@@ -114,6 +118,10 @@ export class Player extends Schema {
   skillCooldowns: Map<SkillId, number> = new Map();
   /** Bleed damage per second (server-only; applied while bleedUntil > now). */
   bleedDps: number = 0;
+  /** Damage per bleed tick (10% of claw damage). */
+  bleedTickDamage: number = 0;
+  /** Whether the bleed is a critical bleed (from crit claw hit). */
+  bleedIsCrit: boolean = false;
   bleedTickAccum: number = 0;
 
   // ============================================================
@@ -172,15 +180,19 @@ export class Player extends Schema {
     _attackerId?: string,
     isCrit: boolean = false,
   ): number {
-    // Defence reduces incoming damage, but is ignored on critical hits.
-    const mitigated = isCrit ? rawDamage : rawDamage * (1.0 - this.defence);
+    // Defence reduces incoming damage. Crits bypass only 50% of defence.
+    const effectiveDefence = isCrit ? this.defence * 0.5 : this.defence;
+    const mitigated = rawDamage * (1.0 - effectiveDefence);
     const dmg = mitigated * this.incomingDamageMultiplier;
     this.currentHealth = Math.max(0, this.currentHealth - dmg);
     // Hit feedback: white flash + hit-stun — ALWAYS show on damage.
-    const fbMs = sourceSkillId ? getSkillHitFeedback(sourceSkillId) : 120;
+    const fbMs = Math.max(
+      150,
+      sourceSkillId ? getSkillHitFeedback(sourceSkillId) : 100,
+    );
     const now = Date.now();
     this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
-    this.pausedUntil = Math.max(this.pausedUntil, now + fbMs);
+    // Hit-stun removed � only flash, no movement freeze.
     // Record last hit for client-side damage numbers.
     this.lastHitDamage = Math.round(dmg);
     this.lastHitCrit = isCrit;
@@ -355,7 +367,7 @@ export class Player extends Schema {
   }
 
   /**
-   * Advance bleed DoT: apply bleedDps * dt damage while active.
+   * Advance bleed DoT: apply bleedTickDamage every 0.5s while active.
    * Returns true if the player died from bleed this tick.
    */
   tickBleed(dt: number): boolean {
@@ -367,6 +379,7 @@ export class Player extends Schema {
     if (now >= this.bleedUntil) {
       this.bleedUntil = 0;
       this.bleedDps = 0;
+      this.bleedTickDamage = 0;
       this.bleedTickAccum = 0;
       return false;
     }
@@ -374,15 +387,27 @@ export class Player extends Schema {
     this.bleedTickAccum += dt;
     if (this.bleedTickAccum >= 0.5) {
       this.bleedTickAccum -= 0.5;
-      this.takeDamage(this.bleedDps, "claw");
+      this.takeDamage(
+        this.bleedTickDamage,
+        "claw",
+        undefined,
+        this.bleedIsCrit,
+      );
       return this.isDead;
     }
     return false;
   }
 
-  /** Inflict bleed: set dps + until timestamp. */
-  applyBleed(dps: number, durationSec: number): void {
-    this.bleedDps = dps;
+  /** Inflict bleed: set tick damage + crit status + until timestamp. */
+  applyBleed(
+    tickDamage: number,
+    durationSec: number,
+    _attackerId?: string,
+    isCritBleed?: boolean,
+  ): void {
+    this.bleedTickDamage = tickDamage;
+    this.bleedDps = tickDamage * 2; // backwards compat
+    this.bleedIsCrit = isCritBleed ?? false;
     this.bleedUntil = Date.now() + durationSec * 1000;
     this.bleedTickAccum = 0;
   }

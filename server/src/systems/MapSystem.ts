@@ -80,4 +80,47 @@ export class MapSystem {
 
     return { x, y };
   }
+
+  /**
+   * Resolve a rectangle (AABB) out of any solid tiles it overlaps.
+   * hw = half-width, hh = half-height. Returns corrected position.
+   */
+  resolveRectTileCollision(
+    x: number,
+    y: number,
+    hw: number,
+    hh: number,
+  ): { x: number; y: number } {
+    // Check tiles overlapping the rectangle bounds
+    const minCol = Math.floor((x - hw) / this.tileSize);
+    const maxCol = Math.floor((x + hw) / this.tileSize);
+    const minRow = Math.floor((y - hh) / this.tileSize);
+    const maxRow = Math.floor((y + hh) / this.tileSize);
+
+    for (let r = minRow; r <= maxRow; r++) {
+      for (let c = minCol; c <= maxCol; c++) {
+        if (r < 0 || r >= this.rows || c < 0 || c >= this.cols) continue;
+        if (!this.grid[r * this.cols + c]) continue;
+
+        const cellX = c * this.tileSize;
+        const cellY = r * this.tileSize;
+
+        // AABB overlap test
+        const overlapLeft = (x + hw) - cellX;       // how far rect penetrates from left
+        const overlapRight = (cellX + this.tileSize) - (x - hw);
+        const overlapTop = (y + hh) - cellY;
+        const overlapBottom = (cellY + this.tileSize) - (y - hh);
+
+        if (overlapLeft > 0 && overlapRight > 0 && overlapTop > 0 && overlapBottom > 0) {
+          // Push out along axis of least penetration
+          const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+          if (minOverlap === overlapLeft) x -= overlapLeft;
+          else if (minOverlap === overlapRight) x += overlapRight;
+          else if (minOverlap === overlapTop) y -= overlapTop;
+          else y += overlapBottom;
+        }
+      }
+    }
+    return { x, y };
+  }
 }
