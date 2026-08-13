@@ -7,9 +7,13 @@
  *
  * SKILL POOL
  *   Skills are shared between enemies and the player (same SkillId space as
- *   client/src/config/skills.ts). An enemy's skill pool is the set of skills
- *   it MAY cast; the EnemySystem picks one at random each attempt, gated by
- *   that skill's cooldown. Skill logic itself is NOT implemented yet.
+ *   client/src/config/skills.ts). An enemy does NOT have a fixed skill pool;
+ *   instead it declares an ORDERED list of `potentialSkills`. At spawn the
+ *   enemy unlocks the first `1 + floor(level / 5)` of them (so 1 skill at
+ *   levels 1-4, 2 skills at levels 5-9, 3 at levels 10-14, ...). The enemy's
+ *   level is then randomly distributed as skill levels across the unlocked
+ *   skills (each capped at MAX_SKILL_LEVEL). The EnemySystem picks a skill
+ *   from the unlocked pool at random each attempt, gated by cooldown.
  *
  * BASE SPEED NOTE
  *   The simulation moves entities by `speed * dt` where dt is in SECONDS.
@@ -62,8 +66,13 @@ export interface EnemyBaseConfig {
   hitboxW: number;
   /** Hitbox half-height (rectangle hitbox). */
   hitboxH: number;
-  /** Skills this enemy may use. */
-  skillPool: SkillId[];
+  /**
+   * Ordered list of skills this enemy can potentially learn. At spawn, the
+   * first `1 + floor(level / 5)` entries are unlocked and form the active
+   * skill pool. e.g. orck has ["slam", "claw"]: level 1-4 => [slam],
+   * level 5-9 => [slam, claw]. Index 0 is the primary skill.
+   */
+  potentialSkills: SkillId[];
   /** Per-skill cooldown in SECONDS (keyed by SkillId). 0 = no cooldown. */
   skillCooldown: Partial<Record<SkillId, number>>;
   /** Per-level stat growth. */
@@ -91,11 +100,11 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     attack: 20,
     defence: 0.01, // 10% damage reduction
     critRate: 0.2, // 20% crit chance
-    shield: 0,
+    shield: 50, // base shield at level 1
     collisionRadius: 9,
     hitboxW: 16,
     hitboxH: 8,
-    skillPool: ["claw"],
+    potentialSkills: ["claw"],
     skillCooldown: { claw: 1.5 },
     growth: {
       maxHealth: 120,
@@ -114,12 +123,13 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     attack: 50,
     defence: 0.01,
     critRate: 0.2,
-    shield: 0,
+    shield: 100, // base shield at level 1
     collisionRadius: 16, // larger hitbox than tyranid
     hitboxW: 15,
     hitboxH: 30,
-    skillPool: ["slam"],
-    skillCooldown: { slam: 2.0 },
+    // Primary: slam. Unlocks claw at level 5+ (see potentialSkills unlock rule).
+    potentialSkills: ["slam", "claw"],
+    skillCooldown: { slam: 2.0, claw: 1.5 },
     growth: {
       maxHealth: 100,
       moveSpeed: 0,

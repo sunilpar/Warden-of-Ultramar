@@ -13,9 +13,16 @@
  * Level determines base damage, move speed, hp, skill cooldowns, etc. Skills
  * are drawn from a shared pool (same SkillId space as the player) and gated
  * by per-skill cooldowns tracked server-side.
+ *
+ * SKILL POOL & SKILL LEVELS
+ *   The config declares an ORDERED `potentialSkills` list. At init, the enemy
+ *   unlocks the first `1 + floor(level / 5)` entries into `skillPool`. The
+ *   enemy's level is then distributed randomly across the unlocked skills as
+ *   per-skill levels (each capped at MAX_SKILL_LEVEL). `skillLevels` maps a
+ *   SkillId to its current level; EnemySystem reads it when casting.
  */
 import { Schema, type } from "@colyseus/schema";
-import { type SkillId, getSkillHitFeedback } from "../config/skillDefs";
+import { type SkillId, getSkillHitFeedback, MAX_SKILL_LEVEL } from "../config/skillDefs";
 import { ENEMY_STATS, type EnemyTypeId } from "../config/enemyStats";
 
 export class Enemy extends Schema {
@@ -41,6 +48,12 @@ export class Enemy extends Schema {
 
   // ---- Shield (synced) — absorbs damage before health. 0 for now. ----
   @type("number") shield: number = 0;
+  /** Maximum shield capacity (drives the floating shield bar). 0 = no shield. */
+  @type("number") maxShield: number = 0;
+  /** Server timestamp (ms) before which a broken shield will not recharge. */
+  shieldRechargeAt: number = 0;
+  /** Shield slot level (distributed from enemy level alongside skills). Synced for HUD. */
+  @type("number") shieldLevel: number = 1;
 
   // ---- Movement (synced) — effective speed (base * speedMultiplier) ----
   @type("number") moveSpeed: number = 0;
@@ -93,8 +106,13 @@ export class Enemy extends Schema {
   @type("number") hitboxW: number = 12;
   /** Hitbox half-height (rectangle, synced for debug overlay). */
   @type("number") hitboxH: number = 12;
-  /** Skills this enemy may cast (copied from config). */
+  /** Unlocked skills this enemy may cast (subset of config potentialSkills). */
   skillPool: SkillId[] = [];
+  /**
+   * Per-skill level for each unlocked skill (1..MAX_SKILL_LEVEL). Drives
+   * damage scaling when the EnemySystem casts that skill. Built once at init.
+   */
+  skillLevels: Map<SkillId, number> = new Map();
   /**
    * Remaining cooldown in SECONDS for each skill. When <= 0 the skill is
    * ready. Set back to the skill's cooldown after it is used.
@@ -124,7 +142,9 @@ export class Enemy extends Schema {
 
   /**
    * Initialize this enemy from its type config at the given level.
-   * Applies level-based growth to base stats.
+   * Applies level-based growth to base stats, unlocks skills from the
+   * potential pool, and randomly distributes the enemy's level as per-skill
+   * levels across the unlocked skills.
    */
   init(typeId: EnemyTypeId, level: number): void {
     const cfg = ENEMY_STATS[typeId];
@@ -141,15 +161,14 @@ export class Enemy extends Schema {
     // MoveSpeed scales by percentage (always relative to base).
     const extraLevels = Math.max(0, level - 1);
     const hpMult  = 1 + 0.60 * extraLevels; // +60% HP per level
-    const atkMult = 1 + 0.20 * extraLevels; // +20% ATK per level
+    const atkMult = 1 + 0.10 * extraLevels; // +10% ATK per level
     const xpMult  = Math.pow(level, 1.5) / 4; // scales with player XP curve (~20 kills per level)
-    // Move speed does NOT scale with level � stays at base.
+    // Move speed does NOT scale with level — stays at base.
 
     this.maxHealth     = Math.round(cfg.maxHealth * hpMult);
     this.currentHealth = this.maxHealth;
     this.baseMoveSpeed = cfg.moveSpeed;
     this.attack        = Math.round(cfg.attack * atkMult);
-    this.shield        = cfg.shield;
     this.defence       = Math.min(0.75, (cfg.defence ?? 0) + 0.005 * extraLevels);
     this.critRate      = (cfg.critRate ?? 0) + 0.02 * extraLevels;
     this.critDamage    = cfg.critDamage ?? 1.5;
@@ -158,12 +177,14 @@ export class Enemy extends Schema {
     this.hitboxW = cfg.hitboxW ?? cfg.collisionRadius;
     this.hitboxH = cfg.hitboxH ?? cfg.collisionRadius;
 
-    // Skill pool + reset cooldowns (ready immediately)
-    this.skillPool = [...cfg.skillPool];
-    this.skillCooldownsRemaining = new Map();
-    for (const skill of this.skillPool) {
-      this.skillCooldownsRemaining.set(skill, 0);
-    }
+    // ---- Skill pool + skill-level distribution (includes shield slot) ----
+    this.buildSkillPool(cfg.potentialSkills, level);
+
+    // ---- Shield: base + growth from distributed shield level ----
+    // Each shield level point adds 20 shield (mirrors player SHIELD.AMOUNT_PER_LEVEL).
+    this.maxShield     = cfg.shield + (this.shieldLevel - 1) * 20;
+    this.shield        = this.maxShield;
+    this.shieldRechargeAt = 0;
 
     // Reset transient multipliers
     this.speedMultiplier = 1.0;
@@ -181,6 +202,51 @@ export class Enemy extends Schema {
     this.damageTrackers.clear();
 
     this.recalcDerivedStats();
+  }
+
+  /**
+   * Unlock the first `1 + floor(level / 5)` entries of `potentialSkills` into
+   * `skillPool`, then randomly distribute the enemy's level as per-skill
+   * levels across those unlocked skills (each capped at MAX_SKILL_LEVEL).
+   *
+   * Distribution (no per-level loop — at most ~3 skills): for every skill
+   * except the last, pick a random amount in [1, remaining - skillsLeftAfter]
+   * so each later skill still gets at least 1; the last skill receives all
+   * remaining points. Each pick is clamped to MAX_SKILL_LEVEL.
+   */
+  private buildSkillPool(potential: SkillId[], level: number): void {
+    // How many skills are unlocked: 1 at lvl 1-4, 2 at 5-9, 3 at 10-14, ...
+    const unlockedCount = Math.min(potential.length, 1 + Math.floor(level / 5));
+
+    this.skillPool = potential.slice(0, unlockedCount);
+    this.skillLevels = new Map();
+    this.skillCooldownsRemaining = new Map();
+    if (unlockedCount === 0) return;
+
+    // Total recipients = unlocked skills + 1 shield slot.
+    const totalSlots = unlockedCount + 1;
+
+    let remaining = level;
+    // Distribute across unlocked skills first; shield gets the remainder last.
+    for (let i = 0; i < unlockedCount; i++) {
+      const skill = this.skillPool[i];
+      const slotsAfterThis = totalSlots - 1 - i;
+      let lvl: number;
+      if (slotsAfterThis === 0) {
+        lvl = Math.min(MAX_SKILL_LEVEL, remaining);
+      } else {
+        const minForOthers = slotsAfterThis; // 1 each for remaining slots
+        const maxAllowed = Math.min(MAX_SKILL_LEVEL, remaining - minForOthers);
+        const lo = Math.max(1, Math.min(maxAllowed, 1));
+        const hi = Math.max(lo, maxAllowed);
+        lvl = lo + Math.floor(Math.random() * (hi - lo + 1));
+      }
+      this.skillLevels.set(skill, lvl);
+      remaining -= lvl;
+      this.skillCooldownsRemaining.set(skill, 0);
+    }
+    // Shield slot: takes whatever remains (clamped to MAX_SKILL_LEVEL, min 1).
+    this.shieldLevel = Math.max(1, Math.min(MAX_SKILL_LEVEL, remaining));
   }
 
   // ============================================================
@@ -220,6 +286,13 @@ export class Enemy extends Schema {
       const absorbed = Math.min(this.shield, dmg);
       this.shield -= absorbed;
       dmg -= absorbed;
+      // ANY shield damage re-arms the recovery delay.
+      if (absorbed > 0 && this.maxShield > 0) {
+        this.shieldRechargeAt = Date.now() + 30000;
+      }
+      if (this.shield <= 0) {
+        this.shield = 0;
+      }
     }
     this.currentHealth = Math.max(0, this.currentHealth - dmg);
 
@@ -236,7 +309,7 @@ export class Enemy extends Schema {
     const fbMs = Math.max(150, sourceSkillId ? getSkillHitFeedback(sourceSkillId) : 150);
     const now = Date.now();
     this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
-    // Hit-stun removed � only flash, no movement freeze.
+    // Hit-stun removed — only flash, no movement freeze.
 
     // Record last hit for client-side damage numbers.
     this.lastHitDamage = Math.round(dmg);
@@ -295,6 +368,21 @@ export class Enemy extends Schema {
     this.bleedUntil = Date.now() + durationSec * 1000;
     this.bleedTickAccum = 0;
     if (attackerId) this.bleedAttackerId = attackerId;
+  }
+
+  /**
+   * Advance shield recovery by `dt` seconds. A broken shield (0) recharges
+   * after a 30s delay, refilling 20% of maxShield per second until full.
+   */
+  tickShield(dt: number): void {
+    if (this.maxShield <= 0) return;
+    if (this.shield >= this.maxShield) {
+      this.shield = this.maxShield;
+      return;
+    }
+    if (Date.now() < this.shieldRechargeAt) return;
+    const recharge = this.maxShield * 0.2 * dt;
+    this.shield = Math.min(this.maxShield, this.shield + recharge);
   }
 
   /** Advance all skill cooldowns by `dt` seconds (clamped at 0). */

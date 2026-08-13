@@ -142,6 +142,7 @@ export class GameRoom2 extends Room {
     this.slamSystem.update(dt);
     // Tick player skill cooldowns + bleed DoT
     this.state.players.forEach((p) => {
+      p.tickShield(dt);
       p.tickSkillCooldowns(dt);
       p.tickHealCooldown(dt);
       if (p.tickBleed(dt)) {
@@ -407,6 +408,8 @@ export class GameRoom2 extends Room {
       } else if (stat === "moveSpeed") {
         player.speedMultiplier += 0.05;
         player.recalcDerivedStats();
+      } else if (stat === "shield") {
+        player.upgradeShieldSlot();
       } else {
         return;
       }

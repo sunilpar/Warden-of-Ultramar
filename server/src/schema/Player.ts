@@ -18,6 +18,12 @@
  *                        and combat actually use
  *                        (moveSpeed is synced so the client can predict).
  *
+ * SHIELD
+ *   The shield is an equippable item (equipped by default). It absorbs
+ *   damage before health. When broken (reaches 0) it begins recharging
+ *   after a recovery delay. Shield amount grows with the shield SLOT level
+ *   (SHIELD_LEVEL), not with a castable skill.
+ *
  * Only the fields marked @type are sent to clients; inputQueue is local.
  */
 import { Schema, type, MapSchema } from "@colyseus/schema";
@@ -41,6 +47,20 @@ export class Player extends Schema {
   // ---- Health (synced) ----
   @type("number") maxHealth: number = PLAYER_STATS.BASE.MAX_HEALTH;
   @type("number") currentHealth: number = PLAYER_STATS.BASE.MAX_HEALTH;
+
+  // ---- Shield (synced) — absorbs damage before health ----
+  /** Current shield value (drains as it absorbs damage, recharges after a delay). */
+  @type("number") shield: number = 0;
+  /** Maximum shield capacity (drives the HUD meter). Grows with shield slot level. */
+  @type("number") maxShield: number = 0;
+  /**
+   * Shield recharge state for the client HUD:
+   *   0  = active (shield > 0, absorbing)
+   *   1  = broken / recharging (waiting out the recovery delay or refilling)
+   * The client uses this to hide the low-shield vignette once the shield is
+   * fully broken (shield === 0 and not yet recharging).
+   */
+  @type("number") shieldState: number = 0;
 
   // ---- Movement (synced) ----
   /** Effective move speed in px/sec (already includes multipliers). */
@@ -101,6 +121,8 @@ export class Player extends Schema {
   @type("number") lastHitDamage: number = 0;
   /** Whether the last hit was a critical hit. */
   @type("boolean") lastHitCrit: boolean = false;
+  /** True if the last hit taken was absorbed by shield (drives blue flash). */
+  @type("boolean") lastHitShielded: boolean = false;
   /** Monotonic counter — increments every time damage is taken (so client can detect new hits). */
   @type("number") hitSeq: number = 0;
   /** Server timestamp (ms) until which the player is frozen (hit-stun). */
@@ -123,6 +145,20 @@ export class Player extends Schema {
   /** Whether the bleed is a critical bleed (from crit claw hit). */
   bleedIsCrit: boolean = false;
   bleedTickAccum: number = 0;
+
+  // ---- Shield internals ----
+  /** Shield STAT level (controls shield amount). +20 shield per stat level.
+   *  Grows automatically with player level (levelUp increments this). */
+  @type("number") shieldStatLevel: number = 1;
+  /** Shield CARD/SLOT level (controls recovery delay). Lower delay per level.
+   *  Upgraded via the C-tab / message 6 (stat === "shield"). */
+  @type("number") shieldCardLevel: number = 1;
+  /**
+   * Server timestamp (ms) at which the broken shield begins recharging.
+   * Set to (now + recoveryDelay) whenever the shield breaks or takes a hit
+   * while at 0. While Date.now() < this value, no recharge happens.
+   */
+  shieldRechargeAt: number = 0;
 
   // ============================================================
   // LIFECYCLE
@@ -150,6 +186,73 @@ export class Player extends Schema {
     this.healKills = 0;
     this.healReady = true;
     this.healCooldownEndsAt = 0;
+    // Default shield: stat level 1 (controls amount), card level 1 (controls recovery)
+    this.shieldStatLevel = 1;
+    this.shieldCardLevel = 1;
+    this.recomputeShield();
+  }
+
+  // ============================================================
+  // SHIELD
+  // ============================================================
+
+  /**
+   * Recompute shield from the separate stat (amount) and card (recovery) levels.
+   * - maxShield = SHIELD_STAT.BASE_AMOUNT + (shieldStatLevel - 1) * SHIELD_STAT.AMOUNT_PER_LEVEL
+   * - Recovery delay = SHIELD_CARD.BASE_DELAY - (shieldCardLevel - 1) * REDUCTION
+   * Called on spawn, respawn, and levelUp.
+   */
+  recomputeShield(): void {
+    const S = PLAYER_STATS.SHIELD_STAT;
+    this.maxShield = S.BASE_AMOUNT + (this.shieldStatLevel - 1) * S.AMOUNT_PER_LEVEL;
+    this.shield = this.maxShield;
+    this.shieldRechargeAt = 0;
+    this.shieldState = 0;
+  }
+
+  /** Recovery delay (seconds) for the current shield CARD/SLOT level. */
+  shieldRecoveryDelay(): number {
+    const S = PLAYER_STATS.SHIELD_CARD;
+    return Math.max(
+      S.MIN_RECOVERY_DELAY,
+      S.BASE_RECOVERY_DELAY -
+        S.RECOVERY_DELAY_REDUCTION_PER_LEVEL * (this.shieldCardLevel - 1),
+    );
+  }
+
+  /**
+   * Advance shield recovery by `dt` seconds (called each fixedTick).
+   * While the shield is at 0, wait out the recovery delay; then recharge a
+   * fraction of maxShield per second until full. Once full, mark active.
+   */
+  tickShield(dt: number): void {
+    if (this.shieldLevel <= 0 || this.maxShield <= 0) return;
+    // Already full — active.
+    if (this.shield >= this.maxShield) {
+      this.shield = this.maxShield;
+      this.shieldState = 0;
+      return;
+    }
+    const now = Date.now();
+    // Waiting out the recovery delay (broken shield).
+    if (now < this.shieldRechargeAt) {
+      this.shieldState = 1;
+      return;
+    }
+    // Recharging.
+    this.shieldState = 1;
+    const recharge = this.maxShield * PLAYER_STATS.SHIELD.RECHARGE_RATE * dt;
+    this.shield = Math.min(this.maxShield, this.shield + recharge);
+    if (this.shield >= this.maxShield) {
+      this.shield = this.maxShield;
+      this.shieldState = 0; // fully recharged -> active again
+    }
+  }
+
+  /** Spend a skill point to upgrade the shield slot by one level. */
+  upgradeShieldSlot(): void {
+    this.shieldLevel += 1;
+    this.applyShieldLevel();
   }
 
   // ============================================================
@@ -173,7 +276,8 @@ export class Player extends Schema {
   // ============================================================
 
   /** Apply damage to the player (respects incomingDamageMultiplier).
-   *  sourceSkillId controls the hit-feedback duration (flash + pause). */
+   *  Shield absorbs first, then health. sourceSkillId controls the
+   *  hit-feedback duration (flash + pause). */
   takeDamage(
     rawDamage: number,
     sourceSkillId?: SkillId,
@@ -183,7 +287,30 @@ export class Player extends Schema {
     // Defence reduces incoming damage. Crits bypass only 50% of defence.
     const effectiveDefence = isCrit ? this.defence * 0.5 : this.defence;
     const mitigated = rawDamage * (1.0 - effectiveDefence);
-    const dmg = mitigated * this.incomingDamageMultiplier;
+    let dmg = mitigated * this.incomingDamageMultiplier;
+    let shielded = false;
+    // Shield absorbs first.
+    if (this.shield > 0) {
+      const absorbed = Math.min(this.shield, dmg);
+      if (absorbed > 0) shielded = true;
+      this.shield -= absorbed;
+      dmg -= absorbed;
+      // ANY damage to the shield re-arms the recovery delay. The shield only
+      // starts regenerating after the full delay passes with no new damage.
+      if (absorbed > 0) {
+        this.shieldRechargeAt = Date.now() + this.shieldRecoveryDelay() * 1000;
+        this.shieldState = 1;
+      }
+      if (this.shield <= 0) {
+        this.shield = 0;
+      }
+    } else {
+      // No shield: keep the recovery delay armed from the last break so a
+      // steady stream of hits doesn't begin recharging mid-combat.
+      if (this.shieldLevel > 0 && this.shieldRechargeAt < Date.now()) {
+        this.shieldRechargeAt = Date.now() + this.shieldRecoveryDelay() * 1000;
+      }
+    }
     this.currentHealth = Math.max(0, this.currentHealth - dmg);
     // Hit feedback: white flash + hit-stun — ALWAYS show on damage.
     const fbMs = Math.max(
@@ -192,12 +319,13 @@ export class Player extends Schema {
     );
     const now = Date.now();
     this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
-    // Hit-stun removed � only flash, no movement freeze.
+    // Hit-stun removed — only flash, no movement freeze.
     // Record last hit for client-side damage numbers.
-    this.lastHitDamage = Math.round(dmg);
+    this.lastHitDamage = Math.round(mitigated * this.incomingDamageMultiplier);
     this.lastHitCrit = isCrit;
+    this.lastHitShielded = shielded;
     this.hitSeq += 1;
-    return dmg;
+    return mitigated * this.incomingDamageMultiplier;
   }
 
   /** Heal the player (clamped to maxHealth). Returns amount healed. */

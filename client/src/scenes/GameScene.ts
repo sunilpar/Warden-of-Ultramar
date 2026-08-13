@@ -73,7 +73,15 @@ function formatNumber(n: number): string {
   for (const [threshold, suffix] of tiers) {
     if (n >= threshold) {
       const val = n / threshold;
-      return (val >= 100 ? val.toFixed(0) : val >= 10 ? val.toFixed(1) : val.toFixed(2)) + " " + suffix;
+      return (
+        (val >= 100
+          ? val.toFixed(0)
+          : val >= 10
+            ? val.toFixed(1)
+            : val.toFixed(2)) +
+        " " +
+        suffix
+      );
     }
   }
   return Math.floor(n).toString();
@@ -233,6 +241,14 @@ export class GameScene extends Phaser.Scene {
   // Scaled full-height of the HP bar (set in createStatsHUD)
   private hpBarFullHeight: number = 0;
   private hpBarFullWidth: number = 0;
+  // Shield bar (light blue) drawn just above the HP bar.
+  private shieldFill!: Phaser.GameObjects.Rectangle;
+  private shieldText!: Phaser.GameObjects.Text;
+  private shieldBarFullHeight: number = 0;
+  private shieldBarFullWidth: number = 0;
+  // Low-HP / low-shield edge vignettes (local player only).
+  private lowHpVignette: Phaser.GameObjects.Rectangle[] = [];
+  private lowShieldVignette: Phaser.GameObjects.Rectangle[] = [];
 
   // ---- Character animation state ----
   private animationsCreated: boolean = false;
@@ -717,6 +733,12 @@ export class GameScene extends Phaser.Scene {
       const hpFill = this.add
         .rectangle(-hpW / 2, -42, hpW, hpH, 0xff3333)
         .setOrigin(0, 0.5);
+      // White translucent shield bar overlaid on top of the HP bar.
+      // Visible only when the enemy has a shield (maxShield > 0).
+      const shieldFill = this.add
+        .rectangle(-hpW / 2, -42, hpW, hpH, 0xffffff, 0.6)
+        .setOrigin(0, 0.5)
+        .setVisible(false);
       // Enemy level text shown in front of (left of) the HP bar
       const lvText = this.add
         .text(-hpW / 2 - 4, -42, String(enemy.level ?? 1), {
@@ -728,7 +750,7 @@ export class GameScene extends Phaser.Scene {
         })
         .setOrigin(1, 0.5);
       const hpBar = this.add
-        .container(enemy.x, enemy.y, [hpBg, hpFill, lvText])
+        .container(enemy.x, enemy.y, [hpBg, hpFill, shieldFill, lvText])
         .setDepth(5);
       this.enemyHpBars[enemyId] = hpBar;
 
@@ -740,6 +762,8 @@ export class GameScene extends Phaser.Scene {
       sprite.setData("hitboxH", enemy.hitboxH ?? 12);
       sprite.setData("hp", enemy.currentHealth);
       sprite.setData("maxHp", enemy.maxHealth);
+      sprite.setData("shield", enemy.shield ?? 0);
+      sprite.setData("maxShield", enemy.maxShield ?? 0);
       sprite.setData("level", enemy.level ?? 1);
       sprite.setData("attacking", false);
 
@@ -749,6 +773,8 @@ export class GameScene extends Phaser.Scene {
         sprite.setData("facingRight", !!enemy.facingRight);
         sprite.setData("hp", enemy.currentHealth);
         sprite.setData("maxHp", enemy.maxHealth);
+        sprite.setData("shield", enemy.shield ?? 0);
+        sprite.setData("maxShield", enemy.maxShield ?? 0);
         sprite.setData("level", enemy.level ?? 1);
         sprite.setData("hitFlashUntil", enemy.hitFlashUntil);
         sprite.setData("hitboxW", enemy.hitboxW ?? 12);
@@ -1635,6 +1661,19 @@ export class GameScene extends Phaser.Scene {
     const HP_FILL_COLOR = 0xaa0000; // HP fill color (deeper red, not bright)
     const HP_FILL_ALPHA = 1.0;
 
+    // ---- Shield bar region (native hud.png pixels) ----
+    // The shield bar sits just ABOVE the HP bar (further toward the top of
+    // the HUD image), same width as HP. Tune SHIELD_Y_TOP to move it.
+    // SHIELD_Y_BOT == HP_Y_TOP so the shield bar's bottom touches the HP bar's top.
+    const SHIELD_Y_TOP = 90; // top edge of the shield bar (higher = taller)
+    const SHIELD_Y_BOT = 400; // bottom edge of the shield bar (== HP_Y_TOP)
+    // X position of the shield bar (native hud.png pixels). Defaults to the
+    // same X as the HP bar; change this to move the shield bar elsewhere.
+    const SHIELD_X = 238;
+    const SHIELD_BACK_COLOR = 0x06141c; // dark empty backing (deep blue)
+    const SHIELD_FILL_COLOR = 0x33b5ff; // light-blue shield fill
+    const SHIELD_FILL_ALPHA = 0.9;
+
     // ---- 5 card slot regions (native hud.png pixels) ----
     // Each slot defines WHERE on the HUD the 64x200 card goes.
     const SLOT_Y_TOP = 150;
@@ -1712,6 +1751,76 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(103);
+
+    // ---- Shield bar: back + fill + text (drawn ABOVE the HP bar) ----
+    // Use the same width as the HP bar. The shield bar extends upward from
+    // the top of the HP bar (SHIELD_Y_BOT == HP_Y_TOP).
+    const shieldFullW = hpFullW;
+    const shieldFullH = (SHIELD_Y_BOT - SHIELD_Y_TOP) * HUD_SCALE;
+    this.shieldBarFullWidth = shieldFullW;
+    this.shieldBarFullHeight = shieldFullH;
+    this.add
+      .rectangle(
+        nx(SHIELD_X),
+        ny(SHIELD_Y_TOP),
+        shieldFullW,
+        shieldFullH,
+        SHIELD_BACK_COLOR,
+      )
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(101);
+    this.shieldFill = this.add
+      .rectangle(
+        nx(SHIELD_X),
+        ny(SHIELD_Y_BOT),
+        shieldFullW,
+        shieldFullH,
+        SHIELD_FILL_COLOR,
+        SHIELD_FILL_ALPHA,
+      )
+      .setOrigin(0, 1)
+      .setScrollFactor(0)
+      .setDepth(102);
+    this.shieldText = this.add
+      .text(
+        nx(SHIELD_X) + shieldFullW / 2,
+        ny(SHIELD_Y_TOP) + shieldFullH / 2,
+        "",
+        {
+          color: "#eaf6ff",
+          fontSize: "11px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 3,
+        },
+      )
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(103);
+
+    // ---- Low-HP / low-shield edge vignettes (screen-edge tints) ----
+    // Four thin rectangles per color around the playable window edges.
+    // They start invisible and are driven by updateVignettes() each tick.
+    const camW = this.cameras.main.width;
+    const camH = this.cameras.main.height;
+    const V_THICK = 36; // edge thickness in px (tune)
+    // Left and right edge bars only (cleaner look than full-frame vignette).
+    const makeVignette = (color: number): Phaser.GameObjects.Rectangle[] => {
+      const lef = this.add
+        .rectangle(V_THICK / 2, camH / 2, V_THICK, camH, color)
+        .setScrollFactor(0)
+        .setDepth(490)
+        .setAlpha(0);
+      const rig = this.add
+        .rectangle(camW - V_THICK / 2, camH / 2, V_THICK, camH, color)
+        .setScrollFactor(0)
+        .setDepth(490)
+        .setAlpha(0);
+      return [lef, rig];
+    };
+    this.lowHpVignette = makeVignette(0xff0000);
+    this.lowShieldVignette = makeVignette(0x33b5ff);
 
     // ---- 5 card slots (empty frames ready for 64x200 cards) ----
     const slotW = SLOT_WIDTH * HUD_SCALE;
@@ -1944,7 +2053,9 @@ export class GameScene extends Phaser.Scene {
     this.xpBarFill.setSize(fillW, this.xpBarFill.height);
 
     // ---- Update numeric overlay ----
-    this.xpBarText.setText(formatNumber(currentXp) + " / " + formatNumber(xpToLevelUp));
+    this.xpBarText.setText(
+      formatNumber(currentXp) + " / " + formatNumber(xpToLevelUp),
+    );
 
     // ---- Detect XP gain / level-up ----
     if (this.lastKnownLevel !== -1) {
@@ -2234,6 +2345,28 @@ export class GameScene extends Phaser.Scene {
     );
     this.hpText.setText(`${Math.round(ratio * 100)}%`);
 
+    // ---- Vertical shield bar (same anchoring pattern as HP) ----
+    if (this.shieldFill) {
+      const maxS = (player as any).maxShield ?? 0;
+      const curS = (player as any).shield ?? 0;
+      if (maxS > 0) {
+        const sRatio = Phaser.Math.Clamp(curS / maxS, 0, 1);
+        this.shieldFill.setVisible(true);
+        this.shieldFill.setSize(
+          this.shieldBarFullWidth,
+          Math.max(0.001, this.shieldBarFullHeight * sRatio),
+        );
+        if (this.shieldText) {
+          this.shieldText.setVisible(true);
+          this.shieldText.setText(`${Math.round(sRatio * 100)}%`);
+        }
+      } else {
+        // No shield equipped: hide the bar + text.
+        this.shieldFill.setVisible(false);
+        if (this.shieldText) this.shieldText.setVisible(false);
+      }
+    }
+
     // ---- Secondary stats (top-right) ----
     if (this.statsText) {
       const pct = (v: number) => `${Math.round(v * 100)}%`;
@@ -2244,6 +2377,46 @@ export class GameScene extends Phaser.Scene {
         ].join("\n"),
       );
     }
+  }
+
+  /**
+   * Update the low-HP (red) and low-shield (blue) edge vignettes for the
+   * LOCAL player only. Effects are per-client (only this player sees their
+   * own low-health/low-shield warning). Both fade in/out smoothly.
+   *
+   * Low-HP: red edges when currentHealth/maxHealth < 0.30 (grows stronger as
+   *         HP drops, fully visible near death).
+   * Low-shield: light-blue edges when shield/maxShield <= 0.20 AND the shield
+   *         is still active (shield > 0). When the shield is fully broken
+   *         (shield === 0) the effect goes away.
+   */
+  private updateVignettes(): void {
+    const p = this.currentPlayerState;
+    if (!p || !this.lowHpVignette.length) return;
+
+    // ---- Low-HP red vignette (< 30% health) ----
+    let hpAlpha = 0;
+    if (p.maxHealth > 0) {
+      const hpRatio = p.currentHealth / p.maxHealth;
+      if (hpRatio < 0.3) {
+        // 0 at 0.30 -> 0.55 at 0 (strong, but not fully opaque).
+        hpAlpha = Phaser.Math.Clamp(((0.3 - hpRatio) / 0.3) * 0.55, 0, 0.55);
+      }
+    }
+    for (const r of this.lowHpVignette) r.setAlpha(hpAlpha);
+
+    // ---- Low-shield blue vignette (<= 20% shield, still active) ----
+    let shAlpha = 0;
+    const maxS = (p as any).maxShield ?? 0;
+    const curS = (p as any).shield ?? 0;
+    if (maxS > 0 && curS > 0) {
+      const sRatio = curS / maxS;
+      if (sRatio <= 0.2) {
+        shAlpha = Phaser.Math.Clamp(((0.2 - sRatio) / 0.2) * 0.5, 0, 0.5);
+      }
+    }
+    // When shield is broken (0) the effect goes away (shAlpha stays 0).
+    for (const r of this.lowShieldVignette) r.setAlpha(shAlpha);
   }
 
   // ============================================================
@@ -2712,6 +2885,13 @@ export class GameScene extends Phaser.Scene {
         "+" + Math.round(((p.moveSpeed ?? 120) / 120 - 1) * 100) + "%",
         "moveSpeed",
       ],
+      [
+        "Shield",
+        Math.round((p as any).shield ?? 0) +
+          " / " +
+          Math.round((p as any).maxShield ?? 0),
+        "shield",
+      ],
     ];
 
     for (const [label, val, statId] of stats) {
@@ -2739,6 +2919,8 @@ export class GameScene extends Phaser.Scene {
         else if (statId === "critRate") upgradeDesc = "+2% Crit Rate";
         else if (statId === "critDamage") upgradeDesc = "+20% Crit Damage";
         else if (statId === "moveSpeed") upgradeDesc = "+5% Move Speed";
+        else if (statId === "shield")
+          upgradeDesc = "+20 Shield, faster recharge";
         const btn = this.add
           .text(btnX, y, "[ + ]", {
             color: "#ffd700",
@@ -2794,6 +2976,99 @@ export class GameScene extends Phaser.Scene {
     }
 
     y += 16;
+
+    // ---- EQUIPPED ITEMS SECTION (shield + future equippables) ----
+    const itemHeader = this.add
+      .text(px + 20, y, "EQUIPPED ITEMS", {
+        color: "#88ccff",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
+    this.addDyn(itemHeader);
+    y += itemHeader.height + 8;
+
+    const equippedItems: {
+      id: string;
+      name: string;
+      level: number;
+      statId: string;
+    }[] = [];
+    const pShieldLvl = (p as any).shieldLevel ?? 1;
+    if ((p as any).maxShield && (p as any).maxShield > 0) {
+      equippedItems.push({
+        id: "shield",
+        name: "Shield",
+        level: pShieldLvl,
+        statId: "shield",
+      });
+    }
+
+    const itemDispW = 48;
+    const itemDispH = 75;
+    const itemGap = 12;
+    const itemStartX = px + 30;
+    for (let i = 0; i < equippedItems.length; i++) {
+      const it = equippedItems[i];
+      const itX = itemStartX + i * (itemDispW + itemGap);
+      // Shield uses the shield card art frame (column 2, tier 0).
+      const frame = (cardFrameForLevel as any)("shield", 1) ?? 0;
+      const slotBg = this.add
+        .rectangle(itX, y, itemDispW + 6, itemDispH + 6, 0x113355, 0.8)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setStrokeStyle(2, 0x33b5ff);
+      this.addDyn(slotBg);
+      const slotImg = this.add
+        .sprite(itX + 3, y + 3, "card_sheet", frame)
+        .setOrigin(0, 0)
+        .setDisplaySize(itemDispW, itemDispH)
+        .setScrollFactor(0)
+        .setInteractive({ useHandCursor: true });
+      this.addDyn(slotImg);
+      // Right-click on the shield card upgrades the slot. Left-click is free for later use.
+      slotImg.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+        if (!pointer.rightButtonDown()) return;
+        if (sp <= 0) return;
+        this.showConfirm(
+          "Upgrade Shield slot?\n+20 max shield, faster recharge.\nAre you sure?",
+          () => {
+            if (this.room) this.room.send(6, { stat: "shield" });
+            this.time.delayedCall(200, () => {
+              if (this.charScreenVisible) this.updateCharacterScreen();
+            });
+          },
+        );
+      });
+      const lvlBg = this.add
+        .rectangle(
+          itX + itemDispW / 2,
+          y + itemDispH - 2,
+          itemDispW - 6,
+          16,
+          0x000000,
+          0.85,
+        )
+        .setOrigin(0.5, 1)
+        .setScrollFactor(0);
+      this.addDyn(lvlBg);
+      const lvlText = this.add
+        .text(itX + itemDispW / 2, y + itemDispH - 4, "Lv " + it.level, {
+          color: "#ffffff",
+          fontSize: "10px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0.5, 1)
+        .setScrollFactor(0);
+      this.addDyn(lvlText);
+    }
+    y += itemDispH + 18;
 
     // ---- CARD SECTION ----
     const cardHeader = this.add
@@ -2895,8 +3170,9 @@ export class GameScene extends Phaser.Scene {
         }
       });
 
-      // Click to upgrade card
-      cardImg.on("pointerdown", () => {
+      // Right-click to upgrade card. Left-click is free for later use.
+      cardImg.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+        if (!pointer.rightButtonDown()) return;
         if (sp <= 0) return;
         // Build upgrade description for the card
         let cardUpgradeDesc = "";
@@ -2950,7 +3226,12 @@ export class GameScene extends Phaser.Scene {
         px + 20,
         y,
         [
-          "Level: " + level + "    XP: " + formatNumber(currentXp) + " / " + formatNumber(xpToLevelUp),
+          "Level: " +
+            level +
+            "    XP: " +
+            formatNumber(currentXp) +
+            " / " +
+            formatNumber(xpToLevelUp),
           "XP to next level: " + formatNumber(xpRemaining),
         ].join("\n"),
         {
@@ -3282,7 +3563,10 @@ export class GameScene extends Phaser.Scene {
     if (this.currentPlayer) {
       const localFlash = this.currentPlayer.data.get("hitFlashUntil") as number;
       if (localFlash && now < localFlash) {
-        this.currentPlayer.setTintFill(0xffffff);
+        // Flash blue when the last hit was absorbed by shield, white otherwise.
+        const shielded =
+          this.currentPlayerState && (this.currentPlayerState as any).lastHitShielded === true;
+        this.currentPlayer.setTintFill(shielded ? 0x33b5ff : 0xffffff);
       } else {
         this.currentPlayer.clearTint();
       }
@@ -3387,12 +3671,25 @@ export class GameScene extends Phaser.Scene {
       if (hpBar) {
         hpBar.setPosition(entity.x, entity.y);
         const fill = hpBar.getAt(1) as Phaser.GameObjects.Rectangle;
-        const lvText = hpBar.getAt(2) as Phaser.GameObjects.Text;
+        const shieldFillEl = hpBar.getAt(2) as Phaser.GameObjects.Rectangle;
+        const lvText = hpBar.getAt(3) as Phaser.GameObjects.Text;
         const hp = entity.data.get("hp") as number;
         const maxHp = entity.data.get("maxHp") as number;
         if (fill && maxHp > 0) {
           const pct = Math.max(0, hp / maxHp);
           fill.scaleX = pct;
+        }
+        // Shield overlay: white translucent bar that shrinks as the shield
+        // depletes. Hidden when the enemy has no shield.
+        if (shieldFillEl) {
+          const sh = entity.data.get("shield") as number;
+          const maxSh = entity.data.get("maxShield") as number;
+          if (maxSh > 0 && sh > 0) {
+            shieldFillEl.setVisible(true);
+            shieldFillEl.scaleX = Math.max(0, sh / maxSh);
+          } else {
+            shieldFillEl.setVisible(false);
+          }
         }
         if (lvText) {
           const lv = entity.data.get("level") as number;
@@ -3445,6 +3742,7 @@ export class GameScene extends Phaser.Scene {
       } else if (this.currentPlayerState.currentHealth > 0 && this.wasDead) {
         this.hideDeathScreen();
       }
+      this.updateVignettes();
     }
     // ---- Update bolter cooldown fill on the card ----
     this.updateBolterCooldownOverlay();

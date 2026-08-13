@@ -7,7 +7,8 @@
  *   Each tick: roll a random chance; on success pick a random skill from the
  *   enemy's pool. If it is on cooldown, the roll is wasted. If ready, the
  *   skill fires via the ProjectileSystem (for projectile skills like bolter)
- *   and starts its cooldown. Skills are SHARED with the player.
+ *   and starts its cooldown. Skills are SHARED with the player. The skill's
+ *   level (driving damage) is read per-enemy from enemy.skillLevels.
  */
 import { RoomState } from "../schema/RoomState";
 import { Player } from "../schema/Player";
@@ -103,6 +104,7 @@ export class EnemySystem {
     }
 
     this.state.enemies.forEach((enemy) => {
+      enemy.tickShield(dt);
       enemy.tickCooldowns(dt);
       enemy.tickBleed(dt);
       switch (enemy.typeId) {
@@ -166,7 +168,7 @@ export class EnemySystem {
 
   /** Orck: same melee chase AI as the tyranid. Finds the nearest player,
    *  moves toward them, and plays the attack animation when in range.
-   *  Orcks have an empty skill pool so tryUseSkill is a no-op. */
+   *  Orcks unlock slam at level 1 and claw at level 5+ (see potentialSkills). */
   private updateOrck(enemy: Enemy, _dt: number): void {
     const now = Date.now();
     const isPaused = false; // hit-stun removed
@@ -330,9 +332,9 @@ export class EnemySystem {
     return (enemy as any).__id ?? `enemy_${enemy.typeId}`;
   }
 
-  /** Enemy skill level (defaults to 1; real leveling wired later). */
-  private enemySkillLevel(_enemy: Enemy, _skill: SkillId): number {
-    return 1;
+  /** Enemy skill level — read from the per-enemy skillLevels map (1 if unset). */
+  private enemySkillLevel(enemy: Enemy, skill: SkillId): number {
+    return enemy.skillLevels.get(skill) ?? 1;
   }
 
   /** Cooldown lookup for a skill (kept for parity). */
