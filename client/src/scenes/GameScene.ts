@@ -649,6 +649,8 @@ export class GameScene extends Phaser.Scene {
                   this.currentPlayer.y,
                   player.lastHitDamage,
                   !!player.lastHitCrit,
+                  (player as any).lastShieldDamage,
+                  (player as any).lastHpDamage,
                 );
               }
             }
@@ -792,6 +794,8 @@ export class GameScene extends Phaser.Scene {
               enemy.y,
               enemy.lastHitDamage,
               !!enemy.lastHitCrit,
+              (enemy as any).lastShieldDamage,
+              (enemy as any).lastHpDamage,
             );
           }
         }
@@ -806,6 +810,8 @@ export class GameScene extends Phaser.Scene {
           enemy.y ?? this.enemyLastPos[enemyId]?.y ?? 0,
           enemy.lastHitDamage,
           !!enemy.lastHitCrit,
+          (enemy as any).lastShieldDamage,
+          (enemy as any).lastHpDamage,
         );
       }
       // Spawn blood splat VFX at enemy death position
@@ -2230,7 +2236,14 @@ export class GameScene extends Phaser.Scene {
     y: number,
     damage: number,
     isCrit: boolean,
+    shieldDamage?: number,
+    hpDamage?: number,
   ): void {
+    // Determine color: blue for shield damage, white for HP damage.
+    const sd = shieldDamage ?? 0;
+    const hd = hpDamage ?? (sd > 0 ? damage - sd : damage);
+    // If shield absorbed everything, show blue; if split, show both.
+    const isShieldHit = sd > 0 && hd <= 0;
     if (damage <= 0) return;
     // Random horizontal jitter so overlapping hits don't stack perfectly.
     const jitterX = (Math.random() - 0.5) * 16;
@@ -2263,6 +2276,8 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
+    // Blue for shield damage, white for HP damage, gold for crit.
+    const baseColor = isShieldHit ? "#33b5ff" : "#ffffff";
     const label = isCrit
       ? Math.round(damage) + "!"
       : String(Math.round(damage));
@@ -2270,7 +2285,7 @@ export class GameScene extends Phaser.Scene {
       .setPosition(x + jitterX, startY)
       .setText(label)
       .setFontSize(isCrit ? "20px" : "14px")
-      .setColor(isCrit ? "#ffd700" : "#ffffff")
+      .setColor(isCrit ? "#ffd700" : baseColor)
       .setAlpha(1)
       .setActive(true)
       .setVisible(true);
@@ -2920,7 +2935,7 @@ export class GameScene extends Phaser.Scene {
         else if (statId === "critDamage") upgradeDesc = "+20% Crit Damage";
         else if (statId === "moveSpeed") upgradeDesc = "+5% Move Speed";
         else if (statId === "shield")
-          upgradeDesc = "+20 Shield, faster recharge";
+          upgradeDesc = "faster shield recovery";
         const btn = this.add
           .text(btnX, y, "[ + ]", {
             color: "#ffd700",
@@ -2998,7 +3013,7 @@ export class GameScene extends Phaser.Scene {
       level: number;
       statId: string;
     }[] = [];
-    const pShieldLvl = (p as any).shieldLevel ?? 1;
+    const pShieldLvl = (p as any).shieldCardLevel ?? 1;
     if ((p as any).maxShield && (p as any).maxShield > 0) {
       equippedItems.push({
         id: "shield",
@@ -3035,7 +3050,7 @@ export class GameScene extends Phaser.Scene {
         if (!pointer.rightButtonDown()) return;
         if (sp <= 0) return;
         this.showConfirm(
-          "Upgrade Shield slot?\n+20 max shield, faster recharge.\nAre you sure?",
+          "Upgrade Shield card slot?\nFaster recovery delay.\nAre you sure?",
           () => {
             if (this.room) this.room.send(6, { stat: "shield" });
             this.time.delayedCall(200, () => {

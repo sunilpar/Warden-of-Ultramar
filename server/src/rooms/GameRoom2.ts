@@ -409,6 +409,8 @@ export class GameRoom2 extends Room {
         player.speedMultiplier += 0.05;
         player.recalcDerivedStats();
       } else if (stat === "shield") {
+        // Don't spend a skill point if shield card already at max level (10).
+        if (player.shieldCardLevel >= 10) return;
         player.upgradeShieldSlot();
       } else {
         return;

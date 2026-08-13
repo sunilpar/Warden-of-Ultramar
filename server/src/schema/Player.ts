@@ -226,7 +226,7 @@ export class Player extends Schema {
    * fraction of maxShield per second until full. Once full, mark active.
    */
   tickShield(dt: number): void {
-    if (this.shieldLevel <= 0 || this.maxShield <= 0) return;
+    if (this.shieldStatLevel <= 0 || this.maxShield <= 0) return;
     // Already full — active.
     if (this.shield >= this.maxShield) {
       this.shield = this.maxShield;
@@ -241,7 +241,7 @@ export class Player extends Schema {
     }
     // Recharging.
     this.shieldState = 1;
-    const recharge = this.maxShield * PLAYER_STATS.SHIELD.RECHARGE_RATE * dt;
+    const recharge = this.maxShield * PLAYER_STATS.SHIELD_CARD.RECHARGE_RATE * dt;
     this.shield = Math.min(this.maxShield, this.shield + recharge);
     if (this.shield >= this.maxShield) {
       this.shield = this.maxShield;
@@ -249,10 +249,15 @@ export class Player extends Schema {
     }
   }
 
-  /** Spend a skill point to upgrade the shield slot by one level. */
+  /** Spend a skill point to upgrade the shield CARD/SLOT (faster recovery).
+   *  Does NOT affect shield amount â€” shield amount is stat-based (grows with level). */
+  /** Max shield card/slot level (recovery can't be upgraded past this). */
+  static readonly MAX_SHIELD_CARD_LEVEL = 10;
+
   upgradeShieldSlot(): void {
-    this.shieldLevel += 1;
-    this.applyShieldLevel();
+    if (this.shieldCardLevel >= Player.MAX_SHIELD_CARD_LEVEL) return;
+    this.shieldCardLevel += 1;
+    this.recomputeShield();
   }
 
   // ============================================================
@@ -289,10 +294,14 @@ export class Player extends Schema {
     const mitigated = rawDamage * (1.0 - effectiveDefence);
     let dmg = mitigated * this.incomingDamageMultiplier;
     let shielded = false;
+    let totalShieldAbsorbed = 0;
     // Shield absorbs first.
     if (this.shield > 0) {
       const absorbed = Math.min(this.shield, dmg);
-      if (absorbed > 0) shielded = true;
+      if (absorbed > 0) {
+        shielded = true;
+        totalShieldAbsorbed = absorbed;
+      }
       this.shield -= absorbed;
       dmg -= absorbed;
       // ANY damage to the shield re-arms the recovery delay. The shield only
@@ -307,7 +316,7 @@ export class Player extends Schema {
     } else {
       // No shield: keep the recovery delay armed from the last break so a
       // steady stream of hits doesn't begin recharging mid-combat.
-      if (this.shieldLevel > 0 && this.shieldRechargeAt < Date.now()) {
+      if (this.shieldCardLevel > 0 && this.shieldRechargeAt < Date.now()) {
         this.shieldRechargeAt = Date.now() + this.shieldRecoveryDelay() * 1000;
       }
     }
@@ -321,11 +330,14 @@ export class Player extends Schema {
     this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
     // Hit-stun removed — only flash, no movement freeze.
     // Record last hit for client-side damage numbers.
-    this.lastHitDamage = Math.round(mitigated * this.incomingDamageMultiplier);
+    const finalDmg = mitigated * this.incomingDamageMultiplier;
+    this.lastHitDamage = Math.round(finalDmg);
     this.lastHitCrit = isCrit;
     this.lastHitShielded = shielded;
+    (this as any).lastShieldDamage = totalShieldAbsorbed;
+    (this as any).lastHpDamage = finalDmg - totalShieldAbsorbed;
     this.hitSeq += 1;
-    return mitigated * this.incomingDamageMultiplier;
+    return finalDmg;
   }
 
   /** Heal the player (clamped to maxHealth). Returns amount healed. */
@@ -371,6 +383,9 @@ export class Player extends Schema {
     this.baseMoveSpeed += g.MOVE_SPEED;
     // Recompute the XP required for the NEXT level
     this.xpToLevelUp = PLAYER_STATS.LEVELING.xpForNextLevel(this.level);
+    // Shield stat grows with each level (+20 shield per level)
+    this.shieldStatLevel += 1;
+    this.recomputeShield();
     // Heal on level up
     this.heal(this.maxHealth * PLAYER_STATS.LEVELING.HEAL_ON_LEVEL_UP);
     this.recalcDerivedStats();
@@ -511,16 +526,19 @@ export class Player extends Schema {
       this.bleedTickAccum = 0;
       return false;
     }
-    // Tick bleed damage twice per second (every 0.5s)
+    // Tick bleed damage twice per second (every 0.5s).
+    // BLEED BYPASSES SHIELD â€” damages HP directly.
     this.bleedTickAccum += dt;
     if (this.bleedTickAccum >= 0.5) {
       this.bleedTickAccum -= 0.5;
-      this.takeDamage(
-        this.bleedTickDamage,
-        "claw",
-        undefined,
-        this.bleedIsCrit,
-      );
+      this.currentHealth = Math.max(0, this.currentHealth - this.bleedTickDamage);
+      this.lastHitCrit = this.bleedIsCrit;
+      this.lastHitShielded = false;
+      (this as any).lastShieldDamage = 0;
+      (this as any).lastHpDamage = this.bleedTickDamage;
+      this.lastHitDamage = this.bleedTickDamage;
+      this.hitSeq += 1;
+      this.hitFlashUntil = Math.max(this.hitFlashUntil, Date.now() + 100);
       return this.isDead;
     }
     return false;

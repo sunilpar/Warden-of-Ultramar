@@ -423,6 +423,10 @@ export class GameRoom extends Room {
         player.speedMultiplier += 0.05;
         player.recalcDerivedStats();
       } else if (stat === "shield") {
+        // Upgrades shield CARD/SLOT level (faster recovery), NOT shield amount.
+        // Shield amount grows automatically with player level.
+        // Don't spend a skill point if already at max level (10).
+        if (player.shieldCardLevel >= 10) return;
         player.upgradeShieldSlot();
       } else {
         return;

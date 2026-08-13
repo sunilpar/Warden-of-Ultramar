@@ -281,9 +281,11 @@ export class Enemy extends Schema {
     const effectiveDefence = isCrit ? this.defence * 0.5 : this.defence;
     const mitigated = rawDamage * (1.0 - effectiveDefence);
     let dmg = mitigated * this.incomingDamageMultiplier;
+    let shieldAbsorbed = 0;
     // Shield absorbs first
     if (this.shield > 0) {
       const absorbed = Math.min(this.shield, dmg);
+      shieldAbsorbed = absorbed;
       this.shield -= absorbed;
       dmg -= absorbed;
       // ANY shield damage re-arms the recovery delay.
@@ -312,10 +314,13 @@ export class Enemy extends Schema {
     // Hit-stun removed — only flash, no movement freeze.
 
     // Record last hit for client-side damage numbers.
-    this.lastHitDamage = Math.round(dmg);
+    const totalDmg = mitigated * this.incomingDamageMultiplier;
+    this.lastHitDamage = Math.round(totalDmg);
     this.lastHitCrit = isCrit;
+    (this as any).lastShieldDamage = shieldAbsorbed;
+    (this as any).lastHpDamage = totalDmg - shieldAbsorbed;
     this.hitSeq += 1;
-    return mitigated * this.incomingDamageMultiplier;
+    return totalDmg;
   }
 
   /** Heal the enemy (clamped to maxHealth). Returns amount healed. */
@@ -350,11 +355,22 @@ export class Enemy extends Schema {
       this.bleedTickAccum = 0;
       return false;
     }
-    // Tick bleed damage twice per second (every 0.5s)
+    // Tick bleed damage twice per second (every 0.5s).
+    // BLEED BYPASSES SHIELD â€” damages HP directly.
     this.bleedTickAccum += dt;
     if (this.bleedTickAccum >= 0.5) {
       this.bleedTickAccum -= 0.5;
-      this.takeDamage(this.bleedTickDamage, "claw", this.bleedAttackerId, this.bleedIsCrit);
+      const hpBefore = this.currentHealth;
+      this.currentHealth = Math.max(0, this.currentHealth - this.bleedTickDamage);
+      // Track damage for XP attribution
+      if (this.bleedAttackerId) {
+        this.damageTrackers.set(this.bleedAttackerId,
+          (this.damageTrackers.get(this.bleedAttackerId) ?? 0) + this.bleedTickDamage);
+      }
+      this.lastHitCrit = this.bleedIsCrit;
+      this.lastHitDamage = this.bleedTickDamage;
+      this.hitSeq += 1;
+      this.hitFlashUntil = Math.max(this.hitFlashUntil, Date.now() + 100);
       return this.isDead;
     }
     return false;
