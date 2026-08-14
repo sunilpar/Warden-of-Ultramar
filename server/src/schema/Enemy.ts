@@ -97,6 +97,9 @@ export class Enemy extends Schema {
   /** Server timestamp (ms) until which the enemy is shocked (takes more damage, slowed). */
   @type("number") shockUntil: number = 0;
 
+  /** Server timestamp (ms) until which the enemy is invincible (dash i-frames). */
+  @type("number") invincibleUntil: number = 0;
+
   // ---- Base stats (NOT synced — server-authoritative source of truth) ----
   baseMoveSpeed: number = 0;
 
@@ -206,6 +209,7 @@ export class Enemy extends Schema {
     this.bleedUntil = 0;
     this.bleedDps = 0;
     this.shockUntil = 0;
+    this.invincibleUntil = 0;
     this.damageTrackers.clear();
 
     this.recalcDerivedStats();
@@ -286,6 +290,7 @@ export class Enemy extends Schema {
     attackerId?: string,
     isCrit: boolean = false,
   ): number {
+    if (Date.now() < this.invincibleUntil) return 0;
     // Defence reduces incoming damage. Crits bypass only 50% of defence.
     // Shock reduces defence by 20% (can go negative = bonus damage).
     const isShocked = Date.now() < this.shockUntil;

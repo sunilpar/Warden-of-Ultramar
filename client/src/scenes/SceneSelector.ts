@@ -47,6 +47,13 @@ export class SceneSelector extends Phaser.Scene {
       frameWidth: 256,
       frameHeight: 256,
     });
+    // Tau enemy sprite sheet (256x256 frames, 2 rows x 6 cols).
+    // Row 0 (frames 0-5) = idle animation (faces LEFT by default).
+    // Row 1 (frames 6-11) = attack animation with built-in muzzle flash.
+    this.load.spritesheet("tau_sheet", "assets/skills/tauShootSheet.png", {
+      frameWidth: 256,
+      frameHeight: 256,
+    });
     // Map1 tile sprite sheet (2 rows x 4 cols, 64x64 each)
     this.load.spritesheet(
       "map1_tiles",

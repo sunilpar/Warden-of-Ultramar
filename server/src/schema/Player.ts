@@ -79,6 +79,10 @@ export class Player extends Schema {
   /** Server timestamp (ms) until which the player is shocked (takes more damage, slowed). */
   @type("number") shockUntil: number = 0;
 
+  // ---- Dash invincibility (synced) ----
+  /** Server timestamp (ms) until which the player is invincible (dash i-frames). */
+  @type("number") invincibleUntil: number = 0;
+
   // ---- Progression (synced) ----
   @type("number") level: number = 1;
   @type("number") currentXp: number = 0;
@@ -118,6 +122,10 @@ export class Player extends Schema {
   @type("number") shockCooldownEndsAt: number = 0;
   /** Server timestamp (ms) when heal comes off cooldown (for client HUD, L5+). */
   @type("number") healCooldownEndsAt: number = 0;
+  /** Server timestamp (ms) when dash comes off cooldown (for client HUD). */
+  @type("number") dashCooldownEndsAt: number = 0;
+  /** Server timestamp (ms) when vortex comes off cooldown (for client HUD). */
+  @type("number") vortexCooldownEndsAt: number = 0;
   /** Kill count towards next heal charge (L1-4 mode). Resets to 0 at killsToRecharge. */
   @type("number") healKills: number = 0;
   /** True if heal is ready to cast (for client HUD display). */
@@ -198,6 +206,7 @@ export class Player extends Schema {
     this.shieldStatLevel = 1;
     this.shieldCardLevel = 1;
     this.recomputeShield();
+    this.invincibleUntil = 0;
   }
 
   // ============================================================
@@ -299,6 +308,7 @@ export class Player extends Schema {
     _attackerId?: string,
     isCrit: boolean = false,
   ): number {
+    if (Date.now() < this.invincibleUntil) return 0;
     // Defence reduces incoming damage. Crits bypass only 50% of defence.
     // Shock reduces defence by 20% (can go negative = bonus damage).
     const isShocked = Date.now() < this.shockUntil;
@@ -432,11 +442,12 @@ export class Player extends Schema {
     this.skillLevels.set("claw", 1);
     this.skillLevels.set("heal", 1);
     this.skillLevels.set("pulse", 1);
-    this.skillLevels.set("slam", 1);
+    this.skillLevels.set("dash", 1);
     this.skillCooldowns.clear();
     // Clear bleed
     this.bleedUntil = 0;
     this.bleedDps = 0;
+    this.invincibleUntil = 0;
   }
 
   // ============================================================
@@ -492,6 +503,10 @@ export class Player extends Schema {
       this.pulseCooldownEndsAt = endsAt;
     } else if (skill === "shock") {
       this.shockCooldownEndsAt = endsAt;
+    } else if (skill === "dash") {
+      this.dashCooldownEndsAt = endsAt;
+    } else if (skill === "vortex") {
+      this.vortexCooldownEndsAt = endsAt;
     }
   }
 

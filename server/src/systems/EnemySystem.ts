@@ -24,6 +24,8 @@ import type { ProjectileSystem } from "./ProjectileSystem";
 import type { ClawSystem } from "./ClawSystem";
 import { SlamSystem } from "./SlamSystem";
 import type { HealSystem } from "./HealSystem";
+import type { DashSystem } from "./DashSystem";
+import type { ShockSystem } from "./ShockSystem";
 
 /** Collision resolver signature (shared by MapSystem / MapSystem2). */
 export interface CollisionResolver {
@@ -41,6 +43,11 @@ export class EnemySystem {
   private clawSystem: ClawSystem | null = null;
   private slamSystem: SlamSystem | null = null;
   private healSystem: HealSystem | null = null;
+  private dashSystem: DashSystem | null = null;
+  private shockSystem: ShockSystem | null = null;
+
+  /** Per-enemy next-allowed-skill-trigger timestamp (tau pacing). */
+  private nextSkillTriggerAt = new Map<string, number>();
 
   /** Pending slam casts (delayed until after attack animation). */
   private pendingSlams: {
@@ -81,6 +88,15 @@ export class EnemySystem {
     this.healSystem = hs;
   }
 
+  setDashSystem(ds: DashSystem): void {
+    this.dashSystem = ds;
+  }
+
+  /** Inject the ShockSystem (called by the room after both are created). */
+  setShockSystem(ss: ShockSystem): void {
+    this.shockSystem = ss;
+  }
+
   update(dt: number): void {
     // Process pending slam casts (delayed after attack animation).
     const now = Date.now();
@@ -113,6 +129,9 @@ export class EnemySystem {
           break;
         case "orck":
           this.updateOrck(enemy, dt);
+          break;
+        case "tau":
+          this.updateTau(enemy, dt);
           break;
         default:
           break;
@@ -200,6 +219,102 @@ export class EnemySystem {
   }
 
   // ============================================================
+  // TAU (ranged)
+  // ============================================================
+
+  /** Tau stop-range: holds position at ~300px and fires. */
+  private static readonly TAU_ATTACK_RANGE = 300;
+  /** Tau skill trigger interval: at most one skill attempt per second. */
+  private static readonly TAU_TRIGGER_INTERVAL_MS = 1000;
+
+  /** Tau AI: ranged unit. Advances until ~300px, holds position, and only
+   *  fires when the target is in line of sight (raycast). Backs away when
+   *  the player gets too close. */
+  private updateTau(enemy: Enemy, _dt: number): void {
+    const now = Date.now();
+    const target = this.findNearestPlayer(enemy);
+    if (!target) {
+      enemy.attacking = false;
+      return;
+    }
+
+    enemy.facingRight = target.x > enemy.x;
+
+    const dx = target.x - enemy.x;
+    const dy = target.y - enemy.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    enemy.attacking = now < enemy.attackingUntil;
+
+    // Too close: back away (ranged unit keeps distance).
+    if (dist < 160) {
+      const away = Math.atan2(-dy, -dx);
+      this.moveToward(
+        enemy,
+        enemy.x + Math.cos(away) * 40,
+        enemy.y + Math.sin(away) * 40,
+        _dt,
+      );
+      return;
+    }
+
+    if (dist <= EnemySystem.TAU_ATTACK_RANGE) {
+      // In range — but ONLY attempt skills with line of sight.
+      if (this.hasLineOfSight(enemy.x, enemy.y, target.x, target.y)) {
+        this.tryUseTauSkill(enemy, target, now);
+      }
+    } else {
+      // Out of range: advance toward target.
+      this.moveToward(enemy, target.x, target.y, _dt);
+    }
+  }
+
+  /**
+   * Tau skill attempt with a fixed 1-second trigger interval (independent
+   * of per-skill cooldowns — it throttles how often ANY skill fires).
+   */
+  private tryUseTauSkill(enemy: Enemy, target: Player, now: number): void {
+    const id = (enemy as any).__id as string | undefined;
+    if (!id) return;
+    const nextAt = this.nextSkillTriggerAt.get(id) ?? 0;
+    if (now < nextAt) return;
+    if (enemy.skillPool.length === 0) return;
+    const skill: SkillId =
+      enemy.skillPool[Math.floor(Math.random() * enemy.skillPool.length)];
+    if (!enemy.isSkillReady(skill)) return;
+    this.useSkill(enemy, skill, target);
+    this.nextSkillTriggerAt.set(
+      id,
+      now + EnemySystem.TAU_TRIGGER_INTERVAL_MS,
+    );
+  }
+
+  /**
+   * Cheap line-of-sight check: raymarch the segment enemy -> target against
+   * the collision grid, sampling every ~16px. Returns true if unobstructed.
+   */
+  private hasLineOfSight(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+  ): boolean {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1) return true;
+    const stepSize = 16;
+    const steps = Math.ceil(dist / stepSize);
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      const px = x1 + dx * t;
+      const py = y1 + dy * t;
+      const res = this.mapSystem.resolveTileCollision(px, py, 2);
+      if (Math.hypot(res.x - px, res.y - py) > 0.5) return false; // wall hit
+    }
+    return true;
+  }
+
+  // ============================================================
   // SHARED AI HELPERS
   // ============================================================
 
@@ -276,7 +391,8 @@ export class EnemySystem {
     // Trigger attack animation EVERY time a skill is used.
     // Keep the flag true for 350ms (one full attack animation cycle).
     const now = Date.now();
-    const atkDur = enemy.typeId === "orck" ? 500 : 350;
+    const atkDur =
+      enemy.typeId === "orck" ? 500 : enemy.typeId === "tau" ? 400 : 350;
     enemy.attackingUntil = now + atkDur;
     enemy.attacking = true;
     if (skill === "bolter" && this.projectileSystem) {
@@ -323,6 +439,24 @@ export class EnemySystem {
       });
     } else if (skill === "heal" && this.healSystem) {
       this.healSystem.castEnemyHeal(enemy, this.enemySkillLevel(enemy, skill));
+    } else if (skill === "shock" && this.shockSystem) {
+      this.shockSystem.castEnemyShock(
+        enemy,
+        this.enemySkillLevel(enemy, skill),
+        enemy.critRate,
+        enemy.critDamage,
+        angle,
+      );
+    } else if (skill === "dash" && this.dashSystem) {
+      // Enemy dashes AWAY from the target (evasion). Add some randomness.
+      const escapeAngle = angle + Math.PI + (Math.random() - 0.5) * 0.8;
+      this.dashSystem.castEnemyDash(
+        enemy,
+        this.enemySkillLevel(enemy, skill),
+        escapeAngle,
+        enemy.critRate,
+        enemy.critDamage,
+      );
     }
     enemy.startCooldown(skill);
   }
@@ -369,6 +503,7 @@ export class EnemySystem {
    * dead enemy so they despawn immediately when the caster dies.
    */
   cleanupOnEnemyDeath(ownerId: string): void {
+    this.nextSkillTriggerAt.delete(ownerId);
     // Cancel any pending slam casts that haven't fired yet.
     this.pendingSlams = this.pendingSlams.filter((s) => s.ownerId !== ownerId);
     // Remove in-flight slams owned by this enemy.

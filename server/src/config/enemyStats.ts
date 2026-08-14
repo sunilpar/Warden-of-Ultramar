@@ -39,7 +39,7 @@ export type SkillId =
   | "heal";
 
 /** Enemy type identifier. */
-export type EnemyTypeId = "tyranid" | "orck";
+export type EnemyTypeId = "tyranid" | "orck" | "tau";
 
 export interface EnemyBaseConfig {
   /** Display title. */
@@ -136,6 +136,33 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
       attack: 8,
     },
     xpReward: 300,
+  },
+  tau: {
+    id: "tau",
+    title: "Tau",
+    description:
+      "A ranged Tau warrior. Keeps its distance and fires heavy bolter rounds; high damage, low health.",
+    // 100 less base health than tyranid (200 - 100).
+    maxHealth: 100,
+    moveSpeed: 50,
+    attack: 200,
+    defence: 0.01,
+    critRate: 0.3, // 30% base crit
+    critDamage: 2.0, // 200% crit damage
+    shield: 30,
+    collisionRadius: 10,
+    hitboxW: 14,
+    hitboxH: 14,
+    // Primary: bolter. Secondary: shock. Third: dash.
+    // (Shield level is derived separately as the remainder slot.)
+    potentialSkills: ["bolter", "shock", "dash"],
+    skillCooldown: { bolter: 3.0, shock: 5.0, dash: 6.0 },
+    growth: {
+      maxHealth: 60,
+      moveSpeed: 0,
+      attack: 10,
+    },
+    xpReward: 200,
   },
 };
 

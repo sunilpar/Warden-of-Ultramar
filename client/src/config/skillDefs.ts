@@ -167,3 +167,22 @@ export function skillMods(skill: SkillId, level: number): string[] {
   }
   return mods;
 }
+
+// ============================================================
+// VORTEX COLOR TIER
+// ============================================================
+
+/** Vortex visual colour tier. grey (1-2), brown (3-5), purple (6-10). */
+export type VortexColorTier = "grey" | "brown" | "purple";
+
+export function vortexColorTier(level: number): VortexColorTier {
+  if (level >= 6) return "purple";
+  if (level >= 3) return "brown";
+  return "grey";
+}
+
+export const VORTEX_COLORS: Record<VortexColorTier, number> = {
+  grey: 0x999999,
+  brown: 0x8b4513,
+  purple: 0xb266ff,
+};

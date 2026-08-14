@@ -30,12 +30,15 @@ import { SlamSystem } from "../systems/SlamSystem";
 import { HealSystem } from "../systems/HealSystem";
 import { PulseSystem } from "../systems/PulseSystem";
 import { ShockSystem } from "../systems/ShockSystem";
+import { DashSystem } from "../systems/DashSystem";
+import { VortexSystem } from "../systems/VortexSystem";
 import { LAYERED_MAP_2 } from "../config/layeredMap2";
 import {
   SKILL_DEFS,
   MAX_SKILL_LEVEL,
   skillCritRate,
   pulseCooldown,
+    dashCooldown,
   type SkillId,
 } from "../config/skillDefs";
 import {
@@ -59,6 +62,8 @@ export class GameRoom2 extends Room {
   private healSystem!: HealSystem;
   private pulseSystem!: PulseSystem;
   private shockSystem!: ShockSystem;
+  private dashSystem!: DashSystem;
+  private vortexSystem!: VortexSystem;
   private spawnedZones = new Set<number>();
   private activeModifiers: ModifierId[] = MAP_MODIFIERS["game_room_2"] ?? [];
   private viewports = new Map<
@@ -79,11 +84,15 @@ export class GameRoom2 extends Room {
     this.healSystem = new HealSystem(this.state);
     this.pulseSystem = new PulseSystem(this.state);
     this.shockSystem = new ShockSystem(this.state, this.mapSystem);
+    this.dashSystem = new DashSystem(this.state);
+    this.vortexSystem = new VortexSystem(this.state, this.mapSystem);
     // Cross-link: enemies can fire projectiles + claws.
     this.enemySystem.setProjectileSystem(this.projectileSystem);
     this.enemySystem.setClawSystem(this.clawSystem);
     this.enemySystem.setSlamSystem(this.slamSystem);
     this.enemySystem.setHealSystem(this.healSystem);
+    this.enemySystem.setShockSystem(this.shockSystem);
+    this.enemySystem.setDashSystem(this.dashSystem);
 
     // Fixed timestep simulation loop
     let elapsedTime = 0;
@@ -147,6 +156,7 @@ export class GameRoom2 extends Room {
     this.projectileSystem.update(dt);
     this.clawSystem.update(dt);
     this.slamSystem.update(dt);
+    this.vortexSystem.update(dt);
     // Tick player skill cooldowns + bleed DoT
     this.state.players.forEach((p) => {
       p.tickShield(dt);
@@ -181,6 +191,24 @@ export class GameRoom2 extends Room {
   }
 
   /**
+   * Total enemies this map should host: 20 base + 1 per 2 player levels
+   * (highest player level in the room).
+   */
+  private getTargetEnemyCount(): number {
+    return 20 + Math.floor(this.getHighestPlayerLevel() / 2);
+  }
+
+  /**
+   * Pick an enemy type by spawn ratio: 50% tyranid / 30% tau / 20% orck.
+   */
+  private pickEnemyType(): "tyranid" | "orck" | "tau" {
+    const r = Math.random();
+    if (r < 0.5) return "tyranid";
+    if (r < 0.8) return "tau";
+    return "orck";
+  }
+
+  /**
    * Spawn one enemy at the center of each spawn zone the FIRST time any
    * player's viewport touches it. Each zone spawns exactly once.
    */
@@ -204,8 +232,15 @@ export class GameRoom2 extends Room {
         }
       }
       if (touched) {
+        // Spawn until the map's target enemy count is reached.
+        const target = this.getTargetEnemyCount();
+        const alive = this.state.enemies.size;
+        if (alive >= target) {
+          this.spawnedZones.add(i);
+          continue;
+        }
         const spawnId = this.enemySystem.spawn(
-          Math.random() < 0.5 ? "tyranid" : "orck",
+          this.pickEnemyType(),
           z.x + z.width / 2,
           z.y + z.height / 2,
           enemyLevel,
@@ -364,6 +399,30 @@ export class GameRoom2 extends Room {
           msg.angle,
         );
         player.startSkillCooldown(skill, SKILL_DEFS.shock.baseCooldown);
+      } else if (skill === "dash") {
+        this.dashSystem.castPlayerDash(
+          player,
+          client.sessionId,
+          level,
+          msg.angle,
+          skillCritRate("dash", level, player.critRate),
+          player.critDamage,
+        );
+        player.startSkillCooldown(skill, dashCooldown(level));
+      } else if (skill === "vortex") {
+        this.vortexSystem.castVortex(
+          client.sessionId,
+          "player",
+          player.x,
+          player.y,
+          msg.angle,
+          level,
+          player.attack,
+          player.damageMultiplier,
+          skillCritRate("vortex", level, player.critRate),
+          player.critDamage,
+        );
+        player.startSkillCooldown(skill, SKILL_DEFS.vortex.cooldown);
       }
     },
 
@@ -404,6 +463,8 @@ export class GameRoom2 extends Room {
       player.setSkillLevel("heal", 1);
       player.setSkillLevel("pulse", 1);
       player.setSkillLevel("slam", 1);
+      player.setSkillLevel("dash", 1);
+      player.setSkillLevel("vortex", 1);
     },
 
     // Map transition XP reward (map2 -> map3: +1000 XP).
@@ -517,6 +578,8 @@ export class GameRoom2 extends Room {
       player.setSkillLevel("heal", 1);
       player.setSkillLevel("pulse", 1);
       player.setSkillLevel("slam", 1);
+      player.setSkillLevel("dash", 1);
+      player.setSkillLevel("vortex", 1);
     }
 
     applyPlayerModifiers(player, this.activeModifiers);

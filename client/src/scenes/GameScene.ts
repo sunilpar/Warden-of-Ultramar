@@ -47,6 +47,8 @@ import {
   type ClawTier,
   skillMods,
   SKILL_CARDS,
+  vortexColorTier,
+  VORTEX_COLORS,
 } from "../config/skillDefs";
 import { MAP_INFO, MODIFIER_DISPLAY } from "../config/modifiers";
 
@@ -110,6 +112,8 @@ export class GameScene extends Phaser.Scene {
   /** Slam VFX sprites keyed by slam id. */
   slamEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
   private slamAnimCreated: boolean = false;
+  /** Vortex VFX containers keyed by vortex id. */
+  vortexEntities: { [id: string]: Phaser.GameObjects.Container } = {};
   private shockAnimCreated: boolean = false;
   /** Death screen overlay container (null when hidden). */
   private deathOverlay: Phaser.GameObjects.Container | null = null;
@@ -137,6 +141,7 @@ export class GameScene extends Phaser.Scene {
   private shockCard!: Phaser.GameObjects.Image;
   private localShockLevel: number = 1;
   private localSlamLevel: number = 1;
+  private localDashLevel: number = 1;
   private shockCooldownFill!: Phaser.GameObjects.Rectangle;
   private shockCooldownFillBaseH: number = 0;
   private clawCard!: Phaser.GameObjects.Image;
@@ -155,6 +160,15 @@ export class GameScene extends Phaser.Scene {
   private localPulseLevel: number = 1;
   private pulseCooldownFill!: Phaser.GameObjects.Rectangle;
   private pulseCooldownFillBaseH: number = 0;
+  private dashCard!: Phaser.GameObjects.Image;
+  private dashCooldownFill!: Phaser.GameObjects.Rectangle;
+  private dashCooldownFillBaseH: number = 0;
+
+  // ---- Vortex card (slot 5) ----
+  private vortexCard!: Phaser.GameObjects.Image;
+  private localVortexLevel: number = 1;
+  private vortexCooldownFill!: Phaser.GameObjects.Rectangle;
+  private vortexCooldownFillBaseH: number = 0;
 
   // ---- Skill-on-cooldown toast (shown above the HUD in light grey) ----
   private cooldownToast!: Phaser.GameObjects.Text;
@@ -346,6 +360,7 @@ export class GameScene extends Phaser.Scene {
     this.projectileEntities = {};
     this.clawEntities = {};
     this.slamEntities = {};
+    this.vortexEntities = {};
     this.enemyHpBars = {};
     this.enemyLastPos = {};
     this.projLastPos = {};
@@ -366,8 +381,10 @@ export class GameScene extends Phaser.Scene {
     this.localBolterLevel = 1;
     this.localShockLevel = 1;
     this.localSlamLevel = 1;
+    this.localDashLevel = 1;
     this.localClawLevel = 1;
     this.localHealLevel = 1;
+    this.localVortexLevel = 1;
     // Null out game object references so create* methods rebuild them
     this.bolterCard = null as any;
     this.bolterCooldownFill = null as any;
@@ -378,6 +395,10 @@ export class GameScene extends Phaser.Scene {
     this.clawCooldownFill = null as any;
     this.healCard = null as any;
     this.healCooldownFill = null as any;
+    this.dashCard = null as any;
+    this.dashCooldownFill = null as any;
+    this.vortexCard = null as any;
+    this.vortexCooldownFill = null as any;
     this.hudImage = null as any;
     this.hpFill = null as any;
     this.hpText = null as any;
@@ -462,17 +483,17 @@ export class GameScene extends Phaser.Scene {
         this.room.send(9, {});
       });
 
-    // ---- Space key casts claw skill ----
+    // ---- Space key casts dash skill (slot 3) ----
     this.input.keyboard
       ?.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)
       ?.on("down", () => {
         if (!this.currentPlayer || !this.room) return;
-        if (!this.isSkillReady("claw")) {
+        if (!this.isSkillReady("dash")) {
           this.showCooldownToast();
           return;
         }
         const angle = this.aimAngle;
-        this.room.send(1, { skill: "claw", angle });
+        this.room.send(1, { skill: "dash", angle });
       });
 
     // ---- "1" key casts heal skill ----
@@ -487,16 +508,28 @@ export class GameScene extends Phaser.Scene {
         this.room.send(1, { skill: "heal", angle: this.aimAngle });
       });
 
-    // ---- "2" key casts shock skill ----
+    // ---- "2" key casts vortex skill (5th card slot) ----
     this.input.keyboard
       ?.addKey(Phaser.Input.Keyboard.KeyCodes.TWO)
       ?.on("down", () => {
         if (!this.currentPlayer || !this.room) return;
-        if (!this.isSkillReady("slam")) {
+        if (!this.isSkillReady("vortex")) {
           this.showCooldownToast();
           return;
         }
-        this.room.send(1, { skill: "slam", angle: this.aimAngle });
+        this.room.send(1, { skill: "vortex", angle: this.aimAngle });
+      });
+
+    // ---- "3" key casts claw skill ----
+    this.input.keyboard
+      ?.addKey(Phaser.Input.Keyboard.KeyCodes.THREE)
+      ?.on("down", () => {
+        if (!this.currentPlayer || !this.room) return;
+        if (!this.isSkillReady("claw")) {
+          this.showCooldownToast();
+          return;
+        }
+        this.room.send(1, { skill: "claw", angle: this.aimAngle });
       });
 
     // ---- Resolve this scene's map + room config from its scene key ----
@@ -557,9 +590,10 @@ export class GameScene extends Phaser.Scene {
     // Place the skill cards in slots 1-3 (initial level 1).
     this.refreshBolterCard();
     this.refreshPulseCard();
-    this.refreshShockCard();
+    this.refreshDashCard();
     this.refreshClawCard();
     this.refreshHealCard();
+    this.refreshVortexCard();
 
     // ---- F3 to toggle hitbox overlay ----
     this.hitboxToggleKey = this.input.keyboard.addKey(
@@ -689,6 +723,14 @@ export class GameScene extends Phaser.Scene {
               player.hitFlashUntil ?? 0,
             );
             this.currentPlayer.setData("shockUntil", player.shockUntil ?? 0);
+            this.currentPlayer.setData(
+              "invincibleUntil",
+              player.invincibleUntil ?? 0,
+            );
+            this.currentPlayer.setData(
+              "dashCdEndsAt",
+              player.dashCooldownEndsAt ?? 0,
+            );
             this.currentPlayer.setData("hitboxW", player.hitboxW ?? 10);
             this.currentPlayer.setData("hitboxH", player.hitboxH ?? 10);
             // Detect damage taken by local player.
@@ -741,8 +783,27 @@ export class GameScene extends Phaser.Scene {
                 : 1;
             if (slamLvl !== this.localSlamLevel) {
               this.localSlamLevel = slamLvl;
-              this.refreshShockCard();
+              this.refreshDashCard();
             }
+            const dashLvl = player.skillLevels.get("dash") ?? 0;
+            if (dashLvl !== this.localDashLevel) {
+              this.localDashLevel = dashLvl;
+              this.refreshDashCard();
+            }
+            // Sync vortex level + card art
+            const vortexLvl =
+              player.skillLevels && player.skillLevels.get
+                ? (player.skillLevels.get("vortex") ?? 1)
+                : 1;
+            if (vortexLvl !== this.localVortexLevel) {
+              this.localVortexLevel = vortexLvl;
+              this.refreshVortexCard();
+            }
+            // Track vortex cooldown for slot 5
+            this.currentPlayer.setData(
+              "vortexCdEndsAt",
+              player.vortexCooldownEndsAt ?? 0,
+            );
           }
         });
       } else {
@@ -778,9 +839,18 @@ export class GameScene extends Phaser.Scene {
       }
 
       const isOrck = enemy.typeId === "orck";
-      const textureKey = isOrck ? "orck_sheet" : "tyranid_sheet";
-      const idleAnim = isOrck ? "orck_idle" : "tri_idle";
-      const displaySize = isOrck ? 80 : 64;
+      const isTau = enemy.typeId === "tau";
+      const textureKey = isTau
+        ? "tau_sheet"
+        : isOrck
+          ? "orck_sheet"
+          : "tyranid_sheet";
+      const idleAnim = isTau
+        ? "tau_idle"
+        : isOrck
+          ? "orck_idle"
+          : "tri_idle";
+      const displaySize = isTau ? 88 : isOrck ? 80 : 64;
       const sprite = this.add
         .sprite(enemy.x, enemy.y, textureKey, 0)
         .setDisplaySize(displaySize, displaySize)
@@ -843,6 +913,7 @@ export class GameScene extends Phaser.Scene {
         sprite.setData("level", enemy.level ?? 1);
         sprite.setData("hitFlashUntil", enemy.hitFlashUntil);
         sprite.setData("shockUntil", enemy.shockUntil ?? 0);
+        sprite.setData("invincibleUntil", enemy.invincibleUntil ?? 0);
         sprite.setData("hitboxW", enemy.hitboxW ?? 12);
         sprite.setData("hitboxH", enemy.hitboxH ?? 12);
         sprite.setData("attacking", !!enemy.attacking);
@@ -1059,6 +1130,71 @@ export class GameScene extends Phaser.Scene {
         sprite.on("animationcomplete", () => sprite.destroy());
         (sprite as any).castData = cast;
         this.clawEntities[castId] = sprite;
+      } else if (cast.skillId === "dash") {
+        // Dash trail: white line from start to end position
+        const startX = (cast as any).startX ?? cast.x;
+        const startY = (cast as any).startY ?? cast.y;
+        const endX = cast.x;
+        const endY = cast.y;
+        // White dashing trail (opposite direction of dash to show speed)
+        const trail = this.add.line(0, 0, startX, startY, endX, endY, 0xffffff, 0.7)
+          .setDepth(6)
+          .setLineWidth(8);
+        this.tweens.add({
+          targets: trail,
+          alpha: 0,
+          duration: 300,
+          ease: "Cubic.out",
+          onComplete: () => trail.destroy(),
+        });
+        // Small white circle at the emerge point (vulnerable again)
+        const emerge = this.add.circle(endX, endY, 12, 0xffffff, 0.8)
+          .setDepth(8);
+        this.tweens.add({
+          targets: emerge,
+          alpha: 0,
+          scale: 2.5,
+          duration: 350,
+          ease: "Cubic.out",
+          onComplete: () => emerge.destroy(),
+        });
+        (emerge as any).castData = cast;
+        this.clawEntities[castId] = emerge as any;
+      } else if (cast.skillId === "dash_ice") {
+        // Ice blast: cyan/blue expanding circle at the landing position
+        const radius = cast.range ?? 50;
+        const iceBlast = this.add.circle(cast.x, cast.y, radius, 0x66ccff, 0.3)
+          .setStrokeStyle(3, 0x99eeff, 0.9)
+          .setDepth(7);
+        this.tweens.add({
+          targets: iceBlast,
+          alpha: 0,
+          scale: 1.4,
+          duration: 500,
+          ease: "Cubic.out",
+          onComplete: () => iceBlast.destroy(),
+        });
+        // Ice shards: small white-blue lines radiating outward
+        const shardCount = 6;
+        for (let i = 0; i < shardCount; i++) {
+          const a = (i / shardCount) * Math.PI * 2;
+          const sx = cast.x + Math.cos(a) * radius * 0.3;
+          const sy = cast.y + Math.sin(a) * radius * 0.3;
+          const ex = cast.x + Math.cos(a) * radius;
+          const ey = cast.y + Math.sin(a) * radius;
+          const shard = this.add.line(0, 0, sx, sy, ex, ey, 0xaaeeff, 0.8)
+            .setDepth(8)
+            .setLineWidth(3);
+          this.tweens.add({
+            targets: shard,
+            alpha: 0,
+            duration: 400,
+            ease: "Cubic.out",
+            onComplete: () => shard.destroy(),
+          });
+        }
+        (iceBlast as any).castData = cast;
+        this.clawEntities[castId] = iceBlast as any;
       }
     });
 
@@ -1175,6 +1311,110 @@ export class GameScene extends Phaser.Scene {
       if (entity) {
         entity.destroy();
         delete this.slamEntities[slamId];
+      }
+    });
+
+    // ============================================================
+    // VORTEX STATE LISTENERS — hurricane pull + yellow blast
+    // ============================================================
+    callbacks.onAdd("vortexes", (vortex: any, vortexId: string) => {
+      const tier = (vortex.colorTier ?? "grey") as "grey" | "brown" | "purple";
+      const color = VORTEX_COLORS[tier] ?? VORTEX_COLORS.grey;
+      const container = this.add.container(vortex.x, vortex.y).setDepth(4);
+
+      // ---- Hurricane spiral: 3 rotating spiral arms drawn as arcs ----
+      const spiralArms: Phaser.GameObjects.Arc[] = [];
+      const ARM_COUNT = 3;
+      for (let i = 0; i < ARM_COUNT; i++) {
+        // Each arm is a series of small circles forming a spiral curve
+        const arm = this.add.graphics();
+        arm.lineStyle(4, color, 0.85);
+        // Draw spiral curve: r grows with angle
+        const points: { x: number; y: number }[] = [];
+        const maxR = vortex.radius;
+        const turns = 1.75;
+        for (let t = 0; t <= 1.001; t += 0.05) {
+          const angle = (t * turns * Math.PI * 2) + (i * ((Math.PI * 2) / ARM_COUNT));
+          const r = 4 + t * maxR;
+          points.push({ x: Math.cos(angle) * r, y: Math.sin(angle) * r });
+        }
+        arm.beginPath();
+        arm.moveTo(points[0].x, points[0].y);
+        for (const p of points.slice(1)) arm.lineTo(p.x, p.y);
+        arm.strokePath();
+        container.add(arm);
+        spiralArms.push(arm as unknown as Phaser.GameObjects.Arc);
+      }
+
+      // ---- Eye of the storm (pulsating core) ----
+      const core = this.add
+        .circle(0, 0, 12, color, 0.55)
+        .setStrokeStyle(3, color, 0.95);
+      container.add(core);
+
+      // ---- Outer radius ring ----
+      const radiusRing = this.add
+        .circle(0, 0, vortex.radius, color, 0.06)
+        .setStrokeStyle(2, color, 0.45);
+      container.add(radiusRing);
+
+      // Spin the hurricane continuously
+      const spinEvent = this.time.addEvent({
+        delay: 16,
+        loop: true,
+        callback: () => {
+          for (const arm of spiralArms) arm.rotation += 0.12;
+        },
+      });
+
+      // Pulsate core + ring
+      this.tweens.add({
+        targets: core,
+        scale: { from: 1, to: 1.6 },
+        alpha: { from: 0.95, to: 0.35 },
+        duration: 450,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      });
+      this.tweens.add({
+        targets: radiusRing,
+        alpha: { from: 0.45, to: 0.12 },
+        duration: 800,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      });
+
+      this.vortexEntities[vortexId] = container;
+      (container as any).spinEvent = spinEvent;
+
+      let exploded = false;
+      callbacks.onChange(vortex, () => {
+        container.setPosition(vortex.x, vortex.y);
+
+        // ---- YELLOW EXPLOSION BLAST ----
+        if (
+          vortex.phase === "explode" &&
+          vortex.explosionRadius > 0 &&
+          !exploded
+        ) {
+          exploded = true;
+          spinEvent.remove();
+          this.showVortexExplosion(vortex.x, vortex.y, vortex.explosionRadius);
+        }
+      });
+    });
+
+    callbacks.onRemove("vortexes", (_vortex: any, vortexId: string) => {
+      const entity = this.vortexEntities[vortexId];
+      if (entity) {
+        const spinEvent = (entity as any).spinEvent;
+        if (spinEvent) spinEvent.remove();
+        this.tweens.killTweensOf(entity);
+        entity.list.forEach((child: any) => this.tweens.killTweensOf(child));
+        entity.destroy();
+        delete this.vortexEntities[vortexId];
       }
     });
   }
@@ -1485,6 +1725,29 @@ export class GameScene extends Phaser.Scene {
       frameRate: 10,
       repeat: 0,
     });
+
+    // Tau idle animation (row 0, frames 0-5, loops)
+    this.anims.create({
+      key: "tau_idle",
+      frames: this.anims.generateFrameNumbers("tau_sheet", {
+        start: 0,
+        end: 5,
+      }),
+      frameRate: 8,
+      repeat: -1,
+    });
+
+    // Tau attack animation (row 1, frames 6-11, plays once).
+    // Includes built-in muzzle flash frames.
+    this.anims.create({
+      key: "tau_attack",
+      frames: this.anims.generateFrameNumbers("tau_sheet", {
+        start: 6,
+        end: 11,
+      }),
+      frameRate: 12,
+      repeat: 0,
+    });
   }
 
   // ============================================================
@@ -1608,56 +1871,116 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Place / refresh the slam card art in HUD slot 5. */
-  private refreshShockCard(): void {
-    if (!this.cardSlots || this.cardSlots.length < 5) return;
-    const slot = this.cardSlots[4];
-    // Slot 4 now shows slam card (replaced shock)
-    const frame = cardFrameForLevel("slam", this.localSlamLevel);
-    if (this.shockCard) {
-      this.shockCard.setFrame(frame);
+  /** Place / refresh the dash card art in HUD slot 3. */
+  private refreshDashCard(): void {
+    if (!this.cardSlots || this.cardSlots.length < 3) return;
+    const slot = this.cardSlots[2];
+    const frame = cardFrameForLevel("dash", this.localDashLevel);
+    if (this.dashCard) {
+      this.dashCard.setFrame(frame);
     } else {
-      this.shockCard = this.add
+      this.dashCard = this.add
         .image(slot.x, slot.y, "card_sheet", frame)
         .setOrigin(0, 0)
         .setDisplaySize(slot.width, slot.height)
         .setScrollFactor(0)
         .setDepth(102);
 
-      // Cooldown fill overlay (purple, grows bottom-up).
-      this.shockCooldownFill = this.add
-        .rectangle(slot.x, slot.y, slot.width, slot.height, 0xb266ff, 0.45)
+      // Cooldown fill overlay (cyan, grows bottom-up).
+      this.dashCooldownFill = this.add
+        .rectangle(slot.x, slot.y, slot.width, slot.height, 0x66ccff, 0.45)
         .setOrigin(0, 0)
         .setScrollFactor(0)
         .setDepth(103)
         .setVisible(false);
-      this.shockCooldownFillBaseH = slot.height;
+      this.dashCooldownFillBaseH = slot.height;
     }
   }
 
-  /** Place / refresh the claw card art in HUD slot 3. */
+  /** Place / refresh the claw card art in HUD slot 5. */
   private refreshClawCard(): void {
-    if (!this.cardSlots || this.cardSlots.length < 3) return;
-    const slot = this.cardSlots[2];
-    const frame = cardFrameForLevel("claw", this.localClawLevel);
-    if (this.clawCard) {
-      this.clawCard.setFrame(frame);
+    // Claw no longer owns a card slot (vortex is in slot 5). No-op;
+    // claw is still castable via the "3" key.
+    if (!this.clawCard) return;
+  }
+
+  /** Yellow explosion blast VFX for vortex L5+. */
+  private showVortexExplosion(x: number, y: number, radius: number): void {
+    const YELLOW = 0xffe14d;
+
+    // 1. Core flash — bright yellow filled circle that expands fast
+    const flash = this.add
+      .circle(x, y, radius * 0.25, YELLOW, 0.85)
+      .setDepth(7);
+    this.tweens.add({
+      targets: flash,
+      scale: 3.4,
+      alpha: 0,
+      duration: 380,
+      ease: "Cubic.out",
+      onComplete: () => flash.destroy(),
+    });
+
+    // 2. Expanding shockwave ring
+    const shock = this.add
+      .circle(x, y, radius * 0.35, 0xffffff, 0)
+      .setStrokeStyle(6, YELLOW, 0.95)
+      .setDepth(7);
+    this.tweens.add({
+      targets: shock,
+      scale: 3.2,
+      alpha: 0,
+      duration: 480,
+      ease: "Cubic.out",
+      onComplete: () => shock.destroy(),
+    });
+
+    // 3. Debris sparks flying outward
+    for (let i = 0; i < 10; i++) {
+      const ang = (i / 10) * Math.PI * 2 + Math.random() * 0.4;
+      const spark = this.add
+        .circle(x, y, 4, YELLOW, 1)
+        .setDepth(7);
+      const dist = radius * (0.55 + Math.random() * 0.45);
+      this.tweens.add({
+        targets: spark,
+        x: x + Math.cos(ang) * dist,
+        y: y + Math.sin(ang) * dist,
+        alpha: 0,
+        scale: 0.2,
+        duration: 420 + Math.random() * 180,
+        ease: "Quad.out",
+        onComplete: () => spark.destroy(),
+      });
+    }
+
+    // 4. Camera shake for impact
+    this.cameras.main.shake(180, 0.004);
+  }
+
+  /** Place / refresh the vortex card art in HUD slot 5 (6th slot). */
+  private refreshVortexCard(): void {
+    if (!this.cardSlots || this.cardSlots.length < 5) return;
+    const slot = this.cardSlots[4];
+    const frame = cardFrameForLevel("vortex", this.localVortexLevel);
+    if (this.vortexCard) {
+      this.vortexCard.setFrame(frame);
     } else {
-      this.clawCard = this.add
+      this.vortexCard = this.add
         .image(slot.x, slot.y, "card_sheet", frame)
         .setOrigin(0, 0)
         .setDisplaySize(slot.width, slot.height)
         .setScrollFactor(0)
         .setDepth(102);
 
-      // Cooldown fill overlay (green, grows bottom-up).
-      this.clawCooldownFill = this.add
-        .rectangle(slot.x, slot.y, slot.width, slot.height, 0x44ff44, 0.45)
+      // Cooldown fill overlay (grey, grows bottom-up).
+      this.vortexCooldownFill = this.add
+        .rectangle(slot.x, slot.y, slot.width, slot.height, 0x999999, 0.45)
         .setOrigin(0, 0)
         .setScrollFactor(0)
         .setDepth(103)
         .setVisible(false);
-      this.clawCooldownFillBaseH = slot.height;
+      this.vortexCooldownFillBaseH = slot.height;
     }
   }
 
@@ -1786,6 +2109,31 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Update the vortex (slot 5) cooldown overlay. */
+  private updateVortexCooldownOverlay(): void {
+    if (!this.vortexCard || !this.vortexCooldownFill || !this.currentPlayer)
+      return;
+    const endsAt =
+      (this.currentPlayer.data.get("vortexCdEndsAt") as number) ?? 0;
+    const now = Date.now();
+    if (endsAt > now) {
+      this.vortexCard.setAlpha(0.45);
+      this.vortexCooldownFill.setVisible(true);
+      const totalMs = 8000; // vortex cooldown
+      const remaining = endsAt - now;
+      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
+      const h = this.vortexCooldownFillBaseH * fillPct;
+      this.vortexCooldownFill.setSize(this.vortexCard.displayWidth, h);
+      this.vortexCooldownFill.setPosition(
+        this.vortexCard.x,
+        this.vortexCard.y + this.vortexCooldownFillBaseH - h,
+      );
+    } else {
+      this.vortexCard.setAlpha(1);
+      this.vortexCooldownFill.setVisible(false);
+    }
+  }
+
   /** Update heal card overlay: dim when not ready, show charge/cooldown fill. */
   private updateHealCooldownOverlay(): void {
     if (!this.healCard || !this.healCooldownFill || !this.currentPlayer) return;
@@ -1849,6 +2197,32 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Update the dash cooldown overlay. */
+  private updateDashCooldownOverlay(): void {
+    if (!this.dashCard || !this.dashCooldownFill || !this.currentPlayer)
+      return;
+    const endsAt =
+      (this.currentPlayer.data.get("dashCdEndsAt") as number) ?? 0;
+    const now = Date.now();
+    if (endsAt > now) {
+      this.dashCard.setAlpha(0.45);
+      this.dashCooldownFill.setVisible(true);
+      const totalMs = 5000;
+      const remaining = endsAt - now;
+      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
+      const h = this.dashCooldownFillBaseH * fillPct;
+      this.dashCooldownFill.setSize(this.dashCard.displayWidth, h);
+      this.dashCooldownFill.setPosition(
+        this.dashCard.x,
+        this.dashCard.y + this.dashCooldownFillBaseH - h,
+      );
+    } else {
+      this.dashCard.setAlpha(1);
+      this.dashCooldownFill.setVisible(false);
+    }
+  }
+
+
   private showBolterTooltip(slot: Phaser.GameObjects.Rectangle): void {
     const mods = skillMods("bolter", this.localBolterLevel);
     const atk = this.currentPlayer ? Math.round(this.localPlayerAttack()) : 0;
@@ -1894,7 +2268,14 @@ export class GameScene extends Phaser.Scene {
 
   /** True if a skill is off cooldown (client-side check using synced data). */
   private isSkillReady(
-    skill: "claw" | "shock" | "heal" | "pulse" | "slam",
+    skill:
+      | "claw"
+      | "shock"
+      | "heal"
+      | "pulse"
+      | "slam"
+      | "dash"
+      | "vortex",
   ): boolean {
     if (!this.currentPlayer) return true;
     if (skill === "heal") {
@@ -1903,6 +2284,11 @@ export class GameScene extends Phaser.Scene {
     if (skill === "pulse") {
       const endsAt =
         (this.currentPlayer.data.get("pulseCdEndsAt") as number) ?? 0;
+      return endsAt <= Date.now();
+    }
+    if (skill === "dash") {
+      const endsAt =
+        (this.currentPlayer.data.get("dashCdEndsAt") as number) ?? 0;
       return endsAt <= Date.now();
     }
     if (skill === "shock") {
@@ -3947,6 +4333,16 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
+    // ---- Local player invincibility (dash) ----
+    if (this.currentPlayer) {
+      const invUntil = this.currentPlayer.data.get("invincibleUntil") as number;
+      if (invUntil && now < invUntil) {
+        this.currentPlayer.setAlpha(0.4);
+      } else {
+        this.currentPlayer.setAlpha(1);
+      }
+    }
+
     // ---- Interpolate remote players toward server position ----
     for (const sessionId in this.playerEntities) {
       if (sessionId === this.room.sessionId) continue;
@@ -4019,9 +4415,19 @@ export class GameScene extends Phaser.Scene {
 
       // Animation: attack when attacking, otherwise idle (shown for move+stand).
       const attacking = entity.data.get("attacking") as boolean;
-      const isOrck = entity.texture.key === "orck_sheet";
-      const atkKey = isOrck ? "orck_attack" : "tri_attack";
-      const idleKey = isOrck ? "orck_idle" : "tri_idle";
+      const textureKey = entity.texture.key;
+      const isOrck = textureKey === "orck_sheet";
+      const isTau = textureKey === "tau_sheet";
+      const atkKey = isTau
+        ? "tau_attack"
+        : isOrck
+          ? "orck_attack"
+          : "tri_attack";
+      const idleKey = isTau
+        ? "tau_idle"
+        : isOrck
+          ? "orck_idle"
+          : "tri_idle";
       const eAnim = entity.anims.currentAnim;
       if (attacking) {
         if (!eAnim || eAnim.key !== atkKey) {
@@ -4043,6 +4449,13 @@ export class GameScene extends Phaser.Scene {
         entity.setTint(0xb266ff);
       } else {
         entity.clearTint();
+      }
+      // Invincibility opacity (dash)
+      const enemyInvUntil = entity.data.get("invincibleUntil") as number;
+      if (enemyInvUntil && now < enemyInvUntil) {
+        entity.setAlpha(0.4);
+      } else {
+        entity.setAlpha(1);
       }
 
       // ---- Update the floating HP bar ----
@@ -4126,9 +4539,10 @@ export class GameScene extends Phaser.Scene {
     // ---- Update bolter cooldown fill on the card ----
     this.updateBolterCooldownOverlay();
     this.updatePulseCooldownOverlay();
-    this.updateShockCooldownOverlay();
+    this.updateDashCooldownOverlay();
     this.updateClawCooldownOverlay();
     this.updateHealCooldownOverlay();
+    this.updateVortexCooldownOverlay();
     // ---- Sync viewport to server (for viewport-activated spawning) ----
     // ---- Update live entity hitbox overlay ----
     this.updateEntityHitboxes();
@@ -4298,6 +4712,32 @@ export class GameScene extends Phaser.Scene {
         gfx.lineTo(corners[i].x, corners[i].y);
       gfx.closePath();
       gfx.strokePath();
+    }
+
+    // ---- Dash VFX (WHITE line trail) ----
+    gfx.lineStyle(2, 0xffffff, 0.8);
+    for (const id in this.clawEntities) {
+      const ent = this.clawEntities[id];
+      const castData = (ent as any).castData as any;
+      if (castData?.skillId !== "dash") continue;
+      const startX = castData?.startX ?? castData?.x ?? ent.x;
+      const startY = castData?.startY ?? castData?.y ?? ent.y;
+      const endX = castData?.x ?? ent.x;
+      const endY = castData?.y ?? ent.y;
+      gfx.lineStyle(2, 0xffffff, 0.8);
+      gfx.lineBetween(startX, startY, endX, endY);
+    }
+
+    // ---- Dash Ice Blast VFX (CYAN circles) ----
+    gfx.lineStyle(2, 0x66ccff, 0.9);
+    for (const id in this.clawEntities) {
+      const ent = this.clawEntities[id];
+      const castData = (ent as any).castData as any;
+      if (castData?.skillId !== "dash_ice") continue;
+      const radius = castData?.range ?? 50;
+      const cx = castData?.x ?? ent.x;
+      const cy = castData?.y ?? ent.y;
+      gfx.strokeCircle(cx, cy, radius);
     }
   }
 

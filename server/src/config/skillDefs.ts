@@ -118,6 +118,28 @@ export interface PulseDef extends SkillDef {
   shockDuration: number;
 }
 
+export interface DashDef extends SkillDef {
+  id: "dash";
+  /** Base dash distance in pixels (L1). */
+  baseRange: number;
+  /** Range growth per level (L1-5, very minimal). */
+  rangePerLevel: number;
+  /** Base cooldown in seconds (L1 = 5s). */
+  baseCooldown: number;
+  /** Cooldown at L5 (2.5s). Linear interpolation L1..L5. */
+  level5Cooldown: number;
+  /** Level at which ice blast unlocks. */
+  iceBlastUnlockLevel: number;
+  /** Base ice blast damage at unlock level. */
+  iceBlastBaseDamage: number;
+  /** Ice blast damage increase per level above unlock (0.1 = +10%). */
+  iceBlastDamagePerLevel: number;
+  /** Base ice blast radius in pixels. */
+  iceBlastBaseRadius: number;
+  /** Ice blast radius growth per level above unlock. */
+  iceBlastRadiusPerLevel: number;
+}
+
 export interface ShockDef extends SkillDef {
   id: "shock";
   /** Base damage (same as bolter base attack). */
@@ -140,6 +162,30 @@ export interface ShockDef extends SkillDef {
   chainRadius: (lvl: number) => number;
   /** Chain damage multiplier (each chain does this fraction of the previous). */
   chainDamageFalloff: number;
+}
+
+export interface VortexDef extends SkillDef {
+  id: "vortex";
+  /** Base pull radius in pixels. */
+  radiusBase: number;
+  /** Radius growth per level. */
+  radiusPerLevel: number;
+  /** Base pull force (px/sec) — how fast entities are dragged to centre. */
+  pullForceBase: number;
+  /** Pull force growth per level. */
+  pullForcePerLevel: number;
+  /** Duration of the pull phase in seconds. */
+  pullDuration: number;
+  /** Level at which explosion unlocks. */
+  explosionUnlockLevel: number;
+  /** Base explosion damage. */
+  baseExplosionDamage: number;
+  /** Explosion damage growth per level above unlock (0.1 = +10%). */
+  explosionDamagePerLevel: number;
+  /** Base explosion radius in pixels. */
+  baseExplosionRadius: number;
+  /** Explosion radius growth per level above unlock. */
+  explosionRadiusPerLevel: number;
 }
 
 /**
@@ -310,6 +356,27 @@ const PULSE: PulseDef = {
 };
 
 /**
+ * Dash:
+ * - Evasion skill: dash toward mouse, invincible during dash.
+ * - L1-5: cooldown decreases 5s -> 2.5s (linear), range increases minimally.
+ * - L6-10: ice blast on landing (small radius AoE, ice damage). +10% dmg/level, slight radius growth.
+ */
+const DASH: DashDef = {
+  id: "dash",
+  cooldown: 5.0,
+  attackFactor: 0.0,
+  baseRange: 120,
+  rangePerLevel: 5,
+  baseCooldown: 5.0,
+  level5Cooldown: 2.5,
+  iceBlastUnlockLevel: 6,
+  iceBlastBaseDamage: 100,
+  iceBlastDamagePerLevel: 0.1,
+  iceBlastBaseRadius: 50,
+  iceBlastRadiusPerLevel: 3,
+};
+
+/**
  * Shock (Chain Lightning):
  * - Cone-based targeting: finds N enemies in the cone hitbox.
  * - L1=1 target, L2=2, L3=2, L4=3, L5=3, L6=4, L7=4, L8=5, L9=5, L10=5.
@@ -348,6 +415,33 @@ export const SHOCK: ShockDef = {
   chainDamageFalloff: 0.5, // each chain does 50% of previous
 };
 
+/**
+ * Vortex:
+ * - Pulls enemies/players toward its centre, centred on the caster.
+ * - L1-4: Pull only. Radius + pull rate grow per level.
+ * - L5-10: Pull + explosion after pull completes.
+ *         Explosion damage (+10%/level), explosion radius, vortex radius grow per level.
+ * - Colour: grey (L1-2), brown (L3-5), purple (L6-10).
+ */
+export const VORTEX: VortexDef = {
+  id: "vortex",
+  cooldown: 8.0,
+  attackFactor: 0.0,
+  baseCritRate: 0.1,
+  critRatePerLevel: 0.01,
+  radiusBase: 60,
+  radiusPerLevel: 12,
+  pullForceBase: 100,
+  pullForcePerLevel: 20,
+  pullDuration: 2.0,
+  explosionUnlockLevel: 5,
+  baseExplosionDamage: 300,
+  explosionDamagePerLevel: 0.1,
+  baseExplosionRadius: 80,
+  explosionRadiusPerLevel: 6,
+  hitFeedbackMs: 100,
+};
+
 // Export as object with helper accessors that handle function values
 export const SKILL_DEFS: Record<string, SkillDef> & {
   bolter: BolterDef;
@@ -356,6 +450,8 @@ export const SKILL_DEFS: Record<string, SkillDef> & {
   heal: HealDef;
   pulse: PulseDef;
   shock: ShockDef;
+  dash: DashDef;
+  vortex: VortexDef;
 } = {
   bolter: BOLTER,
   claw: CLAW,
@@ -363,6 +459,8 @@ export const SKILL_DEFS: Record<string, SkillDef> & {
   heal: HEAL,
   pulse: PULSE,
   shock: SHOCK,
+  dash: DASH,
+  vortex: VORTEX,
 };
 
 /** Pulse damage for a given level. */
@@ -577,7 +675,87 @@ export function getClawBleedDuration(skillLevel: number): number {
   return CLAW.bleedDuration(skillLevel);
 }
 
+// ---- Dash helpers ----
+
+/** Dash distance for a given level. Minimal growth L1-5, flat L6-10. */
+export function dashRange(skillLevel: number): number {
+  const lvl = Math.max(1, Math.min(5, skillLevel));
+  return DASH.baseRange + DASH.rangePerLevel * (lvl - 1);
+}
+
+/** Dash cooldown for a given level. Linear L1(5s)->L5(2.5s), flat after. */
+export function dashCooldown(skillLevel: number): number {
+  const lvl = Math.max(1, Math.min(5, skillLevel));
+  const t = (lvl - 1) / 4; // 0 at L1, 1 at L5
+  return DASH.baseCooldown + (DASH.level5Cooldown - DASH.baseCooldown) * t;
+}
+
+/** Whether ice blast is unlocked at this level. */
+export function dashHasIceBlast(skillLevel: number): boolean {
+  return skillLevel >= DASH.iceBlastUnlockLevel;
+}
+
+/** Ice blast damage for a given level (0 if not unlocked). */
+export function dashIceBlastDamage(skillLevel: number): number {
+  if (skillLevel < DASH.iceBlastUnlockLevel) return 0;
+  const levelsAbove = skillLevel - DASH.iceBlastUnlockLevel;
+  return DASH.iceBlastBaseDamage * (1.0 + DASH.iceBlastDamagePerLevel * levelsAbove);
+}
+
+/** Ice blast radius for a given level (0 if not unlocked). */
+export function dashIceBlastRadius(skillLevel: number): number {
+  if (skillLevel < DASH.iceBlastUnlockLevel) return 0;
+  const levelsAbove = skillLevel - DASH.iceBlastUnlockLevel;
+  return DASH.iceBlastBaseRadius + DASH.iceBlastRadiusPerLevel * levelsAbove;
+}
+
 // Typed helpers
 export const CLAW_DEF: ClawDef = CLAW;
 export const BOLTER_DEF: BolterDef = BOLTER;
 export const SLAM_DEF: SlamDef = SLAM;
+
+export const DASH_DEF: DashDef = DASH;
+
+// ---- Vortex helpers ----
+
+/** Vortex pull radius for a given level. */
+export function vortexRadius(skillLevel: number): number {
+  const lvl = Math.max(1, skillLevel);
+  return VORTEX.radiusBase + VORTEX.radiusPerLevel * (lvl - 1);
+}
+
+/** Vortex pull force (speed) for a given level. */
+export function vortexPullForce(skillLevel: number): number {
+  const lvl = Math.max(1, skillLevel);
+  return VORTEX.pullForceBase + VORTEX.pullForcePerLevel * (lvl - 1);
+}
+
+/** Whether vortex has an explosion at this level. */
+export function vortexHasExplosion(skillLevel: number): boolean {
+  return skillLevel >= VORTEX.explosionUnlockLevel;
+}
+
+/** Explosion damage for a given level (0 if not unlocked). */
+export function vortexExplosionDamage(skillLevel: number): number {
+  if (skillLevel < VORTEX.explosionUnlockLevel) return 0;
+  const levelsAbove = skillLevel - VORTEX.explosionUnlockLevel;
+  return VORTEX.baseExplosionDamage * (1.0 + VORTEX.explosionDamagePerLevel * levelsAbove);
+}
+
+/** Explosion radius for a given level (0 if not unlocked). */
+export function vortexExplosionRadius(skillLevel: number): number {
+  if (skillLevel < VORTEX.explosionUnlockLevel) return 0;
+  const levelsAbove = skillLevel - VORTEX.explosionUnlockLevel;
+  return VORTEX.baseExplosionRadius + VORTEX.explosionRadiusPerLevel * levelsAbove;
+}
+
+/** Vortex colour tier: grey (1-2), brown (3-5), purple (6-10). */
+export type VortexColorTier = "grey" | "brown" | "purple";
+
+export function vortexColorTier(skillLevel: number): VortexColorTier {
+  if (skillLevel >= 6) return "purple";
+  if (skillLevel >= 3) return "brown";
+  return "grey";
+}
+
+export const VORTEX_DEF: VortexDef = VORTEX;
