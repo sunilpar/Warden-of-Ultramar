@@ -3,12 +3,7 @@
  * ============
  * Chain lightning skill. Finds enemies in a cone, damages them, and
  * chains to nearby enemies with damage falloff.
- *
- * Level scaling:
- *   Targets: L1=1, L2=2, L3=2, L4=3, L5=3, L6=4, L7=4, L8=5, L9=5, L10=5
- *   Chains: L1-4=0, L5=1, L6=1, L7=2, L8=2, L9=3, L10=3
- *   Damage: +10% at L2,4,6,8,10
- *   Range: +30px at L1,3,5,7,9
+ * Respects wall collisions — lightning cannot pass through walls.
  */
 import { RoomState } from "../schema/RoomState";
 import { Player } from "../schema/Player";
@@ -34,10 +29,51 @@ interface Seg {
   delay: number;
 }
 
+export interface ShockCollisionResolver {
+  resolveTileCollision(
+    x: number,
+    y: number,
+    radius: number,
+  ): { x: number; y: number };
+}
+
 export class ShockSystem {
   private nextId = 1;
 
-  constructor(private state: RoomState) {}
+  constructor(
+    private state: RoomState,
+    private mapSystem: ShockCollisionResolver | null = null,
+  ) {}
+
+  /**
+   * Raymarch along the line and return how far the lightning can travel
+   * before hitting a wall. Returns a value from 0..1 where 1 = full distance.
+   */
+  private raycastCoverage(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+  ): number {
+    if (!this.mapSystem) return 1; // no collision system = allow all
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1) return 1;
+    const stepSize = 6; // check every 6px for accuracy
+    const steps = Math.ceil(dist / stepSize);
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      const px = x1 + dx * t;
+      const py = y1 + dy * t;
+      const res = this.mapSystem.resolveTileCollision(px, py, 2);
+      if (Math.hypot(res.x - px, res.y - py) > 0.5) {
+        // Wall hit — return how far we got
+        return (i - 1) / steps;
+      }
+    }
+    return 1; // full distance, no wall
+  }
 
   castPlayerShock(
     player: Player,
@@ -215,7 +251,11 @@ export class ShockSystem {
       const angle = Math.atan2(dy, dx);
       let diff = Math.abs(angle - aimAngle);
       if (diff > Math.PI) diff = 2 * Math.PI - diff;
-      if (diff <= halfAngle) results.push({ enemy, dist });
+      if (diff <= halfAngle) {
+        // Wall check: must have line of sight to the enemy
+        if (this.raycastCoverage(cx, cy, enemy.x, enemy.y) < 1) return;
+        results.push({ enemy, dist });
+      }
     });
     results.sort((a, b) => a.dist - b.dist);
     return results.map((r) => r.enemy);
@@ -238,7 +278,10 @@ export class ShockSystem {
       const angle = Math.atan2(dy, dx);
       let diff = Math.abs(angle - aimAngle);
       if (diff > Math.PI) diff = 2 * Math.PI - diff;
-      if (diff <= halfAngle) results.push({ player: p, dist });
+      if (diff <= halfAngle) {
+        if (this.raycastCoverage(cx, cy, p.x, p.y) < 1) return;
+        results.push({ player: p, dist });
+      }
     });
     results.sort((a, b) => a.dist - b.dist);
     return results.map((r) => r.player);
@@ -255,7 +298,11 @@ export class ShockSystem {
       if (enemy.isDead) return;
       if (hitSet.has(enemy)) return;
       const dist = Math.hypot(enemy.x - cx, enemy.y - cy);
-      if (dist <= radius) results.push({ enemy, dist });
+      if (dist <= radius) {
+        // Wall check for chains too
+        if (this.raycastCoverage(cx, cy, enemy.x, enemy.y) < 1) return;
+        results.push({ enemy, dist });
+      }
     });
     results.sort((a, b) => a.dist - b.dist);
     return results.map((r) => r.enemy);
@@ -270,8 +317,18 @@ export class ShockSystem {
     segments: Seg[],
     aimAngle: number,
   ): void {
-    // Encode segments as "x1,y1,x2,y2,delay;..."
-    const segStr = segments
+    // Clip each segment to the wall hit point so the VFX stops at walls
+    const clipped = segments.map((s) => {
+      const coverage = this.raycastCoverage(s.x1, s.y1, s.x2, s.y2);
+      return {
+        x1: s.x1,
+        y1: s.y1,
+        x2: s.x1 + (s.x2 - s.x1) * coverage,
+        y2: s.y1 + (s.y2 - s.y1) * coverage,
+        delay: s.delay,
+      };
+    });
+    const segStr = clipped
       .map(
         (s) =>
           `${Math.round(s.x1)},${Math.round(s.y1)},${Math.round(s.x2)},${Math.round(s.y2)},${s.delay}`,

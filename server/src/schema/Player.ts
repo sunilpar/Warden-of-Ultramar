@@ -428,11 +428,11 @@ export class Player extends Schema {
     this.initBaseStats();
     // Reset skills to level 1 defaults
     this.skillLevels.clear();
-    this.skillLevels.set("bolter", 1);
+    this.skillLevels.set("shock", 1);
     this.skillLevels.set("claw", 1);
     this.skillLevels.set("heal", 1);
     this.skillLevels.set("pulse", 1);
-    this.skillLevels.set("shock", 1);
+    this.skillLevels.set("slam", 1);
     this.skillCooldowns.clear();
     // Clear bleed
     this.bleedUntil = 0;

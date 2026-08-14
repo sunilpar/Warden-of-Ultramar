@@ -77,7 +77,7 @@ export class GameRoom extends Room {
     this.slamSystem = new SlamSystem(this.state, this.mapSystem);
     this.healSystem = new HealSystem(this.state);
     this.pulseSystem = new PulseSystem(this.state);
-    this.shockSystem = new ShockSystem(this.state);
+    this.shockSystem = new ShockSystem(this.state, this.mapSystem);
     // Cross-link: enemies can fire projectiles + claws.
     this.enemySystem.setProjectileSystem(this.projectileSystem);
     this.enemySystem.setClawSystem(this.clawSystem);
@@ -412,12 +412,12 @@ export class GameRoom extends Room {
       const spawn = this.mapSystem.getSpawnPoint();
       player.x = spawn.x;
       player.y = spawn.y;
-      // Give bolter + claw + heal + pulse + shock at level 1
-      player.setSkillLevel("bolter", 1);
+      // Give shock + claw + heal + pulse + slam at level 1
+      player.setSkillLevel("shock", 1);
       player.setSkillLevel("claw", 1);
       player.setSkillLevel("heal", 1);
       player.setSkillLevel("pulse", 1);
-      player.setSkillLevel("shock", 1);
+      player.setSkillLevel("slam", 1);
     },
 
     // Map transition XP reward (map1 -> map2: +500 XP).
@@ -528,11 +528,11 @@ export class GameRoom extends Room {
     } else {
       // Fresh player
       player.initBaseStats();
-      player.setSkillLevel("bolter", 1);
+      player.setSkillLevel("shock", 1);
       player.setSkillLevel("claw", 1);
       player.setSkillLevel("heal", 1);
       player.setSkillLevel("pulse", 1);
-      player.setSkillLevel("shock", 1);
+      player.setSkillLevel("slam", 1);
     }
 
     applyPlayerModifiers(player, this.activeModifiers);
