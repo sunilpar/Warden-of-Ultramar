@@ -106,9 +106,11 @@ export class GameScene extends Phaser.Scene {
   /** Claw VFX sprites keyed by skillCast id. */
   clawEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
   private clawAnimCreated: boolean = false;
+  private pulseAnimCreated: boolean = false;
   /** Slam VFX sprites keyed by slam id. */
   slamEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
   private slamAnimCreated: boolean = false;
+  private shockAnimCreated: boolean = false;
   /** Death screen overlay container (null when hidden). */
   private deathOverlay: Phaser.GameObjects.Container | null = null;
   private wasDead: boolean = false;
@@ -131,11 +133,11 @@ export class GameScene extends Phaser.Scene {
   private bolterCooldownFillBaseH: number = 0;
   private bolterTooltip!: Phaser.GameObjects.Text;
 
-  // ---- Slam card (slot 2) + Claw card (slot 3) ----
-  private slamCard!: Phaser.GameObjects.Image;
-  private localSlamLevel: number = 1;
-  private slamCooldownFill!: Phaser.GameObjects.Rectangle;
-  private slamCooldownFillBaseH: number = 0;
+  // ---- Shock card (slot 5) + Claw card (slot 3) ----
+  private shockCard!: Phaser.GameObjects.Image;
+  private localShockLevel: number = 1;
+  private shockCooldownFill!: Phaser.GameObjects.Rectangle;
+  private shockCooldownFillBaseH: number = 0;
   private clawCard!: Phaser.GameObjects.Image;
   private localClawLevel: number = 1;
   private clawCooldownFill!: Phaser.GameObjects.Rectangle;
@@ -146,6 +148,12 @@ export class GameScene extends Phaser.Scene {
   private localHealLevel: number = 1;
   private healCooldownFill!: Phaser.GameObjects.Rectangle;
   private healCooldownFillBaseH: number = 0;
+
+  // ---- Pulse card (slot 2) ----
+  private pulseCard!: Phaser.GameObjects.Image;
+  private localPulseLevel: number = 1;
+  private pulseCooldownFill!: Phaser.GameObjects.Rectangle;
+  private pulseCooldownFillBaseH: number = 0;
 
   // ---- Skill-on-cooldown toast (shown above the HUD in light grey) ----
   private cooldownToast!: Phaser.GameObjects.Text;
@@ -330,19 +338,21 @@ export class GameScene extends Phaser.Scene {
     this.enemyAnimationsCreated = false;
     this.bolterMuzzleAnimCreated = false;
     this.clawAnimCreated = false;
+    this.pulseAnimCreated = false;
     this.slamAnimCreated = false;
+    this.shockAnimCreated = false;
     this.lastKnownXp = -1;
     this.lastKnownLevel = -1;
     this.localBolterLevel = 1;
-    this.localSlamLevel = 1;
+    this.localShockLevel = 1;
     this.localClawLevel = 1;
     this.localHealLevel = 1;
     // Null out game object references so create* methods rebuild them
     this.bolterCard = null as any;
     this.bolterCooldownFill = null as any;
     this.bolterTooltip = null as any;
-    this.slamCard = null as any;
-    this.slamCooldownFill = null as any;
+    this.shockCard = null as any;
+    this.shockCooldownFill = null as any;
     this.clawCard = null as any;
     this.clawCooldownFill = null as any;
     this.healCard = null as any;
@@ -402,12 +412,12 @@ export class GameScene extends Phaser.Scene {
         wx - this.currentPlayer.x,
       );
       if (pointer.rightButtonDown()) {
-        // Right-click: slam skill.
-        if (!this.isSkillReady("slam")) {
+        // Right-click: pulse skill.
+        if (!this.isSkillReady("pulse")) {
           this.showCooldownToast();
           return;
         }
-        this.room.send(1, { skill: "slam", angle });
+        this.room.send(1, { skill: "pulse", angle });
         return;
       }
       // Left-click: bolter skill.
@@ -454,6 +464,18 @@ export class GameScene extends Phaser.Scene {
           return;
         }
         this.room.send(1, { skill: "heal", angle: this.aimAngle });
+      });
+
+    // ---- "2" key casts shock skill ----
+    this.input.keyboard
+      ?.addKey(Phaser.Input.Keyboard.KeyCodes.TWO)
+      ?.on("down", () => {
+        if (!this.currentPlayer || !this.room) return;
+        if (!this.isSkillReady("shock")) {
+          this.showCooldownToast();
+          return;
+        }
+        this.room.send(1, { skill: "shock", angle: this.aimAngle });
       });
 
     // ---- Resolve this scene's map + room config from its scene key ----
@@ -513,7 +535,8 @@ export class GameScene extends Phaser.Scene {
     this.createCharacterScreen();
     // Place the skill cards in slots 1-3 (initial level 1).
     this.refreshBolterCard();
-    this.refreshSlamCard();
+    this.refreshPulseCard();
+    this.refreshShockCard();
     this.refreshClawCard();
     this.refreshHealCard();
 
@@ -622,8 +645,16 @@ export class GameScene extends Phaser.Scene {
               player.slamCooldownEndsAt ?? 0,
             );
             this.currentPlayer.setData(
+              "shockCdEndsAt",
+              player.shockCooldownEndsAt ?? 0,
+            );
+            this.currentPlayer.setData(
               "clawCdEndsAt",
               player.clawCooldownEndsAt ?? 0,
+            );
+            this.currentPlayer.setData(
+              "pulseCdEndsAt",
+              player.pulseCooldownEndsAt ?? 0,
             );
             // Heal readiness + cooldown
             this.currentPlayer.setData("healReady", player.healReady ?? true);
@@ -636,6 +667,7 @@ export class GameScene extends Phaser.Scene {
               "hitFlashUntil",
               player.hitFlashUntil ?? 0,
             );
+            this.currentPlayer.setData("shockUntil", player.shockUntil ?? 0);
             this.currentPlayer.setData("hitboxW", player.hitboxW ?? 10);
             this.currentPlayer.setData("hitboxH", player.hitboxH ?? 10);
             // Detect damage taken by local player.
@@ -654,15 +686,6 @@ export class GameScene extends Phaser.Scene {
                 );
               }
             }
-            // Sync slam level + card art
-            const slamLvl =
-              player.skillLevels && player.skillLevels.get
-                ? (player.skillLevels.get("slam") ?? 1)
-                : 1;
-            if (slamLvl !== this.localSlamLevel) {
-              this.localSlamLevel = slamLvl;
-              this.refreshSlamCard();
-            }
             // Sync claw level + card art
             const clawLvl =
               player.skillLevels && player.skillLevels.get
@@ -680,6 +703,24 @@ export class GameScene extends Phaser.Scene {
             if (healLvl !== this.localHealLevel) {
               this.localHealLevel = healLvl;
               this.refreshHealCard();
+            }
+            // Sync pulse level + card art
+            const pulseLvl =
+              player.skillLevels && player.skillLevels.get
+                ? (player.skillLevels.get("pulse") ?? 1)
+                : 1;
+            if (pulseLvl !== this.localPulseLevel) {
+              this.localPulseLevel = pulseLvl;
+              this.refreshPulseCard();
+            }
+            // Sync shock level + card art
+            const shockLvl =
+              player.skillLevels && player.skillLevels.get
+                ? (player.skillLevels.get("shock") ?? 1)
+                : 1;
+            if (shockLvl !== this.localShockLevel) {
+              this.localShockLevel = shockLvl;
+              this.refreshShockCard();
             }
           }
         });
@@ -760,6 +801,7 @@ export class GameScene extends Phaser.Scene {
 
       // Initialize data so render loop works from the first frame.
       sprite.setData("hitFlashUntil", enemy.hitFlashUntil ?? 0);
+      sprite.setData("shockUntil", enemy.shockUntil ?? 0);
       sprite.setData("hitboxW", enemy.hitboxW ?? 12);
       sprite.setData("hitboxH", enemy.hitboxH ?? 12);
       sprite.setData("hp", enemy.currentHealth);
@@ -779,6 +821,7 @@ export class GameScene extends Phaser.Scene {
         sprite.setData("maxShield", enemy.maxShield ?? 0);
         sprite.setData("level", enemy.level ?? 1);
         sprite.setData("hitFlashUntil", enemy.hitFlashUntil);
+        sprite.setData("shockUntil", enemy.shockUntil ?? 0);
         sprite.setData("hitboxW", enemy.hitboxW ?? 12);
         sprite.setData("hitboxH", enemy.hitboxH ?? 12);
         sprite.setData("attacking", !!enemy.attacking);
@@ -971,6 +1014,27 @@ export class GameScene extends Phaser.Scene {
           });
           this.clawEntities[castId] = flash as any;
         }
+      } else if (cast.skillId === "pulse") {
+        // Pulse VFX: use pulse spritesheet animation (like claw/slam pattern)
+        if (!this.pulseAnimCreated) {
+          this.createPulseAnimations();
+          this.pulseAnimCreated = true;
+        }
+        const tier: string = cast.level >= 6 ? "big" : "small";
+        const startFrame = tier === "big" ? 4 : 0;
+        const radius: number = cast.range ?? 80;
+        // Scale sprite to match the pulse radius
+        const SPRITE_NATIVE = 64;
+        const pulseScale = Math.max(1.0, (radius * 2) / SPRITE_NATIVE);
+        const animKey = `pulse_${tier}`;
+        const sprite = this.add
+          .sprite(cast.x, cast.y, "pulse_sheet", startFrame)
+          .setDepth(7)
+          .setScale(pulseScale);
+        sprite.anims.play(animKey);
+        sprite.on("animationcomplete", () => sprite.destroy());
+        (sprite as any).castData = cast;
+        this.clawEntities[castId] = sprite;
       }
     });
 
@@ -979,6 +1043,68 @@ export class GameScene extends Phaser.Scene {
       if (entity) {
         entity.destroy();
         delete this.clawEntities[castId];
+      }
+    });
+
+    // ---- Shock VFX listeners (Phaser-drawn lightning) ----
+    callbacks.onAdd("shockCasts", (shock: any, shockId: string) => {
+      // Blue for L1-5, purple for L6+
+      const color = shock.level >= 6 ? 0xb266ff : 0x4da6ff;
+      const fillColor = shock.level >= 6 ? 0x6a1fb2 : 0x1a5cad;
+
+      // Parse segments from flat string
+      const segStr: string = shock.segments || "";
+      const segments: {
+        x1: number;
+        y1: number;
+        x2: number;
+        y2: number;
+        delay: number;
+      }[] = [];
+      if (segStr.length > 0) {
+        for (const part of segStr.split(";")) {
+          const [x1, y1, x2, y2, delay] = part.split(",").map(Number);
+          if (!isNaN(x1)) segments.push({ x1, y1, x2, y2, delay });
+        }
+      }
+
+      // Store hitbox reference for F3 overlay
+      const hbRef = this.add.rectangle(shock.x, shock.y, 1, 1, 0xffffff, 0);
+      hbRef.setDepth(7);
+      (hbRef as any).castData = {
+        skillId: "shock",
+        x: shock.x,
+        y: shock.y,
+        angle: shock.aimAngle ?? 0,
+        level: shock.level,
+      };
+      this.clawEntities[shockId] = hbRef;
+      this.time.delayedCall(500, () => {
+        if (hbRef && hbRef.active) hbRef.destroy();
+        delete this.clawEntities[shockId];
+      });
+
+      // Draw each lightning segment
+      for (const seg of segments) {
+        this.time.delayedCall(seg.delay, () => {
+          if (!this.scene.isActive()) return;
+          this.drawLightningBolt(
+            seg.x1,
+            seg.y1,
+            seg.x2,
+            seg.y2,
+            color,
+            fillColor,
+          );
+        });
+      }
+    });
+
+    callbacks.onRemove("shockCasts", (_shock: any, shockId: string) => {
+      const entity = this.clawEntities[shockId];
+      if (entity) {
+        entity.destroy();
+        delete this.clawEntities[shockId];
       }
     });
 
@@ -1093,6 +1219,132 @@ export class GameScene extends Phaser.Scene {
         repeat: 0,
       });
     }
+  }
+
+  /**
+   * Create the pulse skill animations once (per tier).
+   * pulseskillsheet.png is 4 cols x 2 rows, 64x64 each.
+   * Row 0 (frames 0-3): base pulse (levels 1-5).
+   * Row 1 (frames 4-7): upgraded pulse (levels 6-10).
+   */
+  private createPulseAnimations(): void {
+    const rows: { tier: string; start: number }[] = [
+      { tier: "small", start: 0 },
+      { tier: "big", start: 4 },
+    ];
+    for (const { tier, start } of rows) {
+      const key = `pulse_${tier}`;
+      if (this.anims.exists(key)) continue;
+      this.anims.create({
+        key,
+        frames: this.anims.generateFrameNumbers("pulse_sheet", {
+          start,
+          end: start + 3,
+        }),
+        frameRate: 20,
+        repeat: 0,
+      });
+    }
+  }
+
+  /**
+   * Draw a jagged lightning bolt from (x1,y1) to (x2,y2) using Phaser graphics.
+   * Renders a bright core line + a wider glow line + spark circle at impact.
+   * Auto-fades and destroys.
+   */
+  private drawLightningBolt(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    color: number,
+    fillColor: number,
+  ): void {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1) return;
+    const nx = -dy / dist; // perpendicular normal
+    const ny = dx / dist;
+
+    // Generate jagged midpoint offsets
+    const segments = Math.max(4, Math.floor(dist / 30));
+    const points: { x: number; y: number }[] = [];
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const px = x1 + dx * t;
+      const py = y1 + dy * t;
+      // Jagged offset, less at start/end
+      const jag = i === 0 || i === segments ? 0 : (Math.random() - 0.5) * 24;
+      points.push({ x: px + nx * jag, y: py + ny * jag });
+    }
+
+    // --- Glow layer (wide, semi-transparent) ---
+    const glow = this.add.graphics();
+    glow.setDepth(6);
+    glow.lineStyle(8, fillColor, 0.35);
+    glow.beginPath();
+    glow.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++)
+      glow.lineTo(points[i].x, points[i].y);
+    glow.strokePath();
+
+    // --- Core layer (bright, thin) ---
+    const core = this.add.graphics();
+    core.setDepth(7);
+    core.lineStyle(2.5, color, 1.0);
+    core.beginPath();
+    core.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++)
+      core.lineTo(points[i].x, points[i].y);
+    core.strokePath();
+
+    // --- Impact spark at target ---
+    const spark = this.add.circle(x2, y2, 12, color, 0.9);
+    spark.setDepth(8);
+    const sparkGlow = this.add.circle(x2, y2, 20, fillColor, 0.4);
+    sparkGlow.setDepth(7);
+
+    // Animate: flicker then fade
+    this.tweens.add({
+      targets: [core, glow],
+      alpha: 0,
+      duration: 250,
+      delay: 60,
+      onComplete: () => {
+        core.destroy();
+        glow.destroy();
+      },
+    });
+    this.tweens.add({
+      targets: [spark, sparkGlow],
+      alpha: 0,
+      scale: 2.5,
+      duration: 300,
+      onComplete: () => {
+        spark.destroy();
+        sparkGlow.destroy();
+      },
+    });
+
+    // Re-draw the bolt once with different jaggedness for a flicker effect
+    this.time.delayedCall(30, () => {
+      if (!core.active) return;
+      core.clear();
+      core.lineStyle(2.5, color, 0.9);
+      core.beginPath();
+      for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        const px = x1 + dx * t;
+        const py = y1 + dy * t;
+        const jag = i === 0 || i === segments ? 0 : (Math.random() - 0.5) * 24;
+        const px2 = px + nx * jag;
+        const py2 = py + ny * jag;
+        if (i === 0) core.moveTo(px2, py2);
+        else core.lineTo(px2, py2);
+      }
+      core.strokePath();
+    });
   }
 
   /**
@@ -1317,29 +1569,29 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Place / refresh the slam card art in HUD slot 2. */
-  private refreshSlamCard(): void {
-    if (!this.cardSlots || this.cardSlots.length < 2) return;
-    const slot = this.cardSlots[1];
-    const frame = cardFrameForLevel("slam", this.localSlamLevel);
-    if (this.slamCard) {
-      this.slamCard.setFrame(frame);
+  /** Place / refresh the shock card art in HUD slot 5. */
+  private refreshShockCard(): void {
+    if (!this.cardSlots || this.cardSlots.length < 5) return;
+    const slot = this.cardSlots[4];
+    const frame = cardFrameForLevel("shock", this.localShockLevel);
+    if (this.shockCard) {
+      this.shockCard.setFrame(frame);
     } else {
-      this.slamCard = this.add
+      this.shockCard = this.add
         .image(slot.x, slot.y, "card_sheet", frame)
         .setOrigin(0, 0)
         .setDisplaySize(slot.width, slot.height)
         .setScrollFactor(0)
         .setDepth(102);
 
-      // Cooldown fill overlay (orange, grows bottom-up).
-      this.slamCooldownFill = this.add
-        .rectangle(slot.x, slot.y, slot.width, slot.height, 0xff8800, 0.45)
+      // Cooldown fill overlay (purple, grows bottom-up).
+      this.shockCooldownFill = this.add
+        .rectangle(slot.x, slot.y, slot.width, slot.height, 0xb266ff, 0.45)
         .setOrigin(0, 0)
         .setScrollFactor(0)
         .setDepth(103)
         .setVisible(false);
-      this.slamCooldownFillBaseH = slot.height;
+      this.shockCooldownFillBaseH = slot.height;
     }
   }
 
@@ -1394,6 +1646,32 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Place / refresh the pulse card art in HUD slot 2. */
+  private refreshPulseCard(): void {
+    if (!this.cardSlots || this.cardSlots.length < 2) return;
+    const slot = this.cardSlots[1];
+    const frame = cardFrameForLevel("pulse", this.localPulseLevel);
+    if (this.pulseCard) {
+      this.pulseCard.setFrame(frame);
+    } else {
+      this.pulseCard = this.add
+        .image(slot.x, slot.y, "card_sheet", frame)
+        .setOrigin(0, 0)
+        .setDisplaySize(slot.width, slot.height)
+        .setScrollFactor(0)
+        .setDepth(102);
+
+      // Cooldown fill overlay (purple, grows bottom-up).
+      this.pulseCooldownFill = this.add
+        .rectangle(slot.x, slot.y, slot.width, slot.height, 0xb266ff, 0.45)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(103)
+        .setVisible(false);
+      this.pulseCooldownFillBaseH = slot.height;
+    }
+  }
+
   /** Update the cooldown dim/fill overlay based on bolterCooldownEndsAt. */
   private updateBolterCooldownOverlay(): void {
     if (!this.bolterCard || !this.bolterCooldownFill || !this.currentPlayer)
@@ -1421,26 +1699,28 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Update the slam cooldown overlay. */
-  private updateSlamCooldownOverlay(): void {
-    if (!this.slamCard || !this.slamCooldownFill || !this.currentPlayer) return;
-    const endsAt = (this.currentPlayer.data.get("slamCdEndsAt") as number) ?? 0;
+  /** Update the shock cooldown overlay. */
+  private updateShockCooldownOverlay(): void {
+    if (!this.shockCard || !this.shockCooldownFill || !this.currentPlayer)
+      return;
+    const endsAt =
+      (this.currentPlayer.data.get("shockCdEndsAt") as number) ?? 0;
     const now = Date.now();
     if (endsAt > now) {
-      this.slamCard.setAlpha(0.45);
-      this.slamCooldownFill.setVisible(true);
-      const totalMs = 2000;
+      this.shockCard.setAlpha(0.45);
+      this.shockCooldownFill.setVisible(true);
+      const totalMs = 700;
       const remaining = endsAt - now;
       const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
-      const h = this.slamCooldownFillBaseH * fillPct;
-      this.slamCooldownFill.setSize(this.slamCard.displayWidth, h);
-      this.slamCooldownFill.setPosition(
-        this.slamCard.x,
-        this.slamCard.y + this.slamCooldownFillBaseH - h,
+      const h = this.shockCooldownFillBaseH * fillPct;
+      this.shockCooldownFill.setSize(this.shockCard.displayWidth, h);
+      this.shockCooldownFill.setPosition(
+        this.shockCard.x,
+        this.shockCard.y + this.shockCooldownFillBaseH - h,
       );
     } else {
-      this.slamCard.setAlpha(1);
-      this.slamCooldownFill.setVisible(false);
+      this.shockCard.setAlpha(1);
+      this.shockCooldownFill.setVisible(false);
     }
   }
 
@@ -1505,6 +1785,31 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Update the pulse cooldown overlay. */
+  private updatePulseCooldownOverlay(): void {
+    if (!this.pulseCard || !this.pulseCooldownFill || !this.currentPlayer)
+      return;
+    const endsAt =
+      (this.currentPlayer.data.get("pulseCdEndsAt") as number) ?? 0;
+    const now = Date.now();
+    if (endsAt > now) {
+      this.pulseCard.setAlpha(0.45);
+      this.pulseCooldownFill.setVisible(true);
+      const totalMs = 5000;
+      const remaining = endsAt - now;
+      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
+      const h = this.pulseCooldownFillBaseH * fillPct;
+      this.pulseCooldownFill.setSize(this.pulseCard.displayWidth, h);
+      this.pulseCooldownFill.setPosition(
+        this.pulseCard.x,
+        this.pulseCard.y + this.pulseCooldownFillBaseH - h,
+      );
+    } else {
+      this.pulseCard.setAlpha(1);
+      this.pulseCooldownFill.setVisible(false);
+    }
+  }
+
   private showBolterTooltip(slot: Phaser.GameObjects.Rectangle): void {
     const mods = skillMods("bolter", this.localBolterLevel);
     const atk = this.currentPlayer ? Math.round(this.localPlayerAttack()) : 0;
@@ -1549,10 +1854,22 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** True if a skill is off cooldown (client-side check using synced data). */
-  private isSkillReady(skill: "bolter" | "claw" | "slam" | "heal"): boolean {
+  private isSkillReady(
+    skill: "bolter" | "claw" | "shock" | "heal" | "pulse",
+  ): boolean {
     if (!this.currentPlayer) return true;
     if (skill === "heal") {
       return (this.currentPlayer.data.get("healReady") as boolean) ?? true;
+    }
+    if (skill === "pulse") {
+      const endsAt =
+        (this.currentPlayer.data.get("pulseCdEndsAt") as number) ?? 0;
+      return endsAt <= Date.now();
+    }
+    if (skill === "shock") {
+      const endsAt =
+        (this.currentPlayer.data.get("shockCdEndsAt") as number) ?? 0;
+      return endsAt <= Date.now();
     }
     const key = skill + "CdEndsAt";
     const endsAt = (this.currentPlayer.data.get(key) as number) ?? 0;
@@ -2934,8 +3251,7 @@ export class GameScene extends Phaser.Scene {
         else if (statId === "critRate") upgradeDesc = "+2% Crit Rate";
         else if (statId === "critDamage") upgradeDesc = "+20% Crit Damage";
         else if (statId === "moveSpeed") upgradeDesc = "+5% Move Speed";
-        else if (statId === "shield")
-          upgradeDesc = "faster shield recovery";
+        else if (statId === "shield") upgradeDesc = "faster shield recovery";
         const btn = this.add
           .text(btnX, y, "[ + ]", {
             color: "#ffd700",
@@ -3577,11 +3893,15 @@ export class GameScene extends Phaser.Scene {
     // ---- Local player hit flash ----
     if (this.currentPlayer) {
       const localFlash = this.currentPlayer.data.get("hitFlashUntil") as number;
+      const localShock = this.currentPlayer.data.get("shockUntil") as number;
       if (localFlash && now < localFlash) {
         // Flash blue when the last hit was absorbed by shield, white otherwise.
         const shielded =
-          this.currentPlayerState && (this.currentPlayerState as any).lastHitShielded === true;
+          this.currentPlayerState &&
+          (this.currentPlayerState as any).lastHitShielded === true;
         this.currentPlayer.setTintFill(shielded ? 0x33b5ff : 0xffffff);
+      } else if (localShock && now < localShock) {
+        this.currentPlayer.setTint(0xb266ff);
       } else {
         this.currentPlayer.clearTint();
       }
@@ -3675,8 +3995,12 @@ export class GameScene extends Phaser.Scene {
 
       // Hit flash: tint white while hitFlashUntil > now.
       const flashUntil = entity.data.get("hitFlashUntil") as number;
+      const shockUntil = entity.data.get("shockUntil") as number;
       if (flashUntil && now < flashUntil) {
         entity.setTintFill(0xffffff);
+      } else if (shockUntil && now < shockUntil) {
+        // Shock: purple tint
+        entity.setTint(0xb266ff);
       } else {
         entity.clearTint();
       }
@@ -3761,7 +4085,8 @@ export class GameScene extends Phaser.Scene {
     }
     // ---- Update bolter cooldown fill on the card ----
     this.updateBolterCooldownOverlay();
-    this.updateSlamCooldownOverlay();
+    this.updatePulseCooldownOverlay();
+    this.updateShockCooldownOverlay();
     this.updateClawCooldownOverlay();
     this.updateHealCooldownOverlay();
     // ---- Sync viewport to server (for viewport-activated spawning) ----
@@ -3836,56 +4161,70 @@ export class GameScene extends Phaser.Scene {
       const range = castData?.range || 60;
       const tier: string = castData?.tier || "small";
       const halfAngle = tier === "big" ? 0.9 : tier === "mid" ? 0.7 : 0.5;
-      const angle = e.rotation || 0;
+      const angle = castData?.angle ?? e.rotation ?? 0;
+      // The cone originates from the CASTER's position (castData.x/y),
+      // not the sprite position (which is at the cone edge).
+      const cx = castData?.x ?? e.x;
+      const cy = castData?.y ?? e.y;
       gfx.beginPath();
-      gfx.moveTo(e.x, e.y);
+      gfx.moveTo(cx, cy);
       gfx.lineTo(
-        e.x + Math.cos(angle - halfAngle) * range,
-        e.y + Math.sin(angle - halfAngle) * range,
+        cx + Math.cos(angle - halfAngle) * range,
+        cy + Math.sin(angle - halfAngle) * range,
       );
-      gfx.moveTo(e.x, e.y);
+      gfx.moveTo(cx, cy);
       gfx.lineTo(
-        e.x + Math.cos(angle + halfAngle) * range,
-        e.y + Math.sin(angle + halfAngle) * range,
+        cx + Math.cos(angle + halfAngle) * range,
+        cy + Math.sin(angle + halfAngle) * range,
       );
       gfx.strokePath();
       gfx.beginPath();
-      gfx.arc(e.x, e.y, range, angle - halfAngle, angle + halfAngle);
+      gfx.arc(cx, cy, range, angle - halfAngle, angle + halfAngle);
       gfx.strokePath();
     }
 
-    // ---- Slam hitboxes (CYAN rectangles) ----
-    gfx.lineStyle(1.5, 0x00ffff, 0.8);
-    for (const id in this.slamEntities) {
-      const s = this.slamEntities[id];
-      const angle = s.rotation || 0;
-      // Read dimensions from the sprite data (set at creation time).
-      // halfHeight = along travel dir, halfWidth = perpendicular.
-      const halfH = 20;
-      const halfW = 40;
-      const cos = Math.cos(angle);
-      const sin = Math.sin(angle);
-      // 4 corners of the oriented rectangle
-      const corners = [
-        { lx: -halfH, ly: -halfW },
-        { lx: halfH, ly: -halfW },
-        { lx: halfH, ly: halfW },
-        { lx: -halfH, ly: halfW },
-      ].map((c) => ({
-        x: s.x + c.lx * cos - c.ly * sin,
-        y: s.y + c.lx * sin + c.ly * cos,
-      }));
+    // ---- Pulse VFX (PURPLE circles) ----
+    gfx.lineStyle(1.5, 0xb266ff, 0.8);
+    for (const id in this.clawEntities) {
+      const e = this.clawEntities[id];
+      const castData = (e as any).castData as any;
+      // Only draw pulse hitbox for pulse casts
+      if (castData?.skillId !== "pulse") continue;
+      const radius = castData?.range || 80;
+      // The pulse is centered on the caster
+      const cx = castData?.x ?? e.x;
+      const cy = castData?.y ?? e.y;
+      gfx.strokeCircle(cx, cy, radius);
+    }
+
+    // ---- Shock VFX (YELLOW-GREEN cones) ----
+    gfx.lineStyle(1.5, 0xccff00, 0.8);
+    for (const id in this.clawEntities) {
+      const e = this.clawEntities[id];
+      const castData = (e as any).castData as any;
+      if (castData?.skillId !== "shock") continue;
+      // Range: base 200px, +30 per odd level
+      const lvl = castData?.level ?? 1;
+      const increases = Math.floor((lvl - 1) / 2) + 1;
+      const range = 200 + 30 * (increases - 1);
+      const halfAngle = 0.6; // ~34 degrees
+      const angle = castData?.angle ?? 0;
+      const cx = castData?.x ?? e.x;
+      const cy = castData?.y ?? e.y;
       gfx.beginPath();
-      gfx.moveTo(corners[0].x, corners[0].y);
-      for (let i = 1; i < corners.length; i++) {
-        gfx.lineTo(corners[i].x, corners[i].y);
-      }
-      gfx.lineTo(corners[0].x, corners[0].y);
+      gfx.moveTo(cx, cy);
+      gfx.lineTo(
+        cx + Math.cos(angle - halfAngle) * range,
+        cy + Math.sin(angle - halfAngle) * range,
+      );
+      gfx.moveTo(cx, cy);
+      gfx.lineTo(
+        cx + Math.cos(angle + halfAngle) * range,
+        cy + Math.sin(angle + halfAngle) * range,
+      );
       gfx.strokePath();
-      // Draw travel direction arrow
       gfx.beginPath();
-      gfx.moveTo(s.x, s.y);
-      gfx.lineTo(s.x + cos * halfH * 2, s.y + sin * halfH * 2);
+      gfx.arc(cx, cy, range, angle - halfAngle, angle + halfAngle);
       gfx.strokePath();
     }
   }

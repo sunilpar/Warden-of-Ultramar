@@ -94,6 +94,54 @@ export interface HealDef extends SkillDef {
   cooldown: number;
 }
 
+export interface PulseDef extends SkillDef {
+  id: "pulse";
+  /** Base damage at level 1. */
+  baseDamage: number;
+  /** Damage multiplier per level (0.2 = +20% per level). */
+  damagePerLevel: number;
+  /** Base radius in pixels. */
+  baseRadius: number;
+  /** Radius growth per level in pixels. */
+  radiusPerLevel: number;
+  /** Base cooldown in seconds. */
+  baseCooldown: number;
+  /** Cooldown increase per level in seconds. */
+  cooldownPerLevel: number;
+  /** Level at which shock chance unlocks. */
+  shockUnlockLevel: number;
+  /** Chance to inflict shock at unlock level (0.1 = 10%). */
+  baseShockChance: number;
+  /** Shock chance increase per level above unlock (0.1 = +10%). */
+  shockChancePerLevel: number;
+  /** Shock duration in seconds. */
+  shockDuration: number;
+}
+
+export interface ShockDef extends SkillDef {
+  id: "shock";
+  /** Base damage (same as bolter base attack). */
+  baseDamage: number;
+  /** Damage multiplier per alternating level (0.1 = +10%). Applied at L2,4,6,8,10. */
+  damagePerAlternateLevel: number;
+  /** Base cone range in pixels. */
+  baseRange: number;
+  /** Range growth per alternating level (L1,3,5,7,9). */
+  rangePerAlternateLevel: number;
+  /** Cone half-angle in radians. */
+  coneHalfAngle: number;
+  /** Base cooldown in seconds. */
+  baseCooldown: number;
+  /** Max targets per level. */
+  targetsPerLevel: (lvl: number) => number;
+  /** Chain count per level (0 = no chain). */
+  chainsPerLevel: (lvl: number) => number;
+  /** Chain search radius in pixels. */
+  chainRadius: (lvl: number) => number;
+  /** Chain damage multiplier (each chain does this fraction of the previous). */
+  chainDamageFalloff: number;
+}
+
 /**
  * Bolter:
  * - +20% base damage over attack (attackFactor)
@@ -233,23 +281,153 @@ const HEAL: HealDef = {
   killsToRecharge: 5,
 };
 
+/**
+ * Pulse:
+ * - Lightning damage in a circle around the caster.
+ * - Base 300 damage, +20% per level.
+ * - Base radius 80px, +8px per level.
+ * - Base cooldown 5s, +0.2s per level.
+ * - Ignores collision/walls.
+ * - L5+: chance to inflict shock (reduces defence by 20%, slows 50%).
+ *   Shock chance: 10% at L5, +10% per level (50% at L10). Duration 10s.
+ */
+const PULSE: PulseDef = {
+  id: "pulse",
+  cooldown: 5.0,
+  attackFactor: 0.0,
+  baseCritRate: 0.2,
+  critRatePerLevel: 0.0,
+  baseDamage: 300,
+  damagePerLevel: 0.2,
+  baseRadius: 80,
+  radiusPerLevel: 8,
+  baseCooldown: 5.0,
+  cooldownPerLevel: 0.2,
+  shockUnlockLevel: 5,
+  baseShockChance: 0.1,
+  shockChancePerLevel: 0.1,
+  shockDuration: 10.0,
+};
+
+/**
+ * Shock (Chain Lightning):
+ * - Cone-based targeting: finds N enemies in the cone hitbox.
+ * - L1=1 target, L2=2, L3=2, L4=3, L5=3, L6=4, L7=4, L8=5, L9=5, L10=5.
+ * - Chains: L1-4=0, L5=1, L6=1, L7=2, L8=2, L9=3, L10=3.
+ *   Each chain finds nearest enemy in radius, does 50% damage, chain does 50% of that, etc.
+ * - Damage increases at L2,4,6,8,10 (+10% each).
+ * - Range increases at L1,3,5,7,9.
+ * - Base cooldown 0.7s. Crit rate 20%.
+ */
+export const SHOCK: ShockDef = {
+  id: "shock",
+  cooldown: 0.7,
+  attackFactor: 0.0,
+  baseCritRate: 0.2,
+  critRatePerLevel: 0.0,
+  baseDamage: 200,
+  damagePerAlternateLevel: 0.2, // +20% at L2,4,6,8,10
+  baseRange: 200,
+  rangePerAlternateLevel: 30, // +30px at L1,3,5,7,9
+  coneHalfAngle: 0.6, // ~34 degrees half-angle
+  baseCooldown: 0.7,
+  targetsPerLevel: (lvl: number) => {
+    const table = [1, 2, 2, 3, 3, 4, 4, 5, 5, 5];
+    return table[Math.min(lvl - 1, 9)];
+  },
+  chainsPerLevel: (lvl: number) => {
+    if (lvl >= 9) return 3;
+    if (lvl >= 7) return 2;
+    if (lvl >= 5) return 1;
+    return 0;
+  },
+  chainRadius: (lvl: number) => {
+    if (lvl >= 10) return 200; // increased chain radius at L10
+    return 150;
+  },
+  chainDamageFalloff: 0.5, // each chain does 50% of previous
+};
+
 // Export as object with helper accessors that handle function values
 export const SKILL_DEFS: Record<string, SkillDef> & {
   bolter: BolterDef;
   claw: ClawDef;
   slam: SlamDef;
   heal: HealDef;
+  pulse: PulseDef;
+  shock: ShockDef;
 } = {
   bolter: BOLTER,
   claw: CLAW,
   slam: SLAM,
   heal: HEAL,
+  pulse: PULSE,
+  shock: SHOCK,
 };
+
+/** Pulse damage for a given level. */
+export function pulseDamage(skillLevel: number): number {
+  const lvl = Math.max(1, skillLevel);
+  return PULSE.baseDamage * (1.0 + PULSE.damagePerLevel * (lvl - 1));
+}
+
+/** Pulse radius for a given level. */
+export function pulseRadius(skillLevel: number): number {
+  const lvl = Math.max(1, skillLevel);
+  return PULSE.baseRadius + PULSE.radiusPerLevel * (lvl - 1);
+}
+
+/** Pulse cooldown for a given level. */
+export function pulseCooldown(skillLevel: number): number {
+  const lvl = Math.max(1, skillLevel);
+  return PULSE.baseCooldown + PULSE.cooldownPerLevel * (lvl - 1);
+}
+
+/** Pulse shock chance for a given level (0 if below unlock). */
+export function pulseShockChance(skillLevel: number): number {
+  if (skillLevel < PULSE.shockUnlockLevel) return 0;
+  return (
+    PULSE.baseShockChance +
+    PULSE.shockChancePerLevel * (skillLevel - PULSE.shockUnlockLevel)
+  );
+}
+
+// ---- Shock helpers ----
+
+/** Shock damage for a given level. +10% at L2,4,6,8,10. */
+export function shockDamage(skillLevel: number): number {
+  const lvl = Math.max(1, skillLevel);
+  const increases = Math.floor(lvl / 2); // L2→1, L4→2, L6→3, L8→4, L10→5
+  return SHOCK.baseDamage * (1.0 + SHOCK.damagePerAlternateLevel * increases);
+}
+
+/** Shock cone range for a given level. +30px at L1,3,5,7,9. */
+export function shockRange(skillLevel: number): number {
+  const lvl = Math.max(1, skillLevel);
+  const increases = Math.floor((lvl - 1) / 2) + 1; // L1→1, L3→2, L5→3, L7→4, L9→5
+  return SHOCK.baseRange + SHOCK.rangePerAlternateLevel * (increases - 1);
+}
+
+/** Max targets for a given level. */
+export function shockTargets(skillLevel: number): number {
+  return SHOCK.targetsPerLevel(Math.max(1, skillLevel));
+}
+
+/** Chain count for a given level. */
+export function shockChains(skillLevel: number): number {
+  return SHOCK.chainsPerLevel(Math.max(1, skillLevel));
+}
+
+/** Chain search radius for a given level. */
+export function shockChainRadius(skillLevel: number): number {
+  return SHOCK.chainRadius(Math.max(1, skillLevel));
+}
 
 /** Heal amount for a given level. L1-4 scales, L5+ frozen at L4 value. */
 export function healAmount(skillLevel: number): number {
   const lvl = Math.max(1, skillLevel);
-  const effectiveLvl = lvl >= HEAL.aoeUnlockLevel ? HEAL.aoeUnlockLevel - 1 : lvl;
+  const effectiveLvl =
+    lvl >= HEAL.aoeUnlockLevel ? HEAL.aoeUnlockLevel - 1 : lvl;
   return HEAL.baseHeal + HEAL.healPerLevel * (effectiveLvl - 1);
 }
 
@@ -264,8 +442,8 @@ export function healRadius(skillLevel: number): number {
  */
 export function healPercent(skillLevel: number): number {
   if (skillLevel < 7) return 0;
-  const table: Record<number, number> = { 7: 0.30, 8: 0.40, 9: 0.50, 10: 0.60 };
-  return table[skillLevel] ?? 0.60;
+  const table: Record<number, number> = { 7: 0.3, 8: 0.4, 9: 0.5, 10: 0.6 };
+  return table[skillLevel] ?? 0.6;
 }
 
 /**

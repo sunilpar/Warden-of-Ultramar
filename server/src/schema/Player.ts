@@ -75,6 +75,10 @@ export class Player extends Schema {
   /** Defence, fraction 0..1 (0.2 = take 20% less damage). Ignored on crits. */
   @type("number") defence: number = PLAYER_STATS.BASE.DEFENCE;
 
+  // ---- Shock status (synced) ----
+  /** Server timestamp (ms) until which the player is shocked (takes more damage, slowed). */
+  @type("number") shockUntil: number = 0;
+
   // ---- Progression (synced) ----
   @type("number") level: number = 1;
   @type("number") currentXp: number = 0;
@@ -108,6 +112,10 @@ export class Player extends Schema {
   @type("number") slamCooldownEndsAt: number = 0;
   /** Server timestamp (ms) when claw comes off cooldown (for client HUD). */
   @type("number") clawCooldownEndsAt: number = 0;
+  /** Server timestamp (ms) when pulse comes off cooldown (for client HUD). */
+  @type("number") pulseCooldownEndsAt: number = 0;
+  /** Server timestamp (ms) when shock comes off cooldown (for client HUD). */
+  @type("number") shockCooldownEndsAt: number = 0;
   /** Server timestamp (ms) when heal comes off cooldown (for client HUD, L5+). */
   @type("number") healCooldownEndsAt: number = 0;
   /** Kill count towards next heal charge (L1-4 mode). Resets to 0 at killsToRecharge. */
@@ -204,7 +212,8 @@ export class Player extends Schema {
    */
   recomputeShield(): void {
     const S = PLAYER_STATS.SHIELD_STAT;
-    this.maxShield = S.BASE_AMOUNT + (this.shieldStatLevel - 1) * S.AMOUNT_PER_LEVEL;
+    this.maxShield =
+      S.BASE_AMOUNT + (this.shieldStatLevel - 1) * S.AMOUNT_PER_LEVEL;
     this.shield = this.maxShield;
     this.shieldRechargeAt = 0;
     this.shieldState = 0;
@@ -241,7 +250,8 @@ export class Player extends Schema {
     }
     // Recharging.
     this.shieldState = 1;
-    const recharge = this.maxShield * PLAYER_STATS.SHIELD_CARD.RECHARGE_RATE * dt;
+    const recharge =
+      this.maxShield * PLAYER_STATS.SHIELD_CARD.RECHARGE_RATE * dt;
     this.shield = Math.min(this.maxShield, this.shield + recharge);
     if (this.shield >= this.maxShield) {
       this.shield = this.maxShield;
@@ -270,10 +280,10 @@ export class Player extends Schema {
    * (e.g. applying/removing a debuff, leveling up).
    */
   recalcDerivedStats(): void {
-    this.moveSpeed = this.baseMoveSpeed * this.speedMultiplier;
-    // attack / critRate / critDamage currently have no multiplier in the
-    // base design; if buffs/debuffs to those are added later, fold them
-    // in here in the same pattern (e.g. attack * damageMultiplier).
+    let speed = this.speedMultiplier;
+    // Shock slows movement by 50%.
+    if (Date.now() < this.shockUntil) speed *= 0.5;
+    this.moveSpeed = this.baseMoveSpeed * speed;
   }
 
   // ============================================================
@@ -290,7 +300,11 @@ export class Player extends Schema {
     isCrit: boolean = false,
   ): number {
     // Defence reduces incoming damage. Crits bypass only 50% of defence.
-    const effectiveDefence = isCrit ? this.defence * 0.5 : this.defence;
+    // Shock reduces defence by 20% (can go negative = bonus damage).
+    const isShocked = Date.now() < this.shockUntil;
+    const shockMod = isShocked ? -0.2 : 0.0;
+    const effectiveDefence =
+      (isCrit ? this.defence * 0.5 : this.defence) + shockMod;
     const mitigated = rawDamage * (1.0 - effectiveDefence);
     let dmg = mitigated * this.incomingDamageMultiplier;
     let shielded = false;
@@ -416,8 +430,9 @@ export class Player extends Schema {
     this.skillLevels.clear();
     this.skillLevels.set("bolter", 1);
     this.skillLevels.set("claw", 1);
-    this.skillLevels.set("slam", 1);
     this.skillLevels.set("heal", 1);
+    this.skillLevels.set("pulse", 1);
+    this.skillLevels.set("shock", 1);
     this.skillCooldowns.clear();
     // Clear bleed
     this.bleedUntil = 0;
@@ -473,6 +488,10 @@ export class Player extends Schema {
       this.slamCooldownEndsAt = endsAt;
     } else if (skill === "claw") {
       this.clawCooldownEndsAt = endsAt;
+    } else if (skill === "pulse") {
+      this.pulseCooldownEndsAt = endsAt;
+    } else if (skill === "shock") {
+      this.shockCooldownEndsAt = endsAt;
     }
   }
 
@@ -531,7 +550,10 @@ export class Player extends Schema {
     this.bleedTickAccum += dt;
     if (this.bleedTickAccum >= 0.5) {
       this.bleedTickAccum -= 0.5;
-      this.currentHealth = Math.max(0, this.currentHealth - this.bleedTickDamage);
+      this.currentHealth = Math.max(
+        0,
+        this.currentHealth - this.bleedTickDamage,
+      );
       this.lastHitCrit = this.bleedIsCrit;
       this.lastHitShielded = false;
       (this as any).lastShieldDamage = 0;

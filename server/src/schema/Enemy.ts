@@ -22,7 +22,11 @@
  *   SkillId to its current level; EnemySystem reads it when casting.
  */
 import { Schema, type } from "@colyseus/schema";
-import { type SkillId, getSkillHitFeedback, MAX_SKILL_LEVEL } from "../config/skillDefs";
+import {
+  type SkillId,
+  getSkillHitFeedback,
+  MAX_SKILL_LEVEL,
+} from "../config/skillDefs";
 import { ENEMY_STATS, type EnemyTypeId } from "../config/enemyStats";
 
 export class Enemy extends Schema {
@@ -90,6 +94,8 @@ export class Enemy extends Schema {
 
   /** Server timestamp (ms) until which the enemy is bleeding (DoT). */
   @type("number") bleedUntil: number = 0;
+  /** Server timestamp (ms) until which the enemy is shocked (takes more damage, slowed). */
+  @type("number") shockUntil: number = 0;
 
   // ---- Base stats (NOT synced — server-authoritative source of truth) ----
   baseMoveSpeed: number = 0;
@@ -160,19 +166,19 @@ export class Enemy extends Schema {
     // Defence scales additively and is capped at 0.75 (75%).
     // MoveSpeed scales by percentage (always relative to base).
     const extraLevels = Math.max(0, level - 1);
-    const hpMult  = 1 + 0.60 * extraLevels; // +60% HP per level
-    const atkMult = 1 + 0.10 * extraLevels; // +10% ATK per level
-    const xpMult  = Math.pow(level, 1.5) / 4; // scales with player XP curve (~20 kills per level)
+    const hpMult = 1 + 0.6 * extraLevels; // +60% HP per level
+    const atkMult = 1 + 0.1 * extraLevels; // +10% ATK per level
+    const xpMult = Math.pow(level, 1.5) / 4; // scales with player XP curve (~20 kills per level)
     // Move speed does NOT scale with level — stays at base.
 
-    this.maxHealth     = Math.round(cfg.maxHealth * hpMult);
+    this.maxHealth = Math.round(cfg.maxHealth * hpMult);
     this.currentHealth = this.maxHealth;
     this.baseMoveSpeed = cfg.moveSpeed;
-    this.attack        = Math.round(cfg.attack * atkMult);
-    this.defence       = Math.min(0.75, (cfg.defence ?? 0) + 0.005 * extraLevels);
-    this.critRate      = (cfg.critRate ?? 0) + 0.02 * extraLevels;
-    this.critDamage    = cfg.critDamage ?? 1.5;
-    this.xpReward      = Math.round(cfg.xpReward * xpMult);
+    this.attack = Math.round(cfg.attack * atkMult);
+    this.defence = Math.min(0.75, (cfg.defence ?? 0) + 0.005 * extraLevels);
+    this.critRate = (cfg.critRate ?? 0) + 0.02 * extraLevels;
+    this.critDamage = cfg.critDamage ?? 1.5;
+    this.xpReward = Math.round(cfg.xpReward * xpMult);
     this.collisionRadius = cfg.collisionRadius;
     this.hitboxW = cfg.hitboxW ?? cfg.collisionRadius;
     this.hitboxH = cfg.hitboxH ?? cfg.collisionRadius;
@@ -182,8 +188,8 @@ export class Enemy extends Schema {
 
     // ---- Shield: base + growth from distributed shield level ----
     // Each shield level point adds 20 shield (mirrors player SHIELD.AMOUNT_PER_LEVEL).
-    this.maxShield     = cfg.shield + (this.shieldLevel - 1) * 20;
-    this.shield        = this.maxShield;
+    this.maxShield = cfg.shield + (this.shieldLevel - 1) * 20;
+    this.shield = this.maxShield;
     this.shieldRechargeAt = 0;
 
     // Reset transient multipliers
@@ -199,6 +205,7 @@ export class Enemy extends Schema {
     this.attackCooldownUntil = 0;
     this.bleedUntil = 0;
     this.bleedDps = 0;
+    this.shockUntil = 0;
     this.damageTrackers.clear();
 
     this.recalcDerivedStats();
@@ -259,7 +266,9 @@ export class Enemy extends Schema {
    * multiplier but the hook is here for symmetry with the player.
    */
   recalcDerivedStats(): void {
-    this.moveSpeed = this.baseMoveSpeed * this.speedMultiplier;
+    let speed = this.speedMultiplier;
+    if (Date.now() < this.shockUntil) speed *= 0.5;
+    this.moveSpeed = this.baseMoveSpeed * speed;
   }
 
   // ============================================================
@@ -278,7 +287,11 @@ export class Enemy extends Schema {
     isCrit: boolean = false,
   ): number {
     // Defence reduces incoming damage. Crits bypass only 50% of defence.
-    const effectiveDefence = isCrit ? this.defence * 0.5 : this.defence;
+    // Shock reduces defence by 20% (can go negative = bonus damage).
+    const isShocked = Date.now() < this.shockUntil;
+    const shockMod = isShocked ? -0.2 : 0.0;
+    const effectiveDefence =
+      (isCrit ? this.defence * 0.5 : this.defence) + shockMod;
     const mitigated = rawDamage * (1.0 - effectiveDefence);
     let dmg = mitigated * this.incomingDamageMultiplier;
     let shieldAbsorbed = 0;
@@ -308,7 +321,10 @@ export class Enemy extends Schema {
 
     // Hit feedback: white flash + brief hit-stun pause.
     // Duration scales with skill power (e.g. slam > claw > bolter).
-    const fbMs = Math.max(150, sourceSkillId ? getSkillHitFeedback(sourceSkillId) : 150);
+    const fbMs = Math.max(
+      150,
+      sourceSkillId ? getSkillHitFeedback(sourceSkillId) : 150,
+    );
     const now = Date.now();
     this.hitFlashUntil = Math.max(this.hitFlashUntil, now + fbMs);
     // Hit-stun removed — only flash, no movement freeze.
@@ -361,11 +377,17 @@ export class Enemy extends Schema {
     if (this.bleedTickAccum >= 0.5) {
       this.bleedTickAccum -= 0.5;
       const hpBefore = this.currentHealth;
-      this.currentHealth = Math.max(0, this.currentHealth - this.bleedTickDamage);
+      this.currentHealth = Math.max(
+        0,
+        this.currentHealth - this.bleedTickDamage,
+      );
       // Track damage for XP attribution
       if (this.bleedAttackerId) {
-        this.damageTrackers.set(this.bleedAttackerId,
-          (this.damageTrackers.get(this.bleedAttackerId) ?? 0) + this.bleedTickDamage);
+        this.damageTrackers.set(
+          this.bleedAttackerId,
+          (this.damageTrackers.get(this.bleedAttackerId) ?? 0) +
+            this.bleedTickDamage,
+        );
       }
       this.lastHitCrit = this.bleedIsCrit;
       this.lastHitDamage = this.bleedTickDamage;
@@ -377,7 +399,12 @@ export class Enemy extends Schema {
   }
 
   /** Inflict bleed: set tick damage + crit status + until timestamp. */
-  applyBleed(tickDamage: number, durationSec: number, attackerId?: string, isCritBleed?: boolean): void {
+  applyBleed(
+    tickDamage: number,
+    durationSec: number,
+    attackerId?: string,
+    isCritBleed?: boolean,
+  ): void {
     this.bleedTickDamage = tickDamage;
     this.bleedDps = tickDamage * 2; // backwards compat (dps = tickDamage * 2 ticks/sec)
     this.bleedIsCrit = isCritBleed ?? false;

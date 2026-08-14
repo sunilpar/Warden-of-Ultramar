@@ -28,11 +28,14 @@ import { ProjectileSystem } from "../systems/ProjectileSystem";
 import { ClawSystem } from "../systems/ClawSystem";
 import { SlamSystem } from "../systems/SlamSystem";
 import { HealSystem } from "../systems/HealSystem";
+import { PulseSystem } from "../systems/PulseSystem";
+import { ShockSystem } from "../systems/ShockSystem";
 import { LAYERED_MAP_2 } from "../config/layeredMap2";
 import {
   SKILL_DEFS,
   MAX_SKILL_LEVEL,
   skillCritRate,
+  pulseCooldown,
   type SkillId,
 } from "../config/skillDefs";
 import {
@@ -54,6 +57,8 @@ export class GameRoom2 extends Room {
   private clawSystem!: ClawSystem;
   private slamSystem!: SlamSystem;
   private healSystem!: HealSystem;
+  private pulseSystem!: PulseSystem;
+  private shockSystem!: ShockSystem;
   private spawnedZones = new Set<number>();
   private activeModifiers: ModifierId[] = MAP_MODIFIERS["game_room_2"] ?? [];
   private viewports = new Map<
@@ -72,6 +77,8 @@ export class GameRoom2 extends Room {
     this.clawSystem = new ClawSystem(this.state);
     this.slamSystem = new SlamSystem(this.state, this.mapSystem);
     this.healSystem = new HealSystem(this.state);
+    this.pulseSystem = new PulseSystem(this.state);
+    this.shockSystem = new ShockSystem(this.state);
     // Cross-link: enemies can fire projectiles + claws.
     this.enemySystem.setProjectileSystem(this.projectileSystem);
     this.enemySystem.setClawSystem(this.clawSystem);
@@ -338,6 +345,25 @@ export class GameRoom2 extends Room {
           player.critDamage,
         );
         player.startSkillCooldown(skill, SKILL_DEFS.slam.cooldown);
+      } else if (skill === "pulse") {
+        this.pulseSystem.castPlayerPulse(
+          player,
+          client.sessionId,
+          level,
+          skillCritRate("pulse", level, player.critRate),
+          player.critDamage,
+        );
+        player.startSkillCooldown(skill, pulseCooldown(level));
+      } else if (skill === "shock") {
+        this.shockSystem.castPlayerShock(
+          player,
+          client.sessionId,
+          level,
+          skillCritRate("shock", level, player.critRate),
+          player.critDamage,
+          msg.angle,
+        );
+        player.startSkillCooldown(skill, SKILL_DEFS.shock.baseCooldown);
       }
     },
 
@@ -372,11 +398,12 @@ export class GameRoom2 extends Room {
       const spawn = this.mapSystem.getSpawnPoint();
       player.x = spawn.x;
       player.y = spawn.y;
-      // Give bolter + claw + slam + heal at level 1
+      // Give bolter + claw + heal + pulse + shock at level 1
       player.setSkillLevel("bolter", 1);
       player.setSkillLevel("claw", 1);
-      player.setSkillLevel("slam", 1);
       player.setSkillLevel("heal", 1);
+      player.setSkillLevel("pulse", 1);
+      player.setSkillLevel("shock", 1);
     },
 
     // Map transition XP reward (map2 -> map3: +1000 XP).
@@ -487,8 +514,9 @@ export class GameRoom2 extends Room {
       player.initBaseStats();
       player.setSkillLevel("bolter", 1);
       player.setSkillLevel("claw", 1);
-      player.setSkillLevel("slam", 1);
       player.setSkillLevel("heal", 1);
+      player.setSkillLevel("pulse", 1);
+      player.setSkillLevel("shock", 1);
     }
 
     applyPlayerModifiers(player, this.activeModifiers);
