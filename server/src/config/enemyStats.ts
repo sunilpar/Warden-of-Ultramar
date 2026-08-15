@@ -73,6 +73,11 @@ export interface EnemyBaseConfig {
    * level 5-9 => [slam, claw]. Index 0 is the primary skill.
    */
   potentialSkills: SkillId[];
+  /**
+   * Aggro radius in px: the enemy only hunts a player when one is within
+   * this distance. Outside it, the enemy wanders randomly. Default 500.
+   */
+  aggroRadius?: number;
   /** Per-skill cooldown in SECONDS (keyed by SkillId). 0 = no cooldown. */
   skillCooldown: Partial<Record<SkillId, number>>;
   /** Per-level stat growth. */
@@ -105,6 +110,7 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     hitboxW: 16,
     hitboxH: 8,
     potentialSkills: ["claw"],
+    aggroRadius: 500, // default aggro distance
     skillCooldown: { claw: 1.5 },
     growth: {
       maxHealth: 120,
@@ -129,6 +135,7 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     hitboxH: 30,
     // Primary (and only): slam.
     potentialSkills: ["slam"],
+    aggroRadius: 300, // short aggro range — ambush predator
     skillCooldown: { slam: 2.0 },
     growth: {
       maxHealth: 100,
@@ -156,6 +163,7 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     // Primary: bolter. Secondary: dash.
     // (Shield level is derived separately as the remainder slot.)
     potentialSkills: ["bolter", "dash"],
+    aggroRadius: 700, // long aggro range — long-range shooter
     skillCooldown: { bolter: 3.0, dash: 6.0 },
     growth: {
       maxHealth: 60,
@@ -182,6 +190,7 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     // Then: pulse (2nd damage skill), vortex (3rd).
     // (A shield level is ALSO derived separately as the remainder slot.)
     potentialSkills: ["shock", "shield", "pulse", "vortex"],
+    aggroRadius: 700, // long aggro range — ranged caster
     skillCooldown: { shock: 5.0, shield: 10.0, pulse: 8.0, vortex: 12.0 },
     growth: {
       maxHealth: 80,

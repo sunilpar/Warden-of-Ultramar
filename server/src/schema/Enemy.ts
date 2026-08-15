@@ -145,6 +145,17 @@ export class Enemy extends Schema {
 
   /** Tracks total damage dealt by each player (sessionId -> damage). */
   damageTrackers: Map<string, number> = new Map();
+
+  /** Aggro radius (px): hunt players only within this distance (server-only). */
+  aggroRadius: number = 500;
+
+  // ---- Wander state (server-only; used when no player is in aggro range) ----
+  /** Current wander target x (world px). */
+  wanderX: number = 0;
+  /** Current wander target y (world px). */
+  wanderY: number = 0;
+  /** Timestamp (ms) until which the enemy keeps wandering to the current target. */
+  wanderUntil: number = 0;
   // ============================================================
   // LIFECYCLE
   // ============================================================
@@ -185,6 +196,7 @@ export class Enemy extends Schema {
     this.collisionRadius = cfg.collisionRadius;
     this.hitboxW = cfg.hitboxW ?? cfg.collisionRadius;
     this.hitboxH = cfg.hitboxH ?? cfg.collisionRadius;
+    this.aggroRadius = cfg.aggroRadius ?? 500;
 
     // ---- Skill pool + skill-level distribution (includes shield slot) ----
     this.buildSkillPool(cfg.potentialSkills, level);

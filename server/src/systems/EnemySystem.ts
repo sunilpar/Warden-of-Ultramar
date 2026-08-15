@@ -169,6 +169,7 @@ export class EnemySystem {
     const target = this.findNearestPlayer(enemy);
     if (!target) {
       enemy.attacking = false;
+      this.wander(enemy, _dt);
       return;
     }
 
@@ -212,6 +213,7 @@ export class EnemySystem {
     const target = this.findNearestPlayer(enemy);
     if (!target) {
       enemy.attacking = false;
+      this.wander(enemy, _dt);
       return;
     }
 
@@ -252,6 +254,7 @@ export class EnemySystem {
     const target = this.findNearestPlayer(enemy);
     if (!target) {
       enemy.attacking = false;
+      this.wander(enemy, _dt);
       return;
     }
 
@@ -346,6 +349,7 @@ export class EnemySystem {
     const target = this.findNearestPlayer(enemy);
     if (!target) {
       enemy.attacking = false;
+      this.wander(enemy, _dt);
       return;
     }
 
@@ -404,10 +408,12 @@ export class EnemySystem {
   // SHARED AI HELPERS
   // ============================================================
 
-  /** Find the nearest alive player to this enemy. Returns null if none. */
+  /** Find the nearest alive player within the enemy's aggro radius.
+   *  Returns null if no player is close enough (enemy will wander). */
   private findNearestPlayer(enemy: Enemy): Player | null {
     let nearest: Player | null = null;
     let nearestDistSq = Infinity;
+    const aggroSq = enemy.aggroRadius * enemy.aggroRadius;
     this.state.players.forEach((player) => {
       if (player.isDead) return;
       const dx = player.x - enemy.x;
@@ -418,7 +424,29 @@ export class EnemySystem {
         nearest = player;
       }
     });
+    // Only hunt if the nearest player is inside the aggro radius.
+    if (nearest && nearestDistSq > aggroSq) return null;
     return nearest;
+  }
+
+  /**
+   * Wander behavior for when no player is in aggro range: pick a random
+   * nearby point (up to ~150px away) and walk toward it for a random
+   * 1-3 second duration. Keeps idle enemies from looking frozen.
+   */
+  private wander(enemy: Enemy, dt: number): void {
+    const now = Date.now();
+    if (now >= enemy.wanderUntil) {
+      // Choose a new random wander target + duration.
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 50 + Math.random() * 100; // 50-150px
+      enemy.wanderX = enemy.x + Math.cos(angle) * dist;
+      enemy.wanderY = enemy.y + Math.sin(angle) * dist;
+      enemy.wanderUntil = now + 1000 + Math.random() * 2000; // 1-3s
+    }
+    // Face the wander direction (uses same "facingRight" convention).
+    enemy.facingRight = enemy.wanderX > enemy.x;
+    this.moveToward(enemy, enemy.wanderX, enemy.wanderY, dt);
   }
 
   /**

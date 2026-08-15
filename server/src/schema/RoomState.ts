@@ -23,4 +23,7 @@ export class RoomState extends Schema {
   @type({ map: Slam }) slams = new MapSchema<Slam>();
   @type({ map: ShockCast }) shockCasts = new MapSchema<ShockCast>();
   @type({ map: Vortex }) vortexes = new MapSchema<Vortex>();
+  /** Server timestamp (ms) until which enemy spawning is disabled
+   *  (grace period after room creation). 0 = spawning allowed. */
+  @type("number") spawnGraceUntil: number = 0;
 }

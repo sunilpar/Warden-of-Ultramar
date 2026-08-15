@@ -194,6 +194,10 @@ export class GameScene extends Phaser.Scene {
   private entityHitSeqs: Record<string, number> = {};
   /** Reusable level-up celebration toast. */
   private levelUpToast!: Phaser.GameObjects.Text;
+  /** Spawn-grace countdown toast ("enemies will spawn in N"). */
+  private spawnCountdownToast: Phaser.GameObjects.Text | null = null;
+  /** Last rendered countdown second (avoids re-setting the text every frame). */
+  private spawnCountdownLastSec: number = -1;
   /** Full unscaled width of the XP bar (px). */
   private xpBarFullWidth: number = 0;
   /** Screen-space Y of the XP bar (px). */
@@ -384,6 +388,7 @@ export class GameScene extends Phaser.Scene {
     this.localDashLevel = 1;
     this.localClawLevel = 1;
     this.localHealLevel = 1;
+    this.localPulseLevel = 1;
     this.localVortexLevel = 1;
     // Null out game object references so create* methods rebuild them
     this.bolterCard = null as any;
@@ -395,6 +400,8 @@ export class GameScene extends Phaser.Scene {
     this.clawCooldownFill = null as any;
     this.healCard = null as any;
     this.healCooldownFill = null as any;
+    this.pulseCard = null as any;
+    this.pulseCooldownFill = null as any;
     this.dashCard = null as any;
     this.dashCooldownFill = null as any;
     this.vortexCard = null as any;
@@ -411,6 +418,8 @@ export class GameScene extends Phaser.Scene {
     this.levelBadgeText = null as any;
     this.xpBarText = null as any;
     this.levelUpToast = null as any;
+    this.spawnCountdownToast = null;
+    this.spawnCountdownLastSec = -1;
     this.mapInfoButton = null as any;
     this.mapInfoTooltip = null as any;
     this.mapInfoTooltipBg = null as any;
@@ -2197,7 +2206,9 @@ export class GameScene extends Phaser.Scene {
       // Cooldown-based (L6+): duration depends on heal level
       // L6: 15s, L7: 13s, L8: 11s, L9/L10: 10s
       const healLvl = this.localHealLevel;
-      const totalMs = 1000 * (healLvl <= 6 ? 15 : healLvl === 7 ? 13 : healLvl === 8 ? 11 : 10);
+      const totalMs =
+        1000 *
+        (healLvl <= 6 ? 15 : healLvl === 7 ? 13 : healLvl === 8 ? 11 : 10);
       const remaining = endsAt - now;
       const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
       const h = this.healCooldownFillBaseH * fillPct;
@@ -2223,7 +2234,12 @@ export class GameScene extends Phaser.Scene {
 
   /** Update the pulse cooldown overlay. */
   private updatePulseCooldownOverlay(): void {
-    if (!this.pulseCard || !this.pulseCooldownFill || !this.currentPlayer)
+    if (
+      !this.pulseCard ||
+      !this.pulseCooldownFill ||
+      !this.currentPlayer ||
+      !this.pulseCard.active
+    )
       return;
     const endsAt =
       (this.currentPlayer.data.get("pulseCdEndsAt") as number) ?? 0;
@@ -3083,6 +3099,55 @@ export class GameScene extends Phaser.Scene {
       onComplete: () => {
         txt!.setActive(false);
       },
+    });
+  }
+
+  /**
+   * Update the spawn-grace countdown toast (same spot as level-up toast).
+   * Reads spawnGraceUntil from the synced room state; hides once elapsed.
+   */
+  private updateSpawnCountdown(): void {
+    const until = (this.room as any)?.state?.spawnGraceUntil ?? 0;
+    const now = Date.now();
+    if (until <= now) {
+      // Grace over — hide the toast if visible.
+      if (this.spawnCountdownToast) {
+        this.spawnCountdownToast.destroy();
+        this.spawnCountdownToast = null;
+        this.spawnCountdownLastSec = -1;
+      }
+      return;
+    }
+    const secsLeft = Math.max(1, Math.ceil((until - now) / 1000));
+    if (secsLeft === this.spawnCountdownLastSec) return; // no change
+    this.spawnCountdownLastSec = secsLeft;
+    const msg = `ENEMIES WILL SPAWN IN ${secsLeft}`;
+    const x = this.cameras.main.width / 2;
+    const y = 36;
+    if (this.spawnCountdownToast) {
+      this.spawnCountdownToast.setText(msg).setPosition(x, y);
+    } else {
+      this.spawnCountdownToast = this.add
+        .text(x, y, msg, {
+          color: "#ff5555",
+          fontSize: "18px",
+          fontFamily: "monospace",
+          fontStyle: "bold",
+          stroke: "#000000",
+          strokeThickness: 4,
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(201);
+    }
+    // Small pulse on each second change.
+    this.tweens.killTweensOf(this.spawnCountdownToast);
+    this.spawnCountdownToast.setScale(1.2);
+    this.tweens.add({
+      targets: this.spawnCountdownToast,
+      scale: 1,
+      duration: 200,
+      ease: "Back.out",
     });
   }
 
@@ -4593,6 +4658,8 @@ export class GameScene extends Phaser.Scene {
     this.updateClawCooldownOverlay();
     this.updateHealCooldownOverlay();
     this.updateVortexCooldownOverlay();
+    // ---- Spawn-grace countdown toast (map-entry safety window) ----
+    this.updateSpawnCountdown();
     // ---- Sync viewport to server (for viewport-activated spawning) ----
     // ---- Update live entity hitbox overlay ----
     this.updateEntityHitboxes();

@@ -95,6 +95,10 @@ export class GameRoom extends Room {
     this.enemySystem.setVortexSystem(this.vortexSystem);
     this.enemySystem.setPulseSystem(this.pulseSystem);
 
+    // Enemy spawn grace period: no spawns for the first 5 seconds after
+    // the room is created (gives arriving players a safe window).
+    this.state.spawnGraceUntil = Date.now() + 5000;
+
     // Fixed timestep simulation loop
     let elapsedTime = 0;
     this.setSimulationInterval((deltaTime) => {
@@ -216,6 +220,8 @@ export class GameRoom extends Room {
    * player's viewport touches it. Each zone spawns exactly once.
    */
   private checkSpawnZones(): void {
+    // Spawn grace: block all zone spawning during the grace period.
+    if (Date.now() < this.state.spawnGraceUntil) return;
     const zones = LAYERED_MAP.enemySpawnZones;
     if (zones.length === 0 || this.viewports.size === 0) return;
     const enemyLevel = this.getHighestPlayerLevel();
