@@ -478,7 +478,12 @@ export class Player extends Schema {
 
   /** True if a skill is off cooldown / ready to cast. */
   isSkillReady(skill: SkillId): boolean {
-    if (skill === "heal") return this.healReady;
+    if (skill === "heal") {
+      // L6+ heal is cooldown-based; L1-5 is kill-charged (healReady flag).
+      const lvl = this.getSkillLevel("heal");
+      if (lvl >= 6) return (this.skillCooldowns.get("heal") ?? 0) <= 0;
+      return this.healReady;
+    }
     return (this.skillCooldowns.get(skill) ?? 0) <= 0;
   }
 
@@ -525,12 +530,14 @@ export class Player extends Schema {
     }
   }
 
-  /** Register a kill towards the heal charge (L1-4 mode). */
+  /** Register a kill towards the heal charge (L1-5 kill-charged mode).
+   *  Threshold is level-based: 4 kills at L1-2, 3 kills at L3-5. */
   addHealKill(): void {
     const healLvl = this.getSkillLevel("heal");
-    if (healLvl <= 0 || healLvl >= 5) return;
+    if (healLvl <= 0 || healLvl >= 6) return;
+    const threshold = healLvl <= 2 ? 4 : 3;
     this.healKills += 1;
-    if (this.healKills >= 5) {
+    if (this.healKills >= threshold) {
       this.healReady = true;
       this.healKills = 0;
     }

@@ -80,18 +80,18 @@ export interface SlamDef extends SkillDef {
 
 export interface HealDef extends SkillDef {
   id: "heal";
-  /** Heal amount at level 1 (L1-4 only; L5+ stays fixed). */
-  baseHeal: number;
-  /** Heal increase per level (L1-4 only). */
-  healPerLevel: number;
-  /** Level at which heal becomes AoE. */
+  /** Heal as a percentage of max HP, per level (index = level-1). */
+  percentTable: number[];
+  /** Level at which heal becomes time-cooldown based. */
+  cooldownUnlockLevel: number;
+  /** Cooldown in seconds, per level (index = level - cooldownUnlockLevel). */
+  cooldownTable: number[];
+  /** Level at which heal becomes AoE (heals other players + enemies). */
   aoeUnlockLevel: number;
   /** AoE radius in pixels. Grows with level from aoeUnlockLevel. */
   aoeRadius: (skillLevel: number) => number;
-  /** Kills required to recharge (L1 to aoeUnlockLevel-1). */
-  killsToRecharge: number;
-  /** Cooldown in seconds (aoeUnlockLevel and above). */
-  cooldown: number;
+  /** Kills required to recharge, per level (L1 to cooldownUnlockLevel-1). */
+  killsToRecharge: (skillLevel: number) => number;
 }
 
 export interface PulseDef extends SkillDef {
@@ -308,23 +308,34 @@ const SLAM: SlamDef = {
 };
 
 /**
- * Heal:
- * - L1-4: Self-only. Charged by kills (5 kills per use). Heals 100 + 100/level.
- * - L5-10: AoE circle, heals all players + enemies in radius. Cooldown-based.
- *           Heal amount frozen at L4 value; only radius grows (+20px/level).
+ * Heal — always percentage of max HP:
+ * - L1-5: Self-only. Charged by kills (4/4/3/3/3 kills per use).
+ * - L6-10: Cooldown-based. Gains range (AoE) — heals all players AND
+ *          enemies in a growing radius.
+ *
+ * Level table:
+ *   L1  30% | 4 kills      L6  45% | 15s cd | AoE  80px
+ *   L2  35% | 4 kills      L7  50% | 13s cd | AoE 100px
+ *   L3  40% | 3 kills      L8  50% | 11s cd | AoE 120px
+ *   L4  45% | 3 kills      L9  55% | 10s cd | AoE 140px
+ *   L5  50% | 3 kills      L10 60% | 10s cd | AoE 160px
  */
 const HEAL: HealDef = {
   id: "heal",
-  cooldown: 10.0,
+  cooldown: 15.0,
   attackFactor: 0.0,
-  baseHeal: 100,
-  healPerLevel: 100,
-  aoeUnlockLevel: 5,
+  percentTable: [0.3, 0.35, 0.4, 0.45, 0.5, 0.45, 0.5, 0.5, 0.55, 0.6],
+  cooldownUnlockLevel: 6,
+  cooldownTable: [15, 13, 11, 10, 10],
+  aoeUnlockLevel: 6,
   aoeRadius: (lvl: number) => {
-    if (lvl < 5) return 0;
-    return 80 + (lvl - 5) * 20;
+    if (lvl < 6) return 0;
+    return 80 + (lvl - 6) * 20;
   },
-  killsToRecharge: 5,
+  killsToRecharge: (lvl: number) => {
+    // L1-2: 4 kills, L3-5: 3 kills
+    return lvl <= 2 ? 4 : 3;
+  },
 };
 
 /**
@@ -521,12 +532,10 @@ export function shockChainRadius(skillLevel: number): number {
   return SHOCK.chainRadius(Math.max(1, skillLevel));
 }
 
-/** Heal amount for a given level. L1-4 scales, L5+ frozen at L4 value. */
-export function healAmount(skillLevel: number): number {
-  const lvl = Math.max(1, skillLevel);
-  const effectiveLvl =
-    lvl >= HEAL.aoeUnlockLevel ? HEAL.aoeUnlockLevel - 1 : lvl;
-  return HEAL.baseHeal + HEAL.healPerLevel * (effectiveLvl - 1);
+/** Heal percentage of max HP for a given level (always > 0). */
+export function healPercent(skillLevel: number): number {
+  const lvl = Math.max(1, Math.min(10, skillLevel));
+  return HEAL.percentTable[lvl - 1] ?? 0.3;
 }
 
 /** AoE radius for heal at a given level (0 if below unlock level). */
@@ -534,14 +543,23 @@ export function healRadius(skillLevel: number): number {
   return HEAL.aoeRadius(skillLevel);
 }
 
-/**
- * Heal percentage of max HP for L7-10. Returns 0 for L1-6 (use flat healAmount instead).
- * L7: 30%, L8: 40%, L9: 50%, L10: 60%.
- */
-export function healPercent(skillLevel: number): number {
-  if (skillLevel < 7) return 0;
-  const table: Record<number, number> = { 7: 0.3, 8: 0.4, 9: 0.5, 10: 0.6 };
-  return table[skillLevel] ?? 0.6;
+/** Heal cooldown in seconds for a given level (L6+; 0 for kill-charged L1-5). */
+export function healCooldown(skillLevel: number): number {
+  const lvl = Math.max(1, Math.min(10, skillLevel));
+  if (lvl < HEAL.cooldownUnlockLevel) return 0;
+  return HEAL.cooldownTable[lvl - HEAL.cooldownUnlockLevel] ?? 15;
+}
+
+/** Kills needed to recharge heal at a given level (L1-5; 0 for L6+). */
+export function healKillsToRecharge(skillLevel: number): number {
+  const lvl = Math.max(1, Math.min(10, skillLevel));
+  if (lvl >= HEAL.cooldownUnlockLevel) return 0;
+  return HEAL.killsToRecharge(lvl);
+}
+
+/** Heal amount in HP for a given level, given max health (percentage-based). */
+export function healAmount(skillLevel: number, maxHealth = 1000): number {
+  return Math.round(maxHealth * healPercent(skillLevel));
 }
 
 /**
@@ -699,7 +717,9 @@ export function dashHasIceBlast(skillLevel: number): boolean {
 export function dashIceBlastDamage(skillLevel: number): number {
   if (skillLevel < DASH.iceBlastUnlockLevel) return 0;
   const levelsAbove = skillLevel - DASH.iceBlastUnlockLevel;
-  return DASH.iceBlastBaseDamage * (1.0 + DASH.iceBlastDamagePerLevel * levelsAbove);
+  return (
+    DASH.iceBlastBaseDamage * (1.0 + DASH.iceBlastDamagePerLevel * levelsAbove)
+  );
 }
 
 /** Ice blast radius for a given level (0 if not unlocked). */
@@ -739,14 +759,19 @@ export function vortexHasExplosion(skillLevel: number): boolean {
 export function vortexExplosionDamage(skillLevel: number): number {
   if (skillLevel < VORTEX.explosionUnlockLevel) return 0;
   const levelsAbove = skillLevel - VORTEX.explosionUnlockLevel;
-  return VORTEX.baseExplosionDamage * (1.0 + VORTEX.explosionDamagePerLevel * levelsAbove);
+  return (
+    VORTEX.baseExplosionDamage *
+    (1.0 + VORTEX.explosionDamagePerLevel * levelsAbove)
+  );
 }
 
 /** Explosion radius for a given level (0 if not unlocked). */
 export function vortexExplosionRadius(skillLevel: number): number {
   if (skillLevel < VORTEX.explosionUnlockLevel) return 0;
   const levelsAbove = skillLevel - VORTEX.explosionUnlockLevel;
-  return VORTEX.baseExplosionRadius + VORTEX.explosionRadiusPerLevel * levelsAbove;
+  return (
+    VORTEX.baseExplosionRadius + VORTEX.explosionRadiusPerLevel * levelsAbove
+  );
 }
 
 /** Vortex colour tier: grey (1-2), brown (3-5), purple (6-10). */

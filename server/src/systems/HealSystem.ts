@@ -3,9 +3,10 @@
  * ===========
  * Handles the heal skill for both players and enemies.
  *
- * L1-4: Self-only heal. Recharged by kills (5 kills per use).
- * L5-10: AoE heal — heals all players AND enemies in a radius.
- *         Cooldown-based (10s). Heal amount frozen at L4 value.
+ * Heal is ALWAYS percentage-of-max-HP based:
+ * - L1-5: Self-only heal, recharged by kills (4/4/3/3/3 kills per use).
+ * - L6-10: Time-cooldown based. Gains range — heals all players AND
+ *          enemies in a radius that grows with level.
  *
  * VFX is synced via the SkillCast collection (skillId = "heal").
  * The client renders a green flash for self-heal or a green circle for AoE.
@@ -16,11 +17,10 @@ import { Enemy } from "../schema/Enemy";
 import { SkillCast } from "../schema/SkillCast";
 import {
   SKILL_DEFS,
-  healAmount,
   healPercent,
   healRadius,
+  healCooldown,
 } from "../config/skillDefs";
-import type { SkillId } from "../config/skillDefs";
 
 export class HealSystem {
   private nextId = 1;
@@ -37,9 +37,8 @@ export class HealSystem {
     if (!player.isSkillReady("heal")) return false;
 
     const def = SKILL_DEFS.heal;
-    const amount = healAmount(level);
-    const radius = healRadius(level);
     const pct = healPercent(level);
+    const radius = healRadius(level);
 
     if (level >= def.aoeUnlockLevel) {
       // AoE heal: heal all players + enemies in radius
@@ -47,25 +46,23 @@ export class HealSystem {
         if (p.isDead) return;
         const dist = Math.hypot(p.x - player.x, p.y - player.y);
         if (dist <= radius) {
-          const healAmt = pct > 0 ? Math.round(p.maxHealth * pct) : amount;
-          p.heal(healAmt);
+          p.heal(Math.round(p.maxHealth * pct));
         }
       });
       this.state.enemies.forEach((e) => {
         if (e.isDead) return;
         const dist = Math.hypot(e.x - player.x, e.y - player.y);
         if (dist <= radius) {
-          const healAmt = pct > 0 ? Math.round(e.maxHealth * pct) : amount;
-          e.heal(healAmt);
+          e.heal(Math.round(e.maxHealth * pct));
         }
       });
-      // Cooldown-based
-      player.startSkillCooldown("heal", def.cooldown);
+      // Time-cooldown based (L6+)
+      player.startSkillCooldown("heal", healCooldown(level));
       // VFX: AoE circle
       this.spawnHealVfx(player.x, player.y, radius, "player");
     } else {
-      // Self-only heal
-      player.heal(amount);
+      // Self-only heal (percentage of max HP)
+      player.heal(Math.round(player.maxHealth * pct));
       // Kill-charge: consume readiness, reset kills
       player.healReady = false;
       player.healKills = 0;
@@ -78,34 +75,31 @@ export class HealSystem {
 
   /**
    * Cast heal for an enemy (AI usage).
-   * Enemies always use AoE mode if level >= 5, otherwise self-heal.
+   * Enemies always use AoE mode if level >= aoeUnlockLevel, otherwise self-heal.
    */
   castEnemyHeal(enemy: Enemy, level: number = 1): boolean {
     const def = SKILL_DEFS.heal;
-    const amount = healAmount(level);
-    const radius = healRadius(level);
     const pct = healPercent(level);
+    const radius = healRadius(level);
 
     if (level >= def.aoeUnlockLevel) {
       this.state.players.forEach((p) => {
         if (p.isDead) return;
         const dist = Math.hypot(p.x - enemy.x, p.y - enemy.y);
         if (dist <= radius) {
-          const healAmt = pct > 0 ? Math.round(p.maxHealth * pct) : amount;
-          p.heal(healAmt);
+          p.heal(Math.round(p.maxHealth * pct));
         }
       });
       this.state.enemies.forEach((e) => {
         if (e.isDead) return;
         const dist = Math.hypot(e.x - enemy.x, e.y - enemy.y);
         if (dist <= radius) {
-          const healAmt = pct > 0 ? Math.round(e.maxHealth * pct) : amount;
-          e.heal(healAmt);
+          e.heal(Math.round(e.maxHealth * pct));
         }
       });
       this.spawnHealVfx(enemy.x, enemy.y, radius, "enemy");
     } else {
-      enemy.heal(amount);
+      enemy.heal(Math.round(enemy.maxHealth * pct));
       this.spawnHealVfx(enemy.x, enemy.y, 0, "enemy");
     }
 

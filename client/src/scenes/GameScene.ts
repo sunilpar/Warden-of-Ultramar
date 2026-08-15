@@ -2188,14 +2188,16 @@ export class GameScene extends Phaser.Scene {
       this.healCooldownFill.setVisible(false);
       return;
     }
-    // Not ready — check if it's cooldown-based (L5+) or kill-based (L1-4)
+    // Not ready — check if it's cooldown-based (L6+) or kill-based (L1-5)
     const endsAt = (this.currentPlayer.data.get("healCdEndsAt") as number) ?? 0;
     const now = Date.now();
     this.healCard.setAlpha(0.45);
     this.healCooldownFill.setVisible(true);
     if (endsAt > now) {
-      // Cooldown-based (L5+)
-      const totalMs = 10000;
+      // Cooldown-based (L6+): duration depends on heal level
+      // L6: 15s, L7: 13s, L8: 11s, L9/L10: 10s
+      const healLvl = this.localHealLevel;
+      const totalMs = 1000 * (healLvl <= 6 ? 15 : healLvl === 7 ? 13 : healLvl === 8 ? 11 : 10);
       const remaining = endsAt - now;
       const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
       const h = this.healCooldownFillBaseH * fillPct;
@@ -2205,9 +2207,11 @@ export class GameScene extends Phaser.Scene {
         this.healCard.y + this.healCooldownFillBaseH - h,
       );
     } else {
-      // Kill-based (L1-4): show partial fill based on kills
+      // Kill-based (L1-5): show partial fill based on kills
+      // Threshold: 4 kills at L1-2, 3 kills at L3-5
       const kills = (this.currentPlayer.data.get("healKills") as number) ?? 0;
-      const fillPct = kills / 5;
+      const threshold = this.localHealLevel <= 2 ? 4 : 3;
+      const fillPct = Math.min(1, kills / threshold);
       const h = this.healCooldownFillBaseH * fillPct;
       this.healCooldownFill.setSize(this.healCard.displayWidth, h);
       this.healCooldownFill.setPosition(
