@@ -294,7 +294,7 @@ export class GameScene extends Phaser.Scene {
 
   // ---- Character animation state ----
   private animationsCreated: boolean = false;
-  private lastDirection: string = "down"; // default facing direction
+  private lastDirection: string = "left"; // last horizontal facing (left/right)
 
   // ---- Debug HUD (fixed to screen) ----
   private debugFPS!: Phaser.GameObjects.Text;
@@ -634,17 +634,17 @@ export class GameScene extends Phaser.Scene {
     // Player added to the room
     callbacks.onAdd("players", (player: any, sessionId: string) => {
       const sprite = this.add
-        .sprite(player.x, player.y, "character_sheet", 0)
-        .setDisplaySize(64, 64)
+        .sprite(player.x, player.y, "player_sheet", 0)
         .setDepth(3);
 
-      // Create walk/idle animations once (shared by all sprites)
+      // Create player animations once (shared by all sprites)
       if (!this.animationsCreated) {
         this.createCharacterAnimations();
         this.animationsCreated = true;
       }
 
-      sprite.anims.play("char_idle_down");
+      sprite.setFlipX(false); // art faces LEFT by default
+      sprite.anims.play("player_idle");
       this.playerEntities[sessionId] = sprite;
 
       if (sessionId === this.room.sessionId) {
@@ -840,17 +840,22 @@ export class GameScene extends Phaser.Scene {
 
       const isOrck = enemy.typeId === "orck";
       const isTau = enemy.typeId === "tau";
+      const isMech = enemy.typeId === "mechanicus";
       const textureKey = isTau
         ? "tau_sheet"
-        : isOrck
-          ? "orck_sheet"
-          : "tyranid_sheet";
+        : isMech
+          ? "mechanicus_sheet"
+          : isOrck
+            ? "orck_sheet"
+            : "tyranid_sheet";
       const idleAnim = isTau
         ? "tau_idle"
-        : isOrck
-          ? "orck_idle"
-          : "tri_idle";
-      const displaySize = isTau ? 88 : isOrck ? 80 : 64;
+        : isMech
+          ? "mechanicus_idle"
+          : isOrck
+            ? "orck_idle"
+            : "tri_idle";
+      const displaySize = isTau ? 88 : isMech ? 88 : isOrck ? 80 : 64;
       const sprite = this.add
         .sprite(enemy.x, enemy.y, textureKey, 0)
         .setDisplaySize(displaySize, displaySize)
@@ -1137,7 +1142,8 @@ export class GameScene extends Phaser.Scene {
         const endX = cast.x;
         const endY = cast.y;
         // White dashing trail (opposite direction of dash to show speed)
-        const trail = this.add.line(0, 0, startX, startY, endX, endY, 0xffffff, 0.7)
+        const trail = this.add
+          .line(0, 0, startX, startY, endX, endY, 0xffffff, 0.7)
           .setDepth(6)
           .setLineWidth(8);
         this.tweens.add({
@@ -1148,7 +1154,8 @@ export class GameScene extends Phaser.Scene {
           onComplete: () => trail.destroy(),
         });
         // Small white circle at the emerge point (vulnerable again)
-        const emerge = this.add.circle(endX, endY, 12, 0xffffff, 0.8)
+        const emerge = this.add
+          .circle(endX, endY, 12, 0xffffff, 0.8)
           .setDepth(8);
         this.tweens.add({
           targets: emerge,
@@ -1163,7 +1170,8 @@ export class GameScene extends Phaser.Scene {
       } else if (cast.skillId === "dash_ice") {
         // Ice blast: cyan/blue expanding circle at the landing position
         const radius = cast.range ?? 50;
-        const iceBlast = this.add.circle(cast.x, cast.y, radius, 0x66ccff, 0.3)
+        const iceBlast = this.add
+          .circle(cast.x, cast.y, radius, 0x66ccff, 0.3)
           .setStrokeStyle(3, 0x99eeff, 0.9)
           .setDepth(7);
         this.tweens.add({
@@ -1182,7 +1190,8 @@ export class GameScene extends Phaser.Scene {
           const sy = cast.y + Math.sin(a) * radius * 0.3;
           const ex = cast.x + Math.cos(a) * radius;
           const ey = cast.y + Math.sin(a) * radius;
-          const shard = this.add.line(0, 0, sx, sy, ex, ey, 0xaaeeff, 0.8)
+          const shard = this.add
+            .line(0, 0, sx, sy, ex, ey, 0xaaeeff, 0.8)
             .setDepth(8)
             .setLineWidth(3);
           this.tweens.add({
@@ -1334,7 +1343,8 @@ export class GameScene extends Phaser.Scene {
         const maxR = vortex.radius;
         const turns = 1.75;
         for (let t = 0; t <= 1.001; t += 0.05) {
-          const angle = (t * turns * Math.PI * 2) + (i * ((Math.PI * 2) / ARM_COUNT));
+          const angle =
+            t * turns * Math.PI * 2 + i * ((Math.PI * 2) / ARM_COUNT);
           const r = 4 + t * maxR;
           points.push({ x: Math.cos(angle) * r, y: Math.sin(angle) * r });
         }
@@ -1462,41 +1472,47 @@ export class GameScene extends Phaser.Scene {
   // ============================================================
 
   /**
-   * Create walk and idle animations for all 4 directions.
-   * The sprite sheet is a 4x4 grid:
-   *   Row 0: walk RIGHT (frames 0-3)
-   *   Row 1: walk LEFT  (frames 4-7)
-   *   Row 2: walk UP    (frames 8-11)
-   *   Row 3: walk DOWN  (frames 12-15)
+   * Create the player animations from the new 8x3 sheet (256x256 frames).
+   *   Row 0 (frames 0-7)   = idle (art faces LEFT by default)
+   *   Row 1 (frames 8-15)  = walk LEFT
+   *   Row 2 (frames 16-23) = walk RIGHT
+   * Vertical movement (up/down) has no dedicated animation — the walk
+   * animation of the last horizontal facing is reused. The idle animation
+   * is flipped horizontally when the player faces right.
    */
   private createCharacterAnimations(): void {
-    const directions = [
-      { dir: "right", startFrame: 0 },
-      { dir: "left", startFrame: 4 },
-      { dir: "up", startFrame: 8 },
-      { dir: "down", startFrame: 12 },
-    ];
+    // Idle animation (row 0, loops slowly)
+    this.anims.create({
+      key: "player_idle",
+      frames: this.anims.generateFrameNumbers("player_sheet", {
+        start: 0,
+        end: 7,
+      }),
+      frameRate: 8,
+      repeat: -1,
+    });
 
-    for (const { dir, startFrame } of directions) {
-      // Walk animation (4 frames, looping at 10 fps)
-      this.anims.create({
-        key: `char_walk_${dir}`,
-        frames: this.anims.generateFrameNumbers("character_sheet", {
-          start: startFrame,
-          end: startFrame + 3,
-        }),
-        frameRate: 10,
-        repeat: -1,
-      });
+    // Walk LEFT animation (row 1, loops)
+    this.anims.create({
+      key: "player_walk_left",
+      frames: this.anims.generateFrameNumbers("player_sheet", {
+        start: 8,
+        end: 15,
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
 
-      // Idle animation (single frame, no repeat)
-      this.anims.create({
-        key: `char_idle_${dir}`,
-        frames: [{ key: "character_sheet", frame: startFrame }],
-        frameRate: 1,
-        repeat: 0,
-      });
-    }
+    // Walk RIGHT animation (row 2, loops)
+    this.anims.create({
+      key: "player_walk_right",
+      frames: this.anims.generateFrameNumbers("player_sheet", {
+        start: 16,
+        end: 23,
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
   }
 
   /**
@@ -1627,15 +1643,20 @@ export class GameScene extends Phaser.Scene {
 
   /**
    * Update the local player's animation based on current input.
-   * Plays walk animation when moving, idle when standing still.
+   *
+   * The sheet only has: idle (row 0, faces LEFT), walk LEFT (row 1) and
+   * walk RIGHT (row 2). Vertical movement (up/down) reuses the walk
+   * animation of the last horizontal facing. When standing still, the
+   * idle animation plays and is flipped horizontally if the player was
+   * last facing right.
    */
   private updatePlayerAnimation(): void {
     if (!this.currentPlayer) return;
 
     let moving = false;
+    // Horizontal facing: "left" | "right" (persists through vertical moves)
     let newDirection = this.lastDirection;
 
-    // Determine direction (last pressed key wins for diagonals)
     if (this.inputPayload.left) {
       newDirection = "left";
       moving = true;
@@ -1644,25 +1665,29 @@ export class GameScene extends Phaser.Scene {
       newDirection = "right";
       moving = true;
     }
-    if (this.inputPayload.up) {
-      newDirection = "up";
-      moving = true;
-    }
-    if (this.inputPayload.down) {
-      newDirection = "down";
+    // Vertical movement keeps the last horizontal facing's walk animation.
+    if (this.inputPayload.up || this.inputPayload.down) {
       moving = true;
     }
 
     this.lastDirection = newDirection;
 
-    const animKey = moving
-      ? `char_walk_${newDirection}`
-      : `char_idle_${newDirection}`;
-
-    // Only switch animation if it changed (avoids restarting every frame)
-    const currentAnim = this.currentPlayer.anims.currentAnim;
-    if (!currentAnim || currentAnim.key !== animKey) {
-      this.currentPlayer.anims.play(animKey);
+    if (moving) {
+      const animKey =
+        newDirection === "right" ? "player_walk_right" : "player_walk_left";
+      const currentAnim = this.currentPlayer.anims.currentAnim;
+      if (!currentAnim || currentAnim.key !== animKey) {
+        this.currentPlayer.anims.play(animKey);
+      }
+      // Walk rows are directional art — no flip needed.
+      this.currentPlayer.setFlipX(false);
+    } else {
+      // Idle: art faces LEFT; flip when the player faces right.
+      const currentAnim = this.currentPlayer.anims.currentAnim;
+      if (!currentAnim || currentAnim.key !== "player_idle") {
+        this.currentPlayer.anims.play("player_idle");
+      }
+      this.currentPlayer.setFlipX(newDirection === "right");
     }
   }
 
@@ -1742,6 +1767,28 @@ export class GameScene extends Phaser.Scene {
     this.anims.create({
       key: "tau_attack",
       frames: this.anims.generateFrameNumbers("tau_sheet", {
+        start: 6,
+        end: 11,
+      }),
+      frameRate: 12,
+      repeat: 0,
+    });
+
+    // Mechanicus idle animation (row 0, frames 0-5, loops)
+    this.anims.create({
+      key: "mechanicus_idle",
+      frames: this.anims.generateFrameNumbers("mechanicus_sheet", {
+        start: 0,
+        end: 5,
+      }),
+      frameRate: 8,
+      repeat: -1,
+    });
+
+    // Mechanicus attack animation (row 1, frames 6-11, plays once)
+    this.anims.create({
+      key: "mechanicus_attack",
+      frames: this.anims.generateFrameNumbers("mechanicus_sheet", {
         start: 6,
         end: 11,
       }),
@@ -1938,9 +1985,7 @@ export class GameScene extends Phaser.Scene {
     // 3. Debris sparks flying outward
     for (let i = 0; i < 10; i++) {
       const ang = (i / 10) * Math.PI * 2 + Math.random() * 0.4;
-      const spark = this.add
-        .circle(x, y, 4, YELLOW, 1)
-        .setDepth(7);
+      const spark = this.add.circle(x, y, 4, YELLOW, 1).setDepth(7);
       const dist = radius * (0.55 + Math.random() * 0.45);
       this.tweens.add({
         targets: spark,
@@ -2199,10 +2244,8 @@ export class GameScene extends Phaser.Scene {
 
   /** Update the dash cooldown overlay. */
   private updateDashCooldownOverlay(): void {
-    if (!this.dashCard || !this.dashCooldownFill || !this.currentPlayer)
-      return;
-    const endsAt =
-      (this.currentPlayer.data.get("dashCdEndsAt") as number) ?? 0;
+    if (!this.dashCard || !this.dashCooldownFill || !this.currentPlayer) return;
+    const endsAt = (this.currentPlayer.data.get("dashCdEndsAt") as number) ?? 0;
     const now = Date.now();
     if (endsAt > now) {
       this.dashCard.setAlpha(0.45);
@@ -2221,7 +2264,6 @@ export class GameScene extends Phaser.Scene {
       this.dashCooldownFill.setVisible(false);
     }
   }
-
 
   private showBolterTooltip(slot: Phaser.GameObjects.Rectangle): void {
     const mods = skillMods("bolter", this.localBolterLevel);
@@ -2268,14 +2310,7 @@ export class GameScene extends Phaser.Scene {
 
   /** True if a skill is off cooldown (client-side check using synced data). */
   private isSkillReady(
-    skill:
-      | "claw"
-      | "shock"
-      | "heal"
-      | "pulse"
-      | "slam"
-      | "dash"
-      | "vortex",
+    skill: "claw" | "shock" | "heal" | "pulse" | "slam" | "dash" | "vortex",
   ): boolean {
     if (!this.currentPlayer) return true;
     if (skill === "heal") {
@@ -4365,26 +4400,32 @@ export class GameScene extends Phaser.Scene {
         // because the Player schema does not sync facing direction.
         const moving = dist > 1.5; // small threshold to ignore jitter
         let direction = entity.data.get("lastDirection") as string;
-        if (!direction) direction = "down";
+        if (direction !== "left" && direction !== "right") {
+          direction = "left";
+        }
 
         if (moving) {
-          // Dominant axis wins (mirrors local diagonal handling)
-          if (Math.abs(dx) > Math.abs(dy)) {
+          // Horizontal delta updates facing; vertical keeps the last one.
+          if (Math.abs(dx) > 1) {
             direction = dx > 0 ? "right" : "left";
-          } else {
-            direction = dy > 0 ? "down" : "up";
           }
         }
         entity.setData("lastDirection", direction);
 
-        const animKey = moving
-          ? `char_walk_${direction}`
-          : `char_idle_${direction}`;
-
-        // Only switch animation if it changed (avoids restarting every tick)
-        const currentAnim = entity.anims.currentAnim;
-        if (!currentAnim || currentAnim.key !== animKey) {
-          entity.anims.play(animKey);
+        if (moving) {
+          const animKey =
+            direction === "right" ? "player_walk_right" : "player_walk_left";
+          const currentAnim = entity.anims.currentAnim;
+          if (!currentAnim || currentAnim.key !== animKey) {
+            entity.anims.play(animKey);
+          }
+          entity.setFlipX(false);
+        } else {
+          const currentAnim = entity.anims.currentAnim;
+          if (!currentAnim || currentAnim.key !== "player_idle") {
+            entity.anims.play("player_idle");
+          }
+          entity.setFlipX(direction === "right");
         }
       }
 
@@ -4418,16 +4459,21 @@ export class GameScene extends Phaser.Scene {
       const textureKey = entity.texture.key;
       const isOrck = textureKey === "orck_sheet";
       const isTau = textureKey === "tau_sheet";
+      const isMech = textureKey === "mechanicus_sheet";
       const atkKey = isTau
         ? "tau_attack"
-        : isOrck
-          ? "orck_attack"
-          : "tri_attack";
+        : isMech
+          ? "mechanicus_attack"
+          : isOrck
+            ? "orck_attack"
+            : "tri_attack";
       const idleKey = isTau
         ? "tau_idle"
-        : isOrck
-          ? "orck_idle"
-          : "tri_idle";
+        : isMech
+          ? "mechanicus_idle"
+          : isOrck
+            ? "orck_idle"
+            : "tri_idle";
       const eAnim = entity.anims.currentAnim;
       if (attacking) {
         if (!eAnim || eAnim.key !== atkKey) {
@@ -5087,9 +5133,16 @@ export class GameScene extends Phaser.Scene {
     if (!this.room) return;
 
     this.elapsedTime += delta;
+    // Guard: never run more than 5 catch-up ticks in one frame (freeze
+    // protection if the tab was backgrounded or a frame stalled).
+    let catchUpTicks = 0;
     while (this.elapsedTime >= this.fixedTimeStep) {
       this.elapsedTime -= this.fixedTimeStep;
       this.fixedTick();
+      if (++catchUpTicks >= 5) {
+        this.elapsedTime = 0;
+        break;
+      }
     }
   }
 }

@@ -146,7 +146,7 @@ export class Player extends Schema {
   /** Hitbox half-width (rectangle, synced for debug overlay). */
   @type("number") hitboxW: number = 9;
   /** Hitbox half-height (rectangle, synced for debug overlay). */
-  @type("number") hitboxH: number = 15;
+  @type("number") hitboxH: number = 20;
 
   /** Server timestamp (ms) until which the player is bleeding (DoT). */
   @type("number") bleedUntil: number = 0;

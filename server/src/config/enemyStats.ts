@@ -39,7 +39,7 @@ export type SkillId =
   | "heal";
 
 /** Enemy type identifier. */
-export type EnemyTypeId = "tyranid" | "orck" | "tau";
+export type EnemyTypeId = "tyranid" | "orck" | "tau" | "mechanicus";
 
 export interface EnemyBaseConfig {
   /** Display title. */
@@ -127,9 +127,9 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     collisionRadius: 16, // larger hitbox than tyranid
     hitboxW: 15,
     hitboxH: 30,
-    // Primary: slam. Unlocks claw at level 5+ (see potentialSkills unlock rule).
-    potentialSkills: ["slam", "claw"],
-    skillCooldown: { slam: 2.0, claw: 1.5 },
+    // Primary (and only): slam.
+    potentialSkills: ["slam"],
+    skillCooldown: { slam: 2.0 },
     growth: {
       maxHealth: 100,
       moveSpeed: 0,
@@ -153,16 +153,42 @@ export const ENEMY_STATS: Record<EnemyTypeId, EnemyTypeConfig> = {
     collisionRadius: 10,
     hitboxW: 14,
     hitboxH: 14,
-    // Primary: bolter. Secondary: shock. Third: dash.
+    // Primary: bolter. Secondary: dash.
     // (Shield level is derived separately as the remainder slot.)
-    potentialSkills: ["bolter", "shock", "dash"],
-    skillCooldown: { bolter: 3.0, shock: 5.0, dash: 6.0 },
+    potentialSkills: ["bolter", "dash"],
+    skillCooldown: { bolter: 3.0, dash: 6.0 },
     growth: {
       maxHealth: 60,
       moveSpeed: 0,
       attack: 10,
     },
     xpReward: 200,
+  },
+  mechanicus: {
+    id: "mechanicus",
+    title: "Mechanicus",
+    description:
+      "A cyborg adept of the Machine God. Buffs itself, shocks its foes, and repairs its allies; moderate health and damage.",
+    maxHealth: 300,
+    moveSpeed: 30,
+    attack: 150,
+    defence: 0.01,
+    critRate: 0.2, // 20% base crit
+    shield: 20, // base shield at level 1
+    collisionRadius: 10,
+    hitboxW: 14,
+    hitboxH: 14,
+    // Primary: shock. Buff: shield (self-buff, restores shield to max).
+    // Then: pulse (2nd damage skill), vortex (3rd).
+    // (A shield level is ALSO derived separately as the remainder slot.)
+    potentialSkills: ["shock", "shield", "pulse", "vortex"],
+    skillCooldown: { shock: 5.0, shield: 10.0, pulse: 8.0, vortex: 12.0 },
+    growth: {
+      maxHealth: 80,
+      moveSpeed: 0,
+      attack: 10,
+    },
+    xpReward: 250,
   },
 };
 

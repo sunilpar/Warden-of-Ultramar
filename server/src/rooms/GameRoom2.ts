@@ -38,7 +38,7 @@ import {
   MAX_SKILL_LEVEL,
   skillCritRate,
   pulseCooldown,
-    dashCooldown,
+  dashCooldown,
   type SkillId,
 } from "../config/skillDefs";
 import {
@@ -93,6 +93,8 @@ export class GameRoom2 extends Room {
     this.enemySystem.setHealSystem(this.healSystem);
     this.enemySystem.setShockSystem(this.shockSystem);
     this.enemySystem.setDashSystem(this.dashSystem);
+    this.enemySystem.setVortexSystem(this.vortexSystem);
+    this.enemySystem.setPulseSystem(this.pulseSystem);
 
     // Fixed timestep simulation loop
     let elapsedTime = 0;
@@ -199,12 +201,14 @@ export class GameRoom2 extends Room {
   }
 
   /**
-   * Pick an enemy type by spawn ratio: 50% tyranid / 30% tau / 20% orck.
+   * Pick an enemy type by spawn ratio: 40% tyranid / 30% mechanicus /
+   * 20% tau / 10% orck.
    */
-  private pickEnemyType(): "tyranid" | "orck" | "tau" {
+  private pickEnemyType(): "tyranid" | "orck" | "tau" | "mechanicus" {
     const r = Math.random();
-    if (r < 0.5) return "tyranid";
-    if (r < 0.8) return "tau";
+    if (r < 0.4) return "tyranid";
+    if (r < 0.7) return "mechanicus";
+    if (r < 0.9) return "tau";
     return "orck";
   }
 

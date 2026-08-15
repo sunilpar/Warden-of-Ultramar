@@ -21,7 +21,11 @@ const config: Phaser.Types.Core.GameConfig = {
   },
   pixelArt: true,
   disableContextMenu: true,
-  scene: [SceneSelector, new GameScene({ key: "game" }), new GameScene({ key: "game2" })],
+  scene: [
+    SceneSelector,
+    new GameScene({ key: "game" }),
+    new GameScene({ key: "game2" }),
+  ],
 };
 
 const game = new Phaser.Game(config);

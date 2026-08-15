@@ -92,6 +92,8 @@ export class GameRoom extends Room {
     this.enemySystem.setHealSystem(this.healSystem);
     this.enemySystem.setShockSystem(this.shockSystem);
     this.enemySystem.setDashSystem(this.dashSystem);
+    this.enemySystem.setVortexSystem(this.vortexSystem);
+    this.enemySystem.setPulseSystem(this.pulseSystem);
 
     // Fixed timestep simulation loop
     let elapsedTime = 0;
@@ -155,7 +157,7 @@ export class GameRoom extends Room {
     this.projectileSystem.update(dt);
     this.clawSystem.update(dt);
     this.slamSystem.update(dt);
-      this.vortexSystem.update(dt);
+    this.vortexSystem.update(dt);
     // Tick player skill cooldowns + bleed DoT
     this.state.players.forEach((p) => {
       p.tickShield(dt);
@@ -198,12 +200,14 @@ export class GameRoom extends Room {
   }
 
   /**
-   * Pick an enemy type by spawn ratio: 50% tyranid / 30% tau / 20% orck.
+   * Pick an enemy type by spawn ratio: 40% tyranid / 30% mechanicus /
+   * 20% tau / 10% orck.
    */
-  private pickEnemyType(): "tyranid" | "orck" | "tau" {
+  private pickEnemyType(): "tyranid" | "orck" | "tau" | "mechanicus" {
     const r = Math.random();
-    if (r < 0.5) return "tyranid";
-    if (r < 0.8) return "tau";
+    if (r < 0.4) return "tyranid";
+    if (r < 0.7) return "mechanicus";
+    if (r < 0.9) return "tau";
     return "orck";
   }
 

@@ -22,15 +22,15 @@ export class SceneSelector extends Phaser.Scene {
       "assets/cards/cardSpritesheet128_200.png",
       { frameWidth: 128, frameHeight: 200 },
     );
-    // Character sprite sheet (4x4 grid, each frame 64x64)
-    this.load.spritesheet(
-      "character_sheet",
-      "assets/CharacterSpriteSheet64.png",
-      {
-        frameWidth: 64,
-        frameHeight: 64,
-      },
-    );
+    // Player sprite sheet (8 cols x 3 rows, each 64x64).
+    // Row 0 (frames 0-7)   = idle animation (art faces LEFT by default).
+    // Row 1 (frames 8-15)  = walk LEFT animation.
+    // Row 2 (frames 16-23) = walk RIGHT animation.
+    // Idle is flipped horizontally when the player faces right.
+    this.load.spritesheet("player_sheet", "assets/waliking-sheet64.png", {
+      frameWidth: 64,
+      frameHeight: 64,
+    });
     // Tyranid enemy sprite sheet (64x64 frames).
     // Row 0 (frames 0-3) = idle/move animation (faces LEFT by default).
     // Row 1 (frames 4-7) = attack animation (faces LEFT by default).
@@ -54,6 +54,17 @@ export class SceneSelector extends Phaser.Scene {
       frameWidth: 256,
       frameHeight: 256,
     });
+    // Mechanicus enemy sprite sheet (256x256 frames, 2 rows x 6 cols).
+    // Row 0 (frames 0-5) = idle animation (faces LEFT by default).
+    // Row 1 (frames 6-11) = attack animation.
+    this.load.spritesheet(
+      "mechanicus_sheet",
+      "assets/skills/mechshoot1-sheet.png",
+      {
+        frameWidth: 256,
+        frameHeight: 256,
+      },
+    );
     // Map1 tile sprite sheet (2 rows x 4 cols, 64x64 each)
     this.load.spritesheet(
       "map1_tiles",

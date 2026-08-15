@@ -26,6 +26,8 @@ import { SlamSystem } from "./SlamSystem";
 import type { HealSystem } from "./HealSystem";
 import type { DashSystem } from "./DashSystem";
 import type { ShockSystem } from "./ShockSystem";
+import type { VortexSystem } from "./VortexSystem";
+import type { PulseSystem } from "./PulseSystem";
 
 /** Collision resolver signature (shared by MapSystem / MapSystem2). */
 export interface CollisionResolver {
@@ -45,6 +47,8 @@ export class EnemySystem {
   private healSystem: HealSystem | null = null;
   private dashSystem: DashSystem | null = null;
   private shockSystem: ShockSystem | null = null;
+  private vortexSystem: VortexSystem | null = null;
+  private pulseSystem: PulseSystem | null = null;
 
   /** Per-enemy next-allowed-skill-trigger timestamp (tau pacing). */
   private nextSkillTriggerAt = new Map<string, number>();
@@ -97,6 +101,16 @@ export class EnemySystem {
     this.shockSystem = ss;
   }
 
+  /** Inject the VortexSystem (called by the room after both are created). */
+  setVortexSystem(vs: VortexSystem): void {
+    this.vortexSystem = vs;
+  }
+
+  /** Inject the PulseSystem (called by the room after both are created). */
+  setPulseSystem(ps: PulseSystem): void {
+    this.pulseSystem = ps;
+  }
+
   update(dt: number): void {
     // Process pending slam casts (delayed after attack animation).
     const now = Date.now();
@@ -132,6 +146,9 @@ export class EnemySystem {
           break;
         case "tau":
           this.updateTau(enemy, dt);
+          break;
+        case "mechanicus":
+          this.updateMechanicus(enemy, dt);
           break;
         default:
           break;
@@ -282,10 +299,7 @@ export class EnemySystem {
       enemy.skillPool[Math.floor(Math.random() * enemy.skillPool.length)];
     if (!enemy.isSkillReady(skill)) return;
     this.useSkill(enemy, skill, target);
-    this.nextSkillTriggerAt.set(
-      id,
-      now + EnemySystem.TAU_TRIGGER_INTERVAL_MS,
-    );
+    this.nextSkillTriggerAt.set(id, now + EnemySystem.TAU_TRIGGER_INTERVAL_MS);
   }
 
   /**
@@ -312,6 +326,78 @@ export class EnemySystem {
       if (Math.hypot(res.x - px, res.y - py) > 0.5) return false; // wall hit
     }
     return true;
+  }
+
+  // ============================================================
+  // MECHANICUS (support caster: shock / heal / vortex)
+  // ============================================================
+
+  /** Mechanicus stop-range: matches the shock skill's base range (200px). */
+  private static readonly MECH_ATTACK_RANGE = 200;
+  /** Mechanicus skill trigger interval: at most one skill attempt per second. */
+  private static readonly MECH_TRIGGER_INTERVAL_MS = 1000;
+
+  /** Mechanicus AI: mid-range support caster. Advances until shock range,
+   *  holds position, backs away when the player closes in, and cycles its
+   *  skill pool (shock primary, heal secondary, vortex third) with line of
+   *  sight. */
+  private updateMechanicus(enemy: Enemy, _dt: number): void {
+    const now = Date.now();
+    const target = this.findNearestPlayer(enemy);
+    if (!target) {
+      enemy.attacking = false;
+      return;
+    }
+
+    enemy.facingRight = target.x > enemy.x;
+
+    const dx = target.x - enemy.x;
+    const dy = target.y - enemy.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    enemy.attacking = now < enemy.attackingUntil;
+
+    // Too close: back away (ranged unit keeps distance).
+    if (dist < 120) {
+      const away = Math.atan2(-dy, -dx);
+      this.moveToward(
+        enemy,
+        enemy.x + Math.cos(away) * 40,
+        enemy.y + Math.sin(away) * 40,
+        _dt,
+      );
+      return;
+    }
+
+    if (dist <= EnemySystem.MECH_ATTACK_RANGE) {
+      // In range — but ONLY attempt skills with line of sight.
+      if (this.hasLineOfSight(enemy.x, enemy.y, target.x, target.y)) {
+        this.tryUseMechanicusSkill(enemy, target, now);
+      }
+    } else {
+      // Out of range: advance toward target.
+      this.moveToward(enemy, target.x, target.y, _dt);
+    }
+  }
+
+  /**
+   * Mechanicus skill attempt with a fixed 1-second trigger interval
+   * (reuses the tau-style random-pick + throttle pacing).
+   */
+  private tryUseMechanicusSkill(
+    enemy: Enemy,
+    target: Player,
+    now: number,
+  ): void {
+    const id = (enemy as any).__id as string | undefined;
+    if (!id) return;
+    const nextAt = this.nextSkillTriggerAt.get(id) ?? 0;
+    if (now < nextAt) return;
+    if (enemy.skillPool.length === 0) return;
+    const skill: SkillId =
+      enemy.skillPool[Math.floor(Math.random() * enemy.skillPool.length)];
+    if (!enemy.isSkillReady(skill)) return;
+    this.useSkill(enemy, skill, target);
+    this.nextSkillTriggerAt.set(id, now + EnemySystem.MECH_TRIGGER_INTERVAL_MS);
   }
 
   // ============================================================
@@ -392,7 +478,13 @@ export class EnemySystem {
     // Keep the flag true for 350ms (one full attack animation cycle).
     const now = Date.now();
     const atkDur =
-      enemy.typeId === "orck" ? 500 : enemy.typeId === "tau" ? 400 : 350;
+      enemy.typeId === "orck"
+        ? 500
+        : enemy.typeId === "tau"
+          ? 400
+          : enemy.typeId === "mechanicus"
+            ? 400
+            : 350;
     enemy.attackingUntil = now + atkDur;
     enemy.attacking = true;
     if (skill === "bolter" && this.projectileSystem) {
@@ -454,6 +546,32 @@ export class EnemySystem {
         enemy,
         this.enemySkillLevel(enemy, skill),
         escapeAngle,
+        enemy.critRate,
+        enemy.critDamage,
+      );
+    } else if (skill === "vortex" && this.vortexSystem) {
+      this.vortexSystem.castVortex(
+        this.enemyOwnerId(enemy),
+        "enemy",
+        enemy.x,
+        enemy.y,
+        angle,
+        this.enemySkillLevel(enemy, skill),
+        enemy.attack,
+        enemy.damageMultiplier,
+        enemy.critRate,
+        enemy.critDamage,
+      );
+    } else if (skill === "shield") {
+      // Self-buff: instantly restore the shield to full capacity.
+      if (enemy.maxShield > 0 && enemy.shield < enemy.maxShield) {
+        enemy.shield = enemy.maxShield;
+        enemy.shieldRechargeAt = 0;
+      }
+    } else if (skill === "pulse" && this.pulseSystem) {
+      this.pulseSystem.castEnemyPulse(
+        enemy,
+        this.enemySkillLevel(enemy, skill),
         enemy.critRate,
         enemy.critDamage,
       );
