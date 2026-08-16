@@ -12,10 +12,18 @@ import { GameScene } from "./scenes/GameScene";
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
+  // Design resolution — the game logic/HUD stays in these coordinates.
+  // FIT + CENTER_BOTH scales the canvas to fill the player's whole
+  // screen while preserving the aspect ratio.
   width: 1080,
   height: 720,
   backgroundColor: "#117c13",
   parent: "phaser-example",
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH,
+    expandParent: true,
+  },
   physics: {
     default: "arcade",
   },

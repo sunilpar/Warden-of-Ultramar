@@ -168,6 +168,10 @@ export class SceneSelector extends Phaser.Scene {
       .setPadding(6)
       .setShadow(3, 3, "#000000", 4, true, true)
       .on("pointerdown", () => {
+        // Request real browser fullscreen (must run inside a user gesture).
+        if (!this.scale.isFullscreen && this.scale.fullscreen.available) {
+          this.scale.startFullscreen();
+        }
         this.game.scene.switch("selector", "game");
       });
     // "Quit Game" button (just reloads for now)
