@@ -719,8 +719,8 @@ export class GameRoom extends Room {
 
     // ---- Pick up a ground card (equip it) ----
     // msg: { cardId: string, replaceSkill?: SkillId }
-    // replaceSkill = the skill whose card currently occupies the target
-    // HUD slot; its card is dropped to the ground (swap).
+    // replaceSkill = when the client planned an INSERT that pushes a card
+    // off a full HUD, that skill's equipped card drops to the ground.
     11: (client: Client, msg: { cardId: string; replaceSkill?: string }) => {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.isDead) return;
@@ -732,8 +732,12 @@ export class GameRoom extends Room {
       const dy = card.y - player.y;
       if (dx * dx + dy * dy > 96 * 96) return;
       const newSkill = card.card.skill as SkillId;
-      // Swap: the displaced card in the target slot drops to the ground.
-      if (msg.replaceSkill && msg.replaceSkill !== newSkill) {
+      // Insert-push: only when the client says a card gets displaced.
+      if (
+        msg.replaceSkill &&
+        msg.replaceSkill !== newSkill &&
+        player.equippedCards.has(msg.replaceSkill as SkillId)
+      ) {
         this.dropEquippedCardFor(player, msg.replaceSkill as SkillId);
       }
       // The player's old card for the same skill (previous version) drops.

@@ -344,6 +344,13 @@ export class GameScene extends Phaser.Scene {
    */
   private beginGroundCardGrab(cardId: string, card: any, entity: Phaser.GameObjects.Container): void {
     if (!this.room || this.dragCard) return;
+    // Range gate (same 96px reach rule the server enforces on pickup).
+    const p = this.currentPlayer;
+    if (!p) return;
+    if (Math.hypot(card.x - p.x, card.y - p.y) > 96) {
+      this.showPickupFailedToast("TOO FAR TO GRAB");
+      return;
+    }
     this.hideGroundCardTooltip();
     // Build a held-card visual from the ground box.
     const skill = card.skill as SkillId;
@@ -394,18 +401,28 @@ export class GameScene extends Phaser.Scene {
     this.groundGrab = null;
     const slotIdx = this.slotAtPointer(pointer);
     if (slotIdx >= 0) {
-      // EQUIP: ask the server for the card, place on the HUD after confirm.
-      // Works over ANY HUD slot. If that slot holds a different skill,
-      // tell the server to drop that card (swap).
-      const occupying = this.slotLayout[slotIdx];
+      // EQUIP with INSERT semantics: other cards make way (shift toward
+      // the first empty slot); if the HUD is completely full, the card
+      // pushed off the end is dropped to the ground by the server.
       const wantSkill = (g.card.card?.skill as SkillId) ?? g.card.skill;
-      const replaceSkill =
-        occupying && occupying !== wantSkill ? occupying : undefined;
+      const displaced = this.computeInsertDisplacement(wantSkill, slotIdx);
       this.pendingPickups.add(g.cardId);
       this.pendingPickupSlots.set(g.cardId, slotIdx);
-      this.room?.send(11, { cardId: g.cardId, replaceSkill });
+      this.room?.send(11, {
+        cardId: g.cardId,
+        replaceSkill: displaced ?? undefined,
+      });
       g.obj.container.destroy();
       g.entity.setVisible(true);
+      // If the server rejects (just-dropped lock), surface it.
+      const grabbedId = g.cardId;
+      this.time.delayedCall(500, () => {
+        if (this.pendingPickups.has(grabbedId)) {
+          this.pendingPickups.delete(grabbedId);
+          this.pendingPickupSlots.delete(grabbedId);
+          this.showPickupFailedToast("PICKUP FAILED - TRY AGAIN");
+        }
+      });
     } else {
       // RE-DROP at the cursor's world position (server validates reach).
       this.room?.send(12, {
@@ -762,6 +779,9 @@ export class GameScene extends Phaser.Scene {
       if (!this.currentPlayer || !this.room) return;
       // While a card is grabbed, clicks only manage the drag.
       if (this.dragCard) return;
+      // Never cast while grabbing a ground card (or clicking one).
+      if (this.groundGrab) return;
+      if (this.pointerOverGroundCard(pointer)) return;
       // Left-click over a HUD card grabs the card instead of casting.
       if (this.pointerOverHudCard(pointer)) return;
       const wx = pointer.worldX;
@@ -1572,6 +1592,7 @@ export class GameScene extends Phaser.Scene {
         const wantSlot = this.pendingPickupSlots.get(cardId) ?? -1;
         this.pendingPickupSlots.delete(cardId);
         this.addPickedUpCardToHud(card.skill, card.level ?? 1, wantSlot);
+        this.syncAllCardPositions();
       }
     });
 
@@ -2470,7 +2491,7 @@ export class GameScene extends Phaser.Scene {
     d.obj.container.setDepth(102);
     this.dragCard = null;
     this.liveLayout = null;
-    this.updatePlusHints();
+    this.syncAllCardPositions();
   }
 
   /**
@@ -2497,23 +2518,48 @@ export class GameScene extends Phaser.Scene {
     this.skillLevelCache[skill] = level;
     const idx = this.slotLayout.indexOf(skill);
     if (idx >= 0) return; // already on the HUD
+    // INSERT semantics: cards at/after the preferred slot shift toward
+    // the first empty slot to make way. Never destroys a card.
     let empty = -1;
-    if (preferSlot >= 0) {
-      const occupying = this.slotLayout[preferSlot];
-      if (!occupying) {
-        empty = preferSlot;
-      } else if (occupying !== skill) {
-        // SWAP: the occupying card was dropped to the ground by the
-        // server -> remove it from the HUD entirely.
-        const oldCard = this.hudCards.get(occupying);
-        if (oldCard) {
-          oldCard.container.destroy();
-          this.hudCards.delete(occupying);
-        }
-        this.slotLayout[preferSlot] = null;
+    if (preferSlot >= 0 && preferSlot < 5) {
+      const existingIdx = this.slotLayout.indexOf(skill);
+      if (existingIdx >= 0) {
+        // Already on HUD: just move it to the preferred slot.
+        this.slotLayout[existingIdx] = null;
         empty = preferSlot;
       } else {
-        empty = this.firstEmptySlot();
+        const gap = this.firstEmptySlot();
+        if (gap >= 0) {
+          if (gap < preferSlot) {
+            // Gap before target: cards from gap..preferSlot-1 shift LEFT.
+            for (let i = gap; i < preferSlot; i++) {
+              this.slotLayout[i] = this.slotLayout[i + 1];
+            }
+          } else {
+            // Gap after target: cards preferSlot..gap-1 shift RIGHT.
+            for (let i = gap; i > preferSlot; i--) {
+              this.slotLayout[i] = this.slotLayout[i - 1];
+            }
+          }
+          this.slotLayout[preferSlot] = null;
+          empty = preferSlot;
+        } else {
+          // Full HUD: last card is displaced (server drops it).
+          const displaced = this.slotLayout[4];
+          if (displaced) {
+            const oldCard = this.hudCards.get(displaced);
+            if (oldCard) {
+              oldCard.container.destroy();
+              this.hudCards.delete(displaced);
+            }
+            this.slotLayout[4] = null;
+            for (let i = 4; i > preferSlot; i--) {
+              this.slotLayout[i] = this.slotLayout[i - 1];
+            }
+            this.slotLayout[preferSlot] = null;
+            empty = preferSlot;
+          }
+        }
       }
     } else {
       empty = this.firstEmptySlot();
@@ -2560,6 +2606,63 @@ export class GameScene extends Phaser.Scene {
     this.updatePlusHints();
   }
 
+  /**
+   * Simulate inserting `skill` at `slot`: return the skill that gets
+   * pushed off the HUD (null when a gap absorbs the shift). Does NOT
+   * mutate state - the actual layout is applied when the server
+   * confirms the pickup.
+   */
+  private computeInsertDisplacement(skill: SkillId, slot: number): SkillId | null {
+    if (this.slotLayout.indexOf(skill) >= 0) return null; // already placed
+    const empty = this.firstEmptySlot();
+    if (empty >= 0) return null; // a gap absorbs the shift, nobody falls off
+    // Full HUD: the last slot's card is pushed off.
+    return this.slotLayout[4] === skill ? null : this.slotLayout[4];
+  }
+
+  /** Red toast when a pickup/grab is rejected. */
+  private showPickupFailedToast(msg: string): void {
+    const x = this.cameras.main.width / 2;
+    const txt = this.add
+      .text(x, this.cameras.main.height - 170, msg, {
+        color: "#ff5555",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(3000);
+    this.tweens.add({
+      targets: txt,
+      alpha: 0,
+      delay: 900,
+      duration: 400,
+      onComplete: () => txt.destroy(),
+    });
+  }
+
+  /** True if the pointer is over any ground card entity (screen space). */
+  private pointerOverGroundCard(pointer: Phaser.Input.Pointer): boolean {
+    if (this.groundGrab) return true;
+    for (const entity of this.groundCardEntities.values()) {
+      if (!entity.visible) continue;
+      const w = entity.input?.hitArea?.width ?? 84;
+      const h = entity.input?.hitArea?.height ?? 20;
+      if (
+        pointer.x >= entity.x - w / 2 &&
+        pointer.x <= entity.x + w / 2 &&
+        pointer.y >= entity.y - h / 2 &&
+        pointer.y <= entity.y + h / 2
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /** Persist a new layout and reposition every card instantly. */
   private commitLayout(layout: (SkillId | null)[]): void {
     this.slotLayout = layout.slice(0, 5);
@@ -2569,6 +2672,29 @@ export class GameScene extends Phaser.Scene {
       if (!skill) continue;
       const card = this.hudCards.get(skill);
       if (card) this.tweenCardTo(card, i, false);
+    }
+    this.updatePlusHints();
+  }
+
+  /**
+   * HARD SYNC: after any structural change, snap every card to its
+   * slot's exact position and clear all tweens. Guarantees the visuals
+   * always match slotLayout (no drift, no stuck half-tweened cards).
+   */
+  private syncAllCardPositions(): void {
+    for (const card of this.hudCards.values()) {
+      this.tweens.killTweensOf(card.container);
+    }
+    for (let i = 0; i < this.slotLayout.length; i++) {
+      const skill = this.slotLayout[i];
+      if (!skill) continue;
+      const card = this.hudCards.get(skill);
+      if (!card) continue;
+      const c = this.slotCenter(i);
+      card.targetSlot = i;
+      card.container.setPosition(c.x, c.y);
+      card.container.setScale(1);
+      card.container.setDepth(102);
     }
     this.updatePlusHints();
   }
