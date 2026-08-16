@@ -209,12 +209,14 @@ export class VortexSystem {
     _casterDamageMultiplier: number = 1.0,
     critRate: number = 0,
     critDamage: number = 1.5,
+    cardRadiusMult: number = 1,
+    cardDamageMult: number = 1,
   ): boolean {
-    const radius = vortexRadius(skillLevel);
+    const radius = vortexRadius(skillLevel) * cardRadiusMult;
     const pullForce = vortexPullForce(skillLevel);
     const hasExplosion = vortexHasExplosion(skillLevel);
-    const explosionDmg = vortexExplosionDamage(skillLevel);
-    const explosionRad = vortexExplosionRadius(skillLevel);
+    const explosionDmg = vortexExplosionDamage(skillLevel) * cardDamageMult;
+    const explosionRad = vortexExplosionRadius(skillLevel) * cardRadiusMult;
     const tier = vortexColorTier(skillLevel);
 
     const vortex = new Vortex();

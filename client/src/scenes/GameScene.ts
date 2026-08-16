@@ -37,6 +37,8 @@ import { LAYERED_MAP, resolveTileCollision } from "../maps/layeredMapData";
 import type { LayeredMapData } from "../maps/layeredMapData";
 import { LAYERED_MAP_2 } from "../maps/layeredMap2Data";
 import {
+  type SkillId,
+  SKILL_CARDS,
   cardFrameForLevel,
   BOLTER_COLORS,
   bolterColorTier,
@@ -46,7 +48,6 @@ import {
   CLAW_FRAMES_PER_ROW,
   type ClawTier,
   skillMods,
-  SKILL_CARDS,
   vortexColorTier,
   VORTEX_COLORS,
 } from "../config/skillDefs";
@@ -58,6 +59,68 @@ import { MAP_INFO, MODIFIER_DISPLAY } from "../config/modifiers";
 
 // Alias for skill card lookup in character screen
 const SKILL_CARDS_LOOKUP = SKILL_CARDS;
+
+/** One HUD card game object (container holding art + cooldown fill). */
+interface HudCardObj {
+  skill: SkillId;
+  container: Phaser.GameObjects.Container;
+  img: Phaser.GameObjects.Image;
+  cdFill: Phaser.GameObjects.Rectangle;
+  /** Slot index this card is tweening toward (-1 = dragging). */
+  targetSlot: number;
+}
+
+/** Approximate full cooldown (ms) per skill, for the HUD fill animation. */
+const SLOT_CD_MS: Partial<Record<SkillId, number>> = {
+  shock: 700,
+  slam: 3000,
+  claw: 500,
+  vortex: 8000,
+  pulse: 5000,
+  dash: 5000,
+  bolter: 500,
+};
+
+/** Rarity colors (drop boxes + tooltips). Mirrors server loot config. */
+const RARITY_COLORS: Record<string, number> = {
+  common: 0x9e9e9e,
+  uncommon: 0x00c853,
+  rare: 0x2979ff,
+  epic: 0xaa00ff,
+  legendary: 0xffd700,
+  unique: 0x00e5ff,
+};
+
+/** Rarity names shown in tooltips. */
+const RARITY_NAMES: Record<string, string> = {
+  common: "Common",
+  uncommon: "Uncommon",
+  rare: "Rare",
+  epic: "Epic",
+  legendary: "Legendary",
+  unique: "Unique",
+};
+
+/** Mod display names (client copy). */
+const MOD_NAMES: Record<string, string> = {
+  inc_crit_rate: "+10% Crit Rate",
+  inc_crit_damage: "+20% Crit Damage",
+  inc_atk_damage: "+10% Damage",
+  inc_shield_amount: "+100 Shield",
+  wide_sweep: "2x Radius, 1/2 Damage",
+};
+
+/** Cooldown fill tint per skill. */
+const CARD_CD_COLORS: Partial<Record<SkillId, number>> = {
+  shock: 0x4da6ff,
+  pulse: 0xb266ff,
+  dash: 0x66ccff,
+  heal: 0x00ff00,
+  vortex: 0x999999,
+  claw: 0xff9955,
+  slam: 0xffcc44,
+  bolter: 0xffee88,
+};
 
 /**
  * Format large numbers with suffixes: k, mil, bil, tril, quadr, etc.
@@ -124,51 +187,276 @@ export class GameScene extends Phaser.Scene {
   enemyLastPos: { [id: string]: { x: number; y: number } } = {};
   projLastPos: { [id: string]: { x: number; y: number } } = {};
 
-  // ---- Skill (bolter) HUD: card image + level text in slot 1 ----
-  private bolterCard!: Phaser.GameObjects.Image;
-  private bolterLevelText!: Phaser.GameObjects.Text;
-  private localBolterLevel: number = 1;
-
   // ---- Upgrade toast ----
   private upgradeToast!: Phaser.GameObjects.Text;
 
-  // ---- Bolter cooldown overlay + tooltip ----
-  private bolterCooldownFill!: Phaser.GameObjects.Rectangle;
-  private bolterCooldownFillBaseH: number = 0;
+  /** Hover tooltip for the card in the hovered slot. */
   private bolterTooltip!: Phaser.GameObjects.Text;
 
-  // ---- Slam card (slot 5) + Claw card (slot 3) ----
-  private shockCard!: Phaser.GameObjects.Image;
-  private localShockLevel: number = 1;
-  private localSlamLevel: number = 1;
-  private localDashLevel: number = 1;
-  private shockCooldownFill!: Phaser.GameObjects.Rectangle;
-  private shockCooldownFillBaseH: number = 0;
-  private clawCard!: Phaser.GameObjects.Image;
-  private localClawLevel: number = 1;
-  private clawCooldownFill!: Phaser.GameObjects.Rectangle;
-  private clawCooldownFillBaseH: number = 0;
+  // ============================================================
+  // GROUND CARDS (dropped card pickups)
+  // ============================================================
 
-  // ---- Heal card (slot 4) ----
-  private healCard!: Phaser.GameObjects.Image;
-  private localHealLevel: number = 1;
-  private healCooldownFill!: Phaser.GameObjects.Rectangle;
-  private healCooldownFillBaseH: number = 0;
+  /**
+   * Create the world-space entity for a dropped card: a simple box with
+   * the skill name inside. When loot rarity lands later, restyle here.
+   */
+  private createGroundCardEntity(card: any, cardId: string): void {
+    const skill = card.skill as SkillId;
+    const def = SKILL_CARDS[skill];
+    const W = 84;
+    const H = 20;
+    const rarity = (card.card?.rarity as string) ?? "common";
+    const rarityColor = RARITY_COLORS[rarity] ?? RARITY_COLORS.common;
+    const box = this.add
+      .rectangle(0, 0, W, H, 0x1c1c1c, 0.92)
+      .setStrokeStyle(2, rarityColor, 1);
+    const label = this.add
+      .text(0, 0, def ? def.title : skill, {
+        color: "#" + rarityColor.toString(16).padStart(6, "0"),
+        fontSize: "11px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 2,
+      })
+      .setOrigin(0.5);
+    const container = this.add
+      .container(card.x, card.y, [box, label])
+      .setDepth(2);
+    container.setSize(W, H);
+    const GPAD = 14; // generous hover/grab padding
+    container.setInteractive(
+      new Phaser.Geom.Rectangle(
+        -W / 2 - GPAD,
+        -H / 2 - GPAD,
+        W + GPAD * 2,
+        H + GPAD * 2,
+      ),
+      Phaser.Geom.Rectangle.Contains,
+    );
+    container.on("pointerover", () => {
+      container.setAlpha(0.9);
+      this.showGroundCardTooltip(card, container);
+    });
+    container.on("pointerout", () => {
+      container.setAlpha(1);
+      this.hideGroundCardTooltip();
+    });
+    container.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      // Left-click grabs the card (right-click stays a cast).
+      if (pointer.rightButtonDown()) return;
+      if (this.dragCard) return;
+      this.beginGroundCardGrab(cardId, card, container);
+    });
+    this.groundCardEntities.set(cardId, container);
+  }
 
-  // ---- Pulse card (slot 2) ----
-  private pulseCard!: Phaser.GameObjects.Image;
-  private localPulseLevel: number = 1;
-  private pulseCooldownFill!: Phaser.GameObjects.Rectangle;
-  private pulseCooldownFillBaseH: number = 0;
-  private dashCard!: Phaser.GameObjects.Image;
-  private dashCooldownFill!: Phaser.GameObjects.Rectangle;
-  private dashCooldownFillBaseH: number = 0;
+  /**
+   * Hover tooltip above a ground card: name, description and the card
+   * sprite on the right of the box.
+   */
+  private showGroundCardTooltip(card: any, entity: Phaser.GameObjects.Container): void {
+    this.hideGroundCardTooltip();
+    const skill = card.skill as SkillId;
+    const def = SKILL_CARDS[skill];
+    const level = card.level ?? 1;
+    const title = def ? def.title : skill;
+    const description = def ? def.description : "";
+    const W = 220;
+    const rarity = (card.card?.rarity as string) ?? "common";
+    const rarityColor = RARITY_COLORS[rarity] ?? RARITY_COLORS.common;
+    const rarityHex = "#" + rarityColor.toString(16).padStart(6, "0");
+    const modIds: string[] = (card.card?.modIds as string[]) ?? [];
+    const modLines = modIds.map(
+      (m) => "* " + (MOD_NAMES[m] ?? m),
+    );
+    // Height grows with mod count (base 116 + 14 per mod, capped).
+    const H = 116 + Math.min(4, modLines.length) * 14;
+    const bg = this.add
+      .rectangle(0, 0, W, H, 0x000000, 0.88)
+      .setStrokeStyle(2, rarityColor, 0.95);
+    const nameText = this.add
+      .text(-W / 2 + 10, -H / 2 + 10, title + "  L" + level, {
+        color: rarityHex,
+        fontSize: "14px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 2,
+      })
+      .setOrigin(0, 0);
+    const rarityText = this.add
+      .text(-W / 2 + 10, -H / 2 + 26, RARITY_NAMES[rarity] ?? "Common", {
+        color: rarityHex,
+        fontSize: "10px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 2,
+      })
+      .setOrigin(0, 0);
+    const descText = this.add
+      .text(-W / 2 + 10, -H / 2 + 42, description, {
+        color: "#dddddd",
+        fontSize: "11px",
+        fontFamily: "monospace",
+        wordWrap: { width: W - 74 },
+        align: "left",
+      })
+      .setOrigin(0, 0);
+    const modsText = this.add
+      .text(-W / 2 + 10, -H / 2 + 58, modLines.join("\n"), {
+        color: "#88ff88",
+        fontSize: "11px",
+        fontFamily: "monospace",
+        wordWrap: { width: W - 74 },
+        align: "left",
+      })
+      .setOrigin(0, 0);
+    const sprite = this.add
+      .image(W / 2 - 32, 0, "card_sheet", cardFrameForLevel(skill, level))
+      .setDisplaySize(48, 64);
+    this.groundCardTooltip = this.add
+      .container(entity.x, entity.y - H / 2 - 28, [
+        bg,
+        nameText,
+        rarityText,
+        descText,
+        modsText,
+        sprite,
+      ])
+      .setDepth(100);
+  }
 
-  // ---- Vortex card (slot 5) ----
-  private vortexCard!: Phaser.GameObjects.Image;
-  private localVortexLevel: number = 1;
-  private vortexCooldownFill!: Phaser.GameObjects.Rectangle;
-  private vortexCooldownFillBaseH: number = 0;
+  /** Hide (destroy) the ground card hover tooltip. */
+  private hideGroundCardTooltip(): void {
+    if (this.groundCardTooltip) {
+      this.groundCardTooltip.destroy();
+      this.groundCardTooltip = null;
+    }
+  }
+
+  /**
+   * Grab a ground card: the box disappears from the map and follows the
+   * cursor as a held card. Releasing on a HUD slot equips it (server
+   * grants the skill); releasing on the map re-drops it at that spot.
+   */
+  private beginGroundCardGrab(cardId: string, card: any, entity: Phaser.GameObjects.Container): void {
+    if (!this.room || this.dragCard) return;
+    this.hideGroundCardTooltip();
+    // Build a held-card visual from the ground box.
+    const skill = card.skill as SkillId;
+    const slot0 = this.cardSlots[0];
+    const img = this.add
+      .image(0, 0, "card_sheet", cardFrameForLevel(skill, card.level ?? 1))
+      .setDisplaySize(slot0.width, slot0.height);
+    const cdFill = this.add
+      .rectangle(0, 0, slot0.width, slot0.height, CARD_CD_COLORS[skill] ?? 0xffffff, 0.45)
+      .setOrigin(0, 0)
+      .setVisible(false);
+    cdFill.setData("baseH", slot0.height);
+    const container = this.add
+      .container(this.input.activePointer.x, this.input.activePointer.y, [img, cdFill])
+      .setScrollFactor(0)
+      .setDepth(2000);
+    container.setScale(1.08);
+    const obj: HudCardObj = {
+      skill,
+      container,
+      img,
+      cdFill,
+      targetSlot: -1,
+    };
+    // Take the card off the ground visually (server state untouched).
+    entity.setVisible(false);
+    this.groundGrab = { cardId, card, entity, obj };
+    this.updatePlusHints();
+  }
+
+  /** Held ground card drag; ends by equipping to a slot or re-dropping. */
+  private updateGroundGrab(pointer: Phaser.Input.Pointer): void {
+    const g = this.groundGrab;
+    if (!g) return;
+    g.obj.container.setPosition(pointer.x, pointer.y);
+  }
+
+  /**
+   * Finish a ground grab:
+   *  - over a HUD slot  -> pickup (equip): server grants the skill and
+   *    the card is placed in that slot.
+   *  - anywhere else    -> re-drop the card at the cursor's world pos.
+   *  - too far / dead   -> card snaps back to its ground position.
+   */
+  private endGroundGrab(pointer: Phaser.Input.Pointer): void {
+    const g = this.groundGrab;
+    if (!g) return;
+    this.groundGrab = null;
+    const slotIdx = this.slotAtPointer(pointer);
+    if (slotIdx >= 0) {
+      // EQUIP: ask the server for the card, place on the HUD after confirm.
+      // Works over ANY HUD slot. If that slot holds a different skill,
+      // tell the server to drop that card (swap).
+      const occupying = this.slotLayout[slotIdx];
+      const wantSkill = (g.card.card?.skill as SkillId) ?? g.card.skill;
+      const replaceSkill =
+        occupying && occupying !== wantSkill ? occupying : undefined;
+      this.pendingPickups.add(g.cardId);
+      this.pendingPickupSlots.set(g.cardId, slotIdx);
+      this.room?.send(11, { cardId: g.cardId, replaceSkill });
+      g.obj.container.destroy();
+      g.entity.setVisible(true);
+    } else {
+      // RE-DROP at the cursor's world position (server validates reach).
+      this.room?.send(12, {
+        cardId: g.cardId,
+        x: pointer.worldX,
+        y: pointer.worldY,
+      });
+      g.obj.container.destroy();
+      g.entity.setVisible(true);
+    }
+    this.updatePlusHints();
+  }
+
+  // ============================================================
+  // SLOT-BASED CARD SYSTEM
+  // ============================================================
+  /** Skill ids indexed by slot. null = empty slot. */
+  private slotLayout: (SkillId | null)[] = [];
+  /** Live card objects, one per skill currently on the HUD. */
+  private hudCards: Map<SkillId, HudCardObj> = new Map();
+  /** Input binding per slot (never changes): LMB, RMB, SPACE, 1, 2. */
+  private static readonly SLOT_INPUTS: string[] = [
+    "LMB",
+    "RMB",
+    "SPC",
+    "1",
+    "2",
+  ];
+  /** Skill level cache (mirrors synced skillLevels for card art). */
+  private skillLevelCache: Partial<Record<SkillId, number>> = {};
+  /** Input hint labels under each slot. */
+  private slotInputLabels: Phaser.GameObjects.Text[] = [];
+  /** "+" hints shown on empty slots while dragging. */
+  private slotPlusHints: Phaser.GameObjects.Text[] = [];
+  /** Tentative layout while dragging (others only; hole = dragged card). */
+  private liveLayout: (SkillId | null)[] | null = null;
+  /** Drag state. Null while no card is grabbed. */
+  private dragCard: {
+    obj: HudCardObj;
+    fromSlot: number;
+    /** Current insert position the other cards are making way for. */
+    hoverSlot: number;
+  } | null = null;
+  /** Default layout used on scene start / death reset. */
+  private static readonly DEFAULT_LAYOUT: SkillId[] = [
+    "shock",
+    "pulse",
+    "dash",
+    "heal",
+    "vortex",
+  ];
 
   // ---- Skill-on-cooldown toast (shown above the HUD in light grey) ----
   private cooldownToast!: Phaser.GameObjects.Text;
@@ -198,6 +486,30 @@ export class GameScene extends Phaser.Scene {
   private spawnCountdownToast: Phaser.GameObjects.Text | null = null;
   /** Last rendered countdown second (avoids re-setting the text every frame). */
   private spawnCountdownLastSec: number = -1;
+  /** Enemy id of this map's ELITE (null while none has been seen). */
+  private eliteEnemyId: string | null = null;
+  /** Last known state.eliteAlive (edge detection for announce toasts). */
+  private lastEliteAlive: boolean = false;
+  /** Toast shown while standing on a still-locked exit tile. */
+  private exitLockedToast: Phaser.GameObjects.Text | null = null;
+  /** Ground card entities by synced groundCards key. */
+  private groundCardEntities: Map<
+    string,
+    Phaser.GameObjects.Container
+  > = new Map();
+  /** Hover tooltip for ground cards (name / description / sprite). */
+  private groundCardTooltip: Phaser.GameObjects.Container | null = null;
+  /** Ground card ids we asked to pick up (awaiting server confirm). */
+  private pendingPickups: Set<string> = new Set();
+  /** Slot index a pending pickup should land in (cardId -> slot). */
+  private pendingPickupSlots: Map<string, number> = new Map();
+  /** Ground card currently grabbed by the cursor. */
+  private groundGrab: {
+    cardId: string;
+    card: any;
+    entity: Phaser.GameObjects.Container;
+    obj: HudCardObj;
+  } | null = null;
   /** Full unscaled width of the XP bar (px). */
   private xpBarFullWidth: number = 0;
   /** Screen-space Y of the XP bar (px). */
@@ -382,30 +694,19 @@ export class GameScene extends Phaser.Scene {
     this.shockAnimCreated = false;
     this.lastKnownXp = -1;
     this.lastKnownLevel = -1;
-    this.localBolterLevel = 1;
-    this.localShockLevel = 1;
-    this.localSlamLevel = 1;
-    this.localDashLevel = 1;
-    this.localClawLevel = 1;
-    this.localHealLevel = 1;
-    this.localPulseLevel = 1;
-    this.localVortexLevel = 1;
     // Null out game object references so create* methods rebuild them
-    this.bolterCard = null as any;
-    this.bolterCooldownFill = null as any;
-    this.bolterTooltip = null as any;
-    this.shockCard = null as any;
-    this.shockCooldownFill = null as any;
-    this.clawCard = null as any;
-    this.clawCooldownFill = null as any;
-    this.healCard = null as any;
-    this.healCooldownFill = null as any;
-    this.pulseCard = null as any;
-    this.pulseCooldownFill = null as any;
-    this.dashCard = null as any;
-    this.dashCooldownFill = null as any;
-    this.vortexCard = null as any;
-    this.vortexCooldownFill = null as any;
+    this.slotLayout = [];
+    this.hudCards = new Map();
+    this.skillLevelCache = {};
+    this.slotInputLabels = [];
+    this.slotPlusHints = [];
+    this.liveLayout = null;
+    this.dragCard = null;
+    this.groundCardEntities = new Map();
+    this.groundCardTooltip = null;
+    this.pendingPickups = new Set();
+    this.pendingPickupSlots = new Map();
+    this.groundGrab = null;
     this.hudImage = null as any;
     this.hpFill = null as any;
     this.hpText = null as any;
@@ -420,6 +721,9 @@ export class GameScene extends Phaser.Scene {
     this.levelUpToast = null as any;
     this.spawnCountdownToast = null;
     this.spawnCountdownLastSec = -1;
+    this.eliteEnemyId = null;
+    this.lastEliteAlive = false;
+    this.exitLockedToast = null;
     this.mapInfoButton = null as any;
     this.mapInfoTooltip = null as any;
     this.mapInfoTooltipBg = null as any;
@@ -456,33 +760,32 @@ export class GameScene extends Phaser.Scene {
     });
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       if (!this.currentPlayer || !this.room) return;
+      // While a card is grabbed, clicks only manage the drag.
+      if (this.dragCard) return;
+      // Left-click over a HUD card grabs the card instead of casting.
+      if (this.pointerOverHudCard(pointer)) return;
       const wx = pointer.worldX;
       const wy = pointer.worldY;
       const angle = Math.atan2(
         wy - this.currentPlayer.y,
         wx - this.currentPlayer.x,
       );
-      if (pointer.rightButtonDown()) {
-        // Right-click: pulse skill.
-        if (!this.isSkillReady("pulse")) {
-          this.showCooldownToast();
-          return;
-        }
-        this.room.send(1, { skill: "pulse", angle });
-        return;
-      }
-      // Left-click: bolter skill.
-      if (!this.isSkillReady("bolter")) {
-        this.showCooldownToast();
-        return;
-      }
-      // Left-click now fires shock (slot 0)
-      if (!this.isSkillReady("shock")) {
-        this.showCooldownToast();
-        return;
-      }
-      this.room.send(1, { skill: "shock", angle });
+      // Slots 0/1 are mouse buttons (fixed rule).
+      const slotIdx = pointer.rightButtonDown() ? 1 : 0;
+      this.castSlot(slotIdx, angle);
     });
+
+    // Card drag release (mouse up anywhere).
+    this.input.on("pointerup", (pointer: Phaser.Input.Pointer) => {
+      if (this.dragCard) this.endCardDrag(pointer);
+      else if (this.groundGrab) this.endGroundGrab(pointer);
+    });
+    this.input.on("pointerupoutside", (pointer: Phaser.Input.Pointer) => {
+      if (this.dragCard) this.endCardDrag(pointer);
+      else if (this.groundGrab) this.endGroundGrab(pointer);
+    });
+    // Stop the browser context menu over HUD cards (right-click grabs).
+    this.input.mouse?.disableContextMenu();
 
     // ---- "0" key levels up the player (debug — test enemy scaling) ----
     this.input.keyboard
@@ -492,41 +795,25 @@ export class GameScene extends Phaser.Scene {
         this.room.send(9, {});
       });
 
-    // ---- Space key casts dash skill (slot 3) ----
+    // ---- Space key casts whatever is in slot 2 ----
     this.input.keyboard
       ?.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)
       ?.on("down", () => {
-        if (!this.currentPlayer || !this.room) return;
-        if (!this.isSkillReady("dash")) {
-          this.showCooldownToast();
-          return;
-        }
-        const angle = this.aimAngle;
-        this.room.send(1, { skill: "dash", angle });
+        this.castSlot(2, this.aimAngle);
       });
 
-    // ---- "1" key casts heal skill ----
+    // ---- "1" key casts whatever is in slot 3 ----
     this.input.keyboard
       ?.addKey(Phaser.Input.Keyboard.KeyCodes.ONE)
       ?.on("down", () => {
-        if (!this.currentPlayer || !this.room) return;
-        if (!this.isSkillReady("heal")) {
-          this.showCooldownToast();
-          return;
-        }
-        this.room.send(1, { skill: "heal", angle: this.aimAngle });
+        this.castSlot(3, this.aimAngle);
       });
 
-    // ---- "2" key casts vortex skill (5th card slot) ----
+    // ---- "2" key casts whatever is in slot 4 ----
     this.input.keyboard
       ?.addKey(Phaser.Input.Keyboard.KeyCodes.TWO)
       ?.on("down", () => {
-        if (!this.currentPlayer || !this.room) return;
-        if (!this.isSkillReady("vortex")) {
-          this.showCooldownToast();
-          return;
-        }
-        this.room.send(1, { skill: "vortex", angle: this.aimAngle });
+        this.castSlot(4, this.aimAngle);
       });
 
     // ---- "3" key casts claw skill ----
@@ -596,13 +883,8 @@ export class GameScene extends Phaser.Scene {
     this.createMapInfoButton();
     // ---- Character stats screen (press C) ----
     this.createCharacterScreen();
-    // Place the skill cards in slots 1-3 (initial level 1).
-    this.refreshBolterCard();
-    this.refreshPulseCard();
-    this.refreshDashCard();
-    this.refreshClawCard();
-    this.refreshHealCard();
-    this.refreshVortexCard();
+    // Slot-based card HUD (5 slots, default layout).
+    this.initSlotCards();
 
     // ---- F3 to toggle hitbox overlay ----
     this.hitboxToggleKey = this.input.keyboard.addKey(
@@ -688,16 +970,14 @@ export class GameScene extends Phaser.Scene {
             this.updateStatsHUD(player);
             // Refresh the XP bar (detects XP gain / level-up)
             this.updateXpBar(player);
-            // Sync shock level for slot 0 (replaced bolter)
-            const lvl =
-              player.skillLevels && player.skillLevels.get
-                ? (player.skillLevels.get("shock") ?? 1)
-                : 1;
-            if (lvl !== this.localShockLevel) {
-              this.localShockLevel = lvl;
-              this.refreshBolterCard();
-              this.showUpgradeToast(lvl);
-            }
+            // Sync skill levels into the slot-card cache.
+            this.syncSkillLevel(player, "shock");
+            this.syncSkillLevel(player, "claw");
+            this.syncSkillLevel(player, "heal");
+            this.syncSkillLevel(player, "pulse");
+            this.syncSkillLevel(player, "slam");
+            this.syncSkillLevel(player, "dash");
+            this.syncSkillLevel(player, "vortex");
             // Track shock cooldown for slot 0
             this.currentPlayer.setData(
               "shockCdEndsAt",
@@ -758,56 +1038,7 @@ export class GameScene extends Phaser.Scene {
                 );
               }
             }
-            // Sync claw level + card art
-            const clawLvl =
-              player.skillLevels && player.skillLevels.get
-                ? (player.skillLevels.get("claw") ?? 1)
-                : 1;
-            if (clawLvl !== this.localClawLevel) {
-              this.localClawLevel = clawLvl;
-              this.refreshClawCard();
-            }
-            // Sync heal level + card art
-            const healLvl =
-              player.skillLevels && player.skillLevels.get
-                ? (player.skillLevels.get("heal") ?? 1)
-                : 1;
-            if (healLvl !== this.localHealLevel) {
-              this.localHealLevel = healLvl;
-              this.refreshHealCard();
-            }
-            // Sync pulse level + card art
-            const pulseLvl =
-              player.skillLevels && player.skillLevels.get
-                ? (player.skillLevels.get("pulse") ?? 1)
-                : 1;
-            if (pulseLvl !== this.localPulseLevel) {
-              this.localPulseLevel = pulseLvl;
-              this.refreshPulseCard();
-            }
-            // Sync slam level for slot 4 (replaced shock)
-            const slamLvl =
-              player.skillLevels && player.skillLevels.get
-                ? (player.skillLevels.get("slam") ?? 1)
-                : 1;
-            if (slamLvl !== this.localSlamLevel) {
-              this.localSlamLevel = slamLvl;
-              this.refreshDashCard();
-            }
-            const dashLvl = player.skillLevels.get("dash") ?? 0;
-            if (dashLvl !== this.localDashLevel) {
-              this.localDashLevel = dashLvl;
-              this.refreshDashCard();
-            }
-            // Sync vortex level + card art
-            const vortexLvl =
-              player.skillLevels && player.skillLevels.get
-                ? (player.skillLevels.get("vortex") ?? 1)
-                : 1;
-            if (vortexLvl !== this.localVortexLevel) {
-              this.localVortexLevel = vortexLvl;
-              this.refreshVortexCard();
-            }
+            (void 0);
             // Track vortex cooldown for slot 5
             this.currentPlayer.setData(
               "vortexCdEndsAt",
@@ -864,41 +1095,70 @@ export class GameScene extends Phaser.Scene {
           : isOrck
             ? "orck_idle"
             : "tri_idle";
+      const isElite = !!enemy.isElite;
       const displaySize = isTau ? 88 : isMech ? 88 : isOrck ? 80 : 64;
+      const eliteSize = Math.round(displaySize * 1.6);
       const sprite = this.add
         .sprite(enemy.x, enemy.y, textureKey, 0)
-        .setDisplaySize(displaySize, displaySize)
-        .setDepth(3);
+        .setDisplaySize(
+          isElite ? eliteSize : displaySize,
+          isElite ? eliteSize : displaySize,
+        )
+        .setDepth(isElite ? 8 : 3);
       sprite.anims.play(idleAnim);
       this.enemyEntities[enemyId] = sprite;
+      sprite.setData("isElite", isElite);
+      sprite.setData("title", enemy.title ?? "");
+      if (isElite) this.eliteEnemyId = enemyId;
 
       // ---- Enemy HP bar (bg + fill) floating above the sprite ----
-      const hpW = 38;
-      const hpH = 5;
+      const hpW = isElite ? 64 : 38;
+      const hpH = isElite ? 7 : 5;
+      const barY = isElite ? -58 : -42;
       const hpBg = this.add
-        .rectangle(0, -42, hpW, hpH, 0x000000, 0.7)
-        .setStrokeStyle(1, 0x000000, 0.9);
+        .rectangle(0, barY, hpW, hpH, 0x000000, 0.7)
+        .setStrokeStyle(1, isElite ? 0xffd700 : 0x000000, 0.9);
       const hpFill = this.add
-        .rectangle(-hpW / 2, -42, hpW, hpH, 0xff3333)
+        .rectangle(-hpW / 2, barY, hpW, hpH, isElite ? 0xff9900 : 0xff3333)
         .setOrigin(0, 0.5);
       // White translucent shield bar overlaid on top of the HP bar.
       // Visible only when the enemy has a shield (maxShield > 0).
       const shieldFill = this.add
-        .rectangle(-hpW / 2, -42, hpW, hpH, 0xffffff, 0.6)
+        .rectangle(-hpW / 2, barY, hpW, hpH, 0xffffff, 0.6)
         .setOrigin(0, 0.5)
         .setVisible(false);
       // Enemy level text shown in front of (left of) the HP bar
       const lvText = this.add
-        .text(-hpW / 2 - 4, -42, String(enemy.level ?? 1), {
-          color: "#ffffff",
+        .text(-hpW / 2 - 4, barY, String(enemy.level ?? 1), {
+          color: isElite ? "#ffd700" : "#ffffff",
           fontSize: "9px",
           fontFamily: "monospace",
           stroke: "#000000",
           strokeThickness: 2,
         })
         .setOrigin(1, 0.5);
+      const barChildren: Phaser.GameObjects.GameObject[] = [
+        hpBg,
+        hpFill,
+        shieldFill,
+        lvText,
+      ];
+      if (isElite) {
+        barChildren.push(
+          this.add
+            .text(0, barY - 11, "ELITE", {
+              color: "#ffd700",
+              fontSize: "10px",
+              fontFamily: "monospace",
+              fontStyle: "bold",
+              stroke: "#000000",
+              strokeThickness: 3,
+            })
+            .setOrigin(0.5),
+        );
+      }
       const hpBar = this.add
-        .container(enemy.x, enemy.y, [hpBg, hpFill, shieldFill, lvText])
+        .container(enemy.x, enemy.y, barChildren)
         .setDepth(5);
       this.enemyHpBars[enemyId] = hpBar;
 
@@ -967,6 +1227,9 @@ export class GameScene extends Phaser.Scene {
       const dx = enemy?.x ?? this.enemyLastPos[enemyId]?.x ?? 0;
       const dy = enemy?.y ?? this.enemyLastPos[enemyId]?.y ?? 0;
       this.spawnBloodSplat(dx, dy);
+
+      // Elite cleanup.
+      if (enemyId === this.eliteEnemyId) this.eliteEnemyId = null;
 
       const entity = this.enemyEntities[enemyId];
       if (entity) {
@@ -1294,6 +1557,24 @@ export class GameScene extends Phaser.Scene {
     // ============================================================
     // SLAM STATE LISTENERS
     // ============================================================
+    callbacks.onAdd("groundCards", (card: any, cardId: string) => {
+      this.createGroundCardEntity(card, cardId);
+    });
+
+    callbacks.onRemove("groundCards", (card: any, cardId: string) => {
+      const entity = this.groundCardEntities.get(cardId);
+      if (entity) entity.destroy();
+      this.groundCardEntities.delete(cardId);
+      this.hideGroundCardTooltip();
+      // Own pending pickup confirmed -> place the card on the HUD.
+      if (this.pendingPickups.has(cardId)) {
+        this.pendingPickups.delete(cardId);
+        const wantSlot = this.pendingPickupSlots.get(cardId) ?? -1;
+        this.pendingPickupSlots.delete(cardId);
+        this.addPickedUpCardToHud(card.skill, card.level ?? 1, wantSlot);
+      }
+    });
+
     callbacks.onAdd("slams", (slam: any, slamId: string) => {
       const isUpgraded = slam.level >= 6;
       // Scale slam sprite with hitbox size: base scale 1.5, +10% per level above 2
@@ -1891,74 +2172,437 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ============================================================
-  // SKILL CARD (BOLTER in slot 1) + UPGRADE TOAST
+  // SLOT-BASED CARD SYSTEM
   // ============================================================
 
-  /** Place / refresh the bolter card art in HUD slot 1 (no level text on card). */
-  private refreshBolterCard(): void {
-    if (!this.cardSlots || this.cardSlots.length === 0) return;
-    const slot = this.cardSlots[0];
-    // Slot 0 now shows shock card (replaced bolter)
-    const frame = cardFrameForLevel("shock", this.localShockLevel);
+  /** Skill currently placed in slot i (null when empty). */
+  private slotSkill(i: number): SkillId | null {
+    return this.slotLayout[i] ?? null;
+  }
 
-    if (this.bolterCard) {
-      this.bolterCard.setFrame(frame);
-    } else {
-      this.bolterCard = this.add
-        .image(slot.x, slot.y, "card_sheet", frame)
-        .setOrigin(0, 0)
-        .setDisplaySize(slot.width, slot.height)
-        .setScrollFactor(0)
-        .setDepth(102)
-        .setInteractive({ useHandCursor: true });
+  /** Cast the skill currently in slot i. */
+  private castSlot(i: number, angle: number): void {
+    if (!this.currentPlayer || !this.room) return;
+    const skill = this.slotSkill(i);
+    if (!skill) return;
+    if (!this.isSkillReady(skill)) {
+      this.showCooldownToast();
+      return;
+    }
+    this.room.send(1, { skill, angle });
+  }
 
-      // Cooldown fill overlay (blue, grows bottom-up). Hidden when ready.
-      this.bolterCooldownFill = this.add
-        .rectangle(slot.x, slot.y, slot.width, slot.height, 0x4da6ff, 0.45)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setDepth(103)
-        .setVisible(false);
-      this.bolterCooldownFillBaseH = slot.height;
-
-      // Hover tooltip.
-      this.bolterCard.on("pointerover", () => this.showBolterTooltip(slot));
-      this.bolterCard.on("pointerout", () => this.hideBolterTooltip());
+  /**
+   * Mirror one skill's synced level into the cache and refresh its card
+   * art when it changes (and is on the HUD).
+   */
+  private syncSkillLevel(player: any, skill: SkillId): void {
+    const lvl =
+      player.skillLevels && player.skillLevels.get
+        ? (player.skillLevels.get(skill) ?? 0)
+        : 0;
+    if (lvl !== this.skillLevelCache[skill]) {
+      this.skillLevelCache[skill] = lvl;
+      const card = this.hudCards.get(skill);
+      if (card && lvl > 0) {
+        card.img.setFrame(cardFrameForLevel(skill, lvl));
+      }
     }
   }
 
-  /** Place / refresh the dash card art in HUD slot 3. */
-  private refreshDashCard(): void {
-    if (!this.cardSlots || this.cardSlots.length < 3) return;
-    const slot = this.cardSlots[2];
-    const frame = cardFrameForLevel("dash", this.localDashLevel);
-    if (this.dashCard) {
-      this.dashCard.setFrame(frame);
-    } else {
-      this.dashCard = this.add
-        .image(slot.x, slot.y, "card_sheet", frame)
+  /** Screen-space center of slot i. */
+  private slotCenter(i: number): { x: number; y: number } {
+    const s = this.cardSlots[i];
+    return { x: s.x + s.width / 2, y: s.y + s.height / 2 };
+  }
+
+  /** Build the initial slot layout + card objects (called from create()). */
+  private initSlotCards(): void {
+    if (!this.cardSlots || this.cardSlots.length === 0) return;
+    this.slotLayout = Array(5).fill(null);
+    // Default layout: shock, pulse, dash, heal, vortex.
+    const defaults = GameScene.DEFAULT_LAYOUT;
+    for (let i = 0; i < Math.min(5, defaults.length); i++) {
+      this.slotLayout[i] = defaults[i];
+    }
+    this.createSlotInputIcons();
+    this.createSlotPlusHints();
+    this.rebuildAllCards();
+  }
+
+  /** Reset all slots to the default card arrangement (used on death). */
+  private resetSlotLayoutToDefault(): void {
+    this.commitLayout(GameScene.DEFAULT_LAYOUT.slice());
+    this.hideBolterTooltip();
+  }
+
+  /** Faint "+" shown on empty slots while dragging cards around. */
+  private createSlotPlusHints(): void {
+    this.slotPlusHints = [];
+    for (let i = 0; i < this.cardSlots.length; i++) {
+      const c = this.slotCenter(i);
+      const plus = this.add
+        .text(c.x, c.y, "+", {
+          color: "#ffffff",
+          fontSize: "22px",
+          fontFamily: "monospace",
+          fontStyle: "bold",
+          stroke: "#000000",
+          strokeThickness: 3,
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(101)
+        .setAlpha(0.55)
+        .setVisible(false);
+      this.slotPlusHints.push(plus);
+    }
+  }
+
+  /** Static "input hint" text under each slot (LMB/RMB/SPC/1/2). */
+  private createSlotInputIcons(): void {
+    for (let i = 0; i < this.cardSlots.length; i++) {
+      const c = this.slotCenter(i);
+      const label = this.add
+        .text(c.x, c.y + this.cardSlots[i].height / 2 + 10, GameScene.SLOT_INPUTS[i], {
+          color: "#dddddd",
+          fontSize: "11px",
+          fontFamily: "monospace",
+          fontStyle: "bold",
+          stroke: "#000000",
+          strokeThickness: 3,
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(104);
+      // No per-scene tracking needed; scene restart destroys them.
+      (this.slotInputLabels ??= []).push(label);
+    }
+  }
+
+  /** Destroy + recreate every card object from slotLayout. */
+  private rebuildAllCards(): void {
+    for (const card of this.hudCards.values()) card.container.destroy();
+    this.hudCards.clear();
+    for (let i = 0; i < this.slotLayout.length; i++) {
+      const skill = this.slotLayout[i];
+      if (!skill) continue;
+      const slot = this.cardSlots[i];
+      const c = this.slotCenter(i);
+      const frame = cardFrameForLevel(skill, this.skillLevelCache[skill] ?? 1);
+      const img = this.add
+        .image(0, 0, "card_sheet", frame)
+        .setDisplaySize(slot.width, slot.height);
+      const cdFill = this.add
+        .rectangle(0, 0, slot.width, slot.height, CARD_CD_COLORS[skill] ?? 0xffffff, 0.45)
         .setOrigin(0, 0)
-        .setDisplaySize(slot.width, slot.height)
+        .setVisible(false);
+      cdFill.setData("baseH", slot.height);
+      cdFill.setData("baseW", slot.width);
+      const container = this.add
+        .container(c.x, c.y, [img, cdFill])
         .setScrollFactor(0)
         .setDepth(102);
-
-      // Cooldown fill overlay (cyan, grows bottom-up).
-      this.dashCooldownFill = this.add
-        .rectangle(slot.x, slot.y, slot.width, slot.height, 0x66ccff, 0.45)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setDepth(103)
-        .setVisible(false);
-      this.dashCooldownFillBaseH = slot.height;
+      const obj: HudCardObj = { skill, container, img, cdFill, targetSlot: i };
+      container.setSize(slot.width, slot.height);
+      const PAD = 12; // generous grab padding (cards sit 25px apart)
+      container.setInteractive(
+        new Phaser.Geom.Rectangle(
+          -slot.width / 2 - PAD,
+          -slot.height / 2 - PAD,
+          slot.width + PAD * 2,
+          slot.height + PAD * 2,
+        ),
+        Phaser.Geom.Rectangle.Contains,
+      );
+      this.attachCardHandlers(obj);
+      this.hudCards.set(skill, obj);
     }
   }
 
-  /** Place / refresh the claw card art in HUD slot 5. */
-  private refreshClawCard(): void {
-    // Claw no longer owns a card slot (vortex is in slot 5). No-op;
-    // claw is still castable via the "3" key.
-    if (!this.clawCard) return;
+  /** Right-click grab + hover tooltip handling for one card. */
+  private attachCardHandlers(obj: HudCardObj): void {
+    obj.container.on(
+      "pointerdown",
+      (pointer: Phaser.Input.Pointer) => {
+        // Only LEFT button grabs a card (right stays the cast button).
+        if (pointer.rightButtonDown()) return;
+        this.beginCardDrag(obj);
+      },
+    );
+    obj.container.on("pointerover", () => {
+      const i = this.slotLayout.indexOf(obj.skill);
+      if (i >= 0 && !this.dragCard) this.showBolterTooltip(this.cardSlots[i]);
+    });
+    obj.container.on("pointerout", () => this.hideBolterTooltip());
   }
+
+  /** Start dragging a card out of its slot. */
+  private beginCardDrag(obj: HudCardObj): void {
+    if (this.dragCard) return;
+    const fromSlot = this.slotLayout.indexOf(obj.skill);
+    if (fromSlot < 0) return;
+    this.dragCard = { obj, fromSlot, hoverSlot: fromSlot };
+    this.slotLayout[fromSlot] = null;
+    this.liveLayout = [...this.slotLayout];
+    obj.targetSlot = -1;
+    obj.container.setDepth(2000);
+    obj.container.setScale(1.08);
+    this.updatePlusHints();
+  }
+
+  /** Which slot index the pointer is over (-1 when outside the HUD row). */
+  private slotAtPointer(pointer: Phaser.Input.Pointer): number {
+    for (let i = 0; i < this.cardSlots.length; i++) {
+      const s = this.cardSlots[i];
+      if (
+        pointer.x >= s.x &&
+        pointer.x <= s.x + s.width &&
+        pointer.y >= s.y - 20 &&
+        pointer.y <= s.y + s.height + 30
+      ) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Live "make way" reordering: while dragging, cards animate toward their
+   * target slot each time the hovered insert position changes.
+   */
+  private updateCardDrag(pointer: Phaser.Input.Pointer): void {
+    if (!this.dragCard) return;
+    const d = this.dragCard;
+    // Card is centered on the cursor while dragging.
+    d.obj.container.setPosition(pointer.x, pointer.y);
+    const over = this.slotAtPointer(pointer);
+    if (over !== d.hoverSlot) {
+      d.hoverSlot = over;
+      this.applyLiveLayout(over, true);
+      this.updatePlusHints();
+    }
+  }
+
+  /**
+   * Compute + apply the tentative layout for the dragged card at insert
+   * slot `insert`. Non-dragged cards slide into their new slots.
+   */
+  private applyLiveLayout(insert: number, animate: boolean): void {
+    if (!this.dragCard) return;
+    const d = this.dragCard;
+    // Others: order preserved, shifted around the insert position.
+    const others = this.slotLayout.filter((s): s is SkillId => !!s);
+    const layout: (SkillId | null)[] = Array(5).fill(null);
+    let oi = 0;
+    for (let i = 0; i < 5; i++) {
+      if (i === insert && insert >= 0) continue; // hole for the dragged card
+      layout[i] = others[oi++] ?? null;
+    }
+    if (insert >= 0) layout[insert] = null; // remains the hole
+    // Apply positions (layout slots -> cards), animating.
+    for (let i = 0; i < 5; i++) {
+      const skill = layout[i];
+      if (!skill) continue;
+      const card = this.hudCards.get(skill);
+      if (!card) continue;
+      this.tweenCardTo(card, i, animate);
+    }
+    // Remember where cards are heading (for drop commit).
+    this.liveLayout = layout;
+  }
+
+  /** Tween (or snap) a card container to slot i's screen position. */
+  private tweenCardTo(card: HudCardObj, i: number, animate: boolean): void {
+    const c = this.slotCenter(i);
+    card.targetSlot = i;
+    this.tweens.killTweensOf(card.container);
+    if (animate) {
+      this.tweens.add({
+        targets: card.container,
+        x: c.x,
+        y: c.y,
+        duration: 140,
+        ease: "Quad.easeOut",
+      });
+    } else {
+      card.container.setPosition(c.x, c.y);
+    }
+  }
+
+  /** First empty slot in slotLayout, or -1. */
+  private firstEmptySlot(): number {
+    for (let i = 0; i < this.slotLayout.length; i++) {
+      if (!this.slotLayout[i]) return i;
+    }
+    return -1;
+  }
+
+  /** Finish the drag: place, drop to ground, or snap back. */
+  private endCardDrag(pointer: Phaser.Input.Pointer): void {
+    if (!this.dragCard) return;
+    const d = this.dragCard;
+    const dropSlot = this.slotAtPointer(pointer);
+    // Release OUTSIDE the HUD row: drop the card to the ground.
+    if (dropSlot < 0) {
+      this.dropCardToGround(d.obj.skill, pointer);
+      d.obj.container.destroy();
+      this.hudCards.delete(d.obj.skill);
+      this.dragCard = null;
+      this.liveLayout = null;
+      this.updatePlusHints();
+      this.hideBolterTooltip();
+      return;
+    }
+    // Commit the live layout computed during the drag.
+    const layout = this.liveLayout ? [...this.liveLayout] : null;
+    let finalLayout: (SkillId | null)[];
+    if (layout && dropSlot >= 0) {
+      finalLayout = layout;
+      finalLayout[dropSlot] = d.obj.skill;
+    } else {
+      // Snap back: restore the pre-drag arrangement.
+      finalLayout = [...this.slotLayout];
+      finalLayout[d.fromSlot] = d.obj.skill;
+    }
+    this.commitLayout(finalLayout);
+    d.obj.container.setScale(1);
+    d.obj.container.setDepth(102);
+    this.dragCard = null;
+    this.liveLayout = null;
+    this.updatePlusHints();
+  }
+
+  /**
+   * Send the dropped card to the server so it appears on the map ground
+   * for everyone. The card leaves this player's HUD (slotLayout keeps
+   * the now-empty slot).
+   */
+  private dropCardToGround(skill: SkillId, pointer: Phaser.Input.Pointer): void {
+    if (!this.room) return;
+    const level = this.skillLevelCache[skill] ?? 1;
+    this.room.send(10, {
+      skill,
+      level,
+      x: pointer.worldX,
+      y: pointer.worldY,
+    });
+  }
+
+  /**
+   * Add a picked-up skill card to the HUD: first empty slot, else it
+   * replaces nothing (kept for later inventory work).
+   */
+  private addPickedUpCardToHud(skill: SkillId, level: number, preferSlot = -1): void {
+    this.skillLevelCache[skill] = level;
+    const idx = this.slotLayout.indexOf(skill);
+    if (idx >= 0) return; // already on the HUD
+    let empty = -1;
+    if (preferSlot >= 0) {
+      const occupying = this.slotLayout[preferSlot];
+      if (!occupying) {
+        empty = preferSlot;
+      } else if (occupying !== skill) {
+        // SWAP: the occupying card was dropped to the ground by the
+        // server -> remove it from the HUD entirely.
+        const oldCard = this.hudCards.get(occupying);
+        if (oldCard) {
+          oldCard.container.destroy();
+          this.hudCards.delete(occupying);
+        }
+        this.slotLayout[preferSlot] = null;
+        empty = preferSlot;
+      } else {
+        empty = this.firstEmptySlot();
+      }
+    } else {
+      empty = this.firstEmptySlot();
+    }
+    if (empty < 0) return; // no room (inventory comes later)
+    this.slotLayout[empty] = skill;
+    // Re-tween cards whose slots changed during the shift.
+    for (let i = 0; i < this.slotLayout.length; i++) {
+      const s = this.slotLayout[i];
+      if (!s || i === empty) continue;
+      const cardObj = this.hudCards.get(s);
+      if (cardObj) this.tweenCardTo(cardObj, i, false);
+    }
+    // Recreate just this card object.
+    const slot = this.cardSlots[empty];
+    const c = this.slotCenter(empty);
+    const frame = cardFrameForLevel(skill, level);
+    const img = this.add
+      .image(0, 0, "card_sheet", frame)
+      .setDisplaySize(slot.width, slot.height);
+    const cdFill = this.add
+      .rectangle(0, 0, slot.width, slot.height, CARD_CD_COLORS[skill] ?? 0xffffff, 0.45)
+      .setOrigin(0, 0)
+      .setVisible(false);
+    cdFill.setData("baseH", slot.height);
+    const container = this.add
+      .container(c.x, c.y, [img, cdFill])
+      .setScrollFactor(0)
+      .setDepth(102);
+    const obj: HudCardObj = { skill, container, img, cdFill, targetSlot: empty };
+    container.setSize(slot.width, slot.height);
+    const PAD = 12; // generous grab padding (cards sit 25px apart)
+    container.setInteractive(
+      new Phaser.Geom.Rectangle(
+        -slot.width / 2 - PAD,
+        -slot.height / 2 - PAD,
+        slot.width + PAD * 2,
+        slot.height + PAD * 2,
+      ),
+      Phaser.Geom.Rectangle.Contains,
+    );
+    this.attachCardHandlers(obj);
+    this.hudCards.set(skill, obj);
+    this.updatePlusHints();
+  }
+
+  /** Persist a new layout and reposition every card instantly. */
+  private commitLayout(layout: (SkillId | null)[]): void {
+    this.slotLayout = layout.slice(0, 5);
+    while (this.slotLayout.length < 5) this.slotLayout.push(null);
+    for (let i = 0; i < this.slotLayout.length; i++) {
+      const skill = this.slotLayout[i];
+      if (!skill) continue;
+      const card = this.hudCards.get(skill);
+      if (card) this.tweenCardTo(card, i, false);
+    }
+    this.updatePlusHints();
+  }
+
+  /** True if the pointer is currently over any HUD card (screen space). */
+  private pointerOverHudCard(pointer: Phaser.Input.Pointer): boolean {
+    for (const card of this.hudCards.values()) {
+      const c = card.container;
+      const w = c.input?.hitArea?.width ?? this.cardSlots[0].width;
+      const h = c.input?.hitArea?.height ?? this.cardSlots[0].height;
+      if (
+        pointer.x >= c.x - w / 2 &&
+        pointer.x <= c.x + w / 2 &&
+        pointer.y >= c.y - h / 2 &&
+        pointer.y <= c.y + h / 2
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Show/hide the "+" hints: any empty slot (live layout while dragging). */
+  private updatePlusHints(): void {
+    const layout = this.dragCard ? this.liveLayout : this.slotLayout;
+    for (let i = 0; i < this.slotPlusHints.length; i++) {
+      const hint = this.slotPlusHints[i];
+      if (!hint) continue;
+      const empty = layout ? !layout[i] : false;
+      hint.setVisible(empty);
+    }
+  }
+
+  // (dash / claw card refreshers removed - slot system renders cards)
 
   /** Yellow explosion blast VFX for vortex L5+. */
   private showVortexExplosion(x: number, y: number, radius: number): void {
@@ -2012,289 +2656,86 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.shake(180, 0.004);
   }
 
-  /** Place / refresh the vortex card art in HUD slot 5 (6th slot). */
-  private refreshVortexCard(): void {
-    if (!this.cardSlots || this.cardSlots.length < 5) return;
-    const slot = this.cardSlots[4];
-    const frame = cardFrameForLevel("vortex", this.localVortexLevel);
-    if (this.vortexCard) {
-      this.vortexCard.setFrame(frame);
-    } else {
-      this.vortexCard = this.add
-        .image(slot.x, slot.y, "card_sheet", frame)
-        .setOrigin(0, 0)
-        .setDisplaySize(slot.width, slot.height)
-        .setScrollFactor(0)
-        .setDepth(102);
+  // (vortex card refresher removed - slot system renders cards)
 
-      // Cooldown fill overlay (grey, grows bottom-up).
-      this.vortexCooldownFill = this.add
-        .rectangle(slot.x, slot.y, slot.width, slot.height, 0x999999, 0.45)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setDepth(103)
-        .setVisible(false);
-      this.vortexCooldownFillBaseH = slot.height;
-    }
-  }
+  // (heal card refresher removed - slot system renders cards)
 
-  /** Place / refresh the heal card art in HUD slot 4. */
-  private refreshHealCard(): void {
-    if (!this.cardSlots || this.cardSlots.length < 4) return;
-    const slot = this.cardSlots[3];
-    const frame = cardFrameForLevel("heal", this.localHealLevel);
-    if (this.healCard) {
-      this.healCard.setFrame(frame);
-    } else {
-      this.healCard = this.add
-        .image(slot.x, slot.y, "card_sheet", frame)
-        .setOrigin(0, 0)
-        .setDisplaySize(slot.width, slot.height)
-        .setScrollFactor(0)
-        .setDepth(102);
+  // (pulse card refresher removed - slot system renders cards)
 
-      this.healCooldownFill = this.add
-        .rectangle(slot.x, slot.y, slot.width, slot.height, 0x00ff00, 0.45)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setDepth(103)
-        .setVisible(false);
-      this.healCooldownFillBaseH = slot.height;
-    }
-  }
-
-  /** Place / refresh the pulse card art in HUD slot 2. */
-  private refreshPulseCard(): void {
-    if (!this.cardSlots || this.cardSlots.length < 2) return;
-    const slot = this.cardSlots[1];
-    const frame = cardFrameForLevel("pulse", this.localPulseLevel);
-    if (this.pulseCard) {
-      this.pulseCard.setFrame(frame);
-    } else {
-      this.pulseCard = this.add
-        .image(slot.x, slot.y, "card_sheet", frame)
-        .setOrigin(0, 0)
-        .setDisplaySize(slot.width, slot.height)
-        .setScrollFactor(0)
-        .setDepth(102);
-
-      // Cooldown fill overlay (purple, grows bottom-up).
-      this.pulseCooldownFill = this.add
-        .rectangle(slot.x, slot.y, slot.width, slot.height, 0xb266ff, 0.45)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setDepth(103)
-        .setVisible(false);
-      this.pulseCooldownFillBaseH = slot.height;
-    }
-  }
-
-  /** Update the cooldown overlay for slot 0 (shock). */
-  private updateBolterCooldownOverlay(): void {
-    if (!this.bolterCard || !this.bolterCooldownFill || !this.currentPlayer)
-      return;
-    const endsAt =
-      (this.currentPlayer.data.get("shockCdEndsAt") as number) ?? 0;
+  /**
+   * Update every HUD card's cooldown overlay from the synced player data
+   * (grows bottom-up while on cooldown, dim while not ready).
+   */
+  private updateSlotCooldowns(): void {
+    if (!this.currentPlayer) return;
     const now = Date.now();
-    if (endsAt > now) {
-      // On cooldown: dim the card + show filling overlay.
-      this.bolterCard.setAlpha(0.45);
-      this.bolterCooldownFill.setVisible(true);
-      const totalMs = 700; // shock cooldown
-      const remaining = endsAt - now;
-      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
-      const h = this.bolterCooldownFillBaseH * fillPct;
-      // Grow from the bottom upward: move origin + reduce height.
-      this.bolterCooldownFill.setSize(this.bolterCard.displayWidth, h);
-      this.bolterCooldownFill.setPosition(
-        this.bolterCard.x,
-        this.bolterCard.y + this.bolterCooldownFillBaseH - h,
-      );
-    } else {
-      this.bolterCard.setAlpha(1);
-      this.bolterCooldownFill.setVisible(false);
+    for (const card of this.hudCards.values()) {
+      const endsAt =
+        (this.currentPlayer.data.get(card.skill + "CdEndsAt") as number) ?? 0;
+      let fillPct: number;
+      if (card.skill === "heal") {
+        // Heal is special: kill-based below L6, cooldown-based at L6+.
+        const ready =
+          (this.currentPlayer.data.get("healReady") as boolean) ?? true;
+        if (ready) {
+          card.img.setAlpha(1);
+          card.cdFill.setVisible(false);
+          continue;
+        }
+        card.img.setAlpha(0.45);
+        card.cdFill.setVisible(true);
+        const endsAtH =
+          (this.currentPlayer.data.get("healCdEndsAt") as number) ?? 0;
+        if (endsAtH > now) {
+          const healLvl = this.skillLevelCache.heal ?? 1;
+          const totalMs =
+            1000 *
+            (healLvl <= 6
+              ? 15
+              : healLvl === 7
+                ? 13
+                : healLvl === 8
+                  ? 11
+                  : 10);
+          fillPct = Math.max(0, Math.min(1, 1 - (endsAtH - now) / totalMs));
+        } else {
+          const kills =
+            (this.currentPlayer.data.get("healKills") as number) ?? 0;
+          const threshold = (this.skillLevelCache.heal ?? 1) <= 2 ? 4 : 3;
+          fillPct = Math.min(1, kills / threshold);
+        }
+      } else if (endsAt > now) {
+        card.img.setAlpha(0.45);
+        card.cdFill.setVisible(true);
+        const totalMs = SLOT_CD_MS[card.skill] ?? 1000;
+        fillPct = Math.max(0, Math.min(1, 1 - (endsAt - now) / totalMs));
+      } else {
+        card.img.setAlpha(1);
+        card.cdFill.setVisible(false);
+        continue;
+      }
+      const h = card.cdFill.getData("baseH") as number;
+      const bh = typeof h === "number" && h > 0 ? h : card.cdFill.height;
+      const height = bh * fillPct;
+      card.cdFill.setSize(card.img.displayWidth, height);
+      // The fill lives inside the centered card container (origin 0,0):
+      // grow bottom-up by keeping its bottom edge at +bh/2.
+      card.cdFill.y = bh / 2 - height;
+      card.cdFill.x = -card.img.displayWidth / 2;
     }
   }
-
-  /** Update the slam (slot 4) cooldown overlay. */
-  private updateShockCooldownOverlay(): void {
-    if (!this.shockCard || !this.shockCooldownFill || !this.currentPlayer)
-      return;
-    const endsAt = (this.currentPlayer.data.get("slamCdEndsAt") as number) ?? 0;
-    const now = Date.now();
-    if (endsAt > now) {
-      this.shockCard.setAlpha(0.45);
-      this.shockCooldownFill.setVisible(true);
-      const totalMs = 3000; // slam cooldown
-      const remaining = endsAt - now;
-      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
-      const h = this.shockCooldownFillBaseH * fillPct;
-      this.shockCooldownFill.setSize(this.shockCard.displayWidth, h);
-      this.shockCooldownFill.setPosition(
-        this.shockCard.x,
-        this.shockCard.y + this.shockCooldownFillBaseH - h,
-      );
-    } else {
-      this.shockCard.setAlpha(1);
-      this.shockCooldownFill.setVisible(false);
-    }
-  }
-
-  /** Update the claw cooldown overlay. */
-  private updateClawCooldownOverlay(): void {
-    if (!this.clawCard || !this.clawCooldownFill || !this.currentPlayer) return;
-    const endsAt = (this.currentPlayer.data.get("clawCdEndsAt") as number) ?? 0;
-    const now = Date.now();
-    if (endsAt > now) {
-      this.clawCard.setAlpha(0.45);
-      this.clawCooldownFill.setVisible(true);
-      const totalMs = 500;
-      const remaining = endsAt - now;
-      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
-      const h = this.clawCooldownFillBaseH * fillPct;
-      this.clawCooldownFill.setSize(this.clawCard.displayWidth, h);
-      this.clawCooldownFill.setPosition(
-        this.clawCard.x,
-        this.clawCard.y + this.clawCooldownFillBaseH - h,
-      );
-    } else {
-      this.clawCard.setAlpha(1);
-      this.clawCooldownFill.setVisible(false);
-    }
-  }
-
-  /** Update the vortex (slot 5) cooldown overlay. */
-  private updateVortexCooldownOverlay(): void {
-    if (!this.vortexCard || !this.vortexCooldownFill || !this.currentPlayer)
-      return;
-    const endsAt =
-      (this.currentPlayer.data.get("vortexCdEndsAt") as number) ?? 0;
-    const now = Date.now();
-    if (endsAt > now) {
-      this.vortexCard.setAlpha(0.45);
-      this.vortexCooldownFill.setVisible(true);
-      const totalMs = 8000; // vortex cooldown
-      const remaining = endsAt - now;
-      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
-      const h = this.vortexCooldownFillBaseH * fillPct;
-      this.vortexCooldownFill.setSize(this.vortexCard.displayWidth, h);
-      this.vortexCooldownFill.setPosition(
-        this.vortexCard.x,
-        this.vortexCard.y + this.vortexCooldownFillBaseH - h,
-      );
-    } else {
-      this.vortexCard.setAlpha(1);
-      this.vortexCooldownFill.setVisible(false);
-    }
-  }
-
-  /** Update heal card overlay: dim when not ready, show charge/cooldown fill. */
-  private updateHealCooldownOverlay(): void {
-    if (!this.healCard || !this.healCooldownFill || !this.currentPlayer) return;
-    const ready = (this.currentPlayer.data.get("healReady") as boolean) ?? true;
-    if (ready) {
-      this.healCard.setAlpha(1);
-      this.healCooldownFill.setVisible(false);
-      return;
-    }
-    // Not ready — check if it's cooldown-based (L6+) or kill-based (L1-5)
-    const endsAt = (this.currentPlayer.data.get("healCdEndsAt") as number) ?? 0;
-    const now = Date.now();
-    this.healCard.setAlpha(0.45);
-    this.healCooldownFill.setVisible(true);
-    if (endsAt > now) {
-      // Cooldown-based (L6+): duration depends on heal level
-      // L6: 15s, L7: 13s, L8: 11s, L9/L10: 10s
-      const healLvl = this.localHealLevel;
-      const totalMs =
-        1000 *
-        (healLvl <= 6 ? 15 : healLvl === 7 ? 13 : healLvl === 8 ? 11 : 10);
-      const remaining = endsAt - now;
-      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
-      const h = this.healCooldownFillBaseH * fillPct;
-      this.healCooldownFill.setSize(this.healCard.displayWidth, h);
-      this.healCooldownFill.setPosition(
-        this.healCard.x,
-        this.healCard.y + this.healCooldownFillBaseH - h,
-      );
-    } else {
-      // Kill-based (L1-5): show partial fill based on kills
-      // Threshold: 4 kills at L1-2, 3 kills at L3-5
-      const kills = (this.currentPlayer.data.get("healKills") as number) ?? 0;
-      const threshold = this.localHealLevel <= 2 ? 4 : 3;
-      const fillPct = Math.min(1, kills / threshold);
-      const h = this.healCooldownFillBaseH * fillPct;
-      this.healCooldownFill.setSize(this.healCard.displayWidth, h);
-      this.healCooldownFill.setPosition(
-        this.healCard.x,
-        this.healCard.y + this.healCooldownFillBaseH - h,
-      );
-    }
-  }
-
-  /** Update the pulse cooldown overlay. */
-  private updatePulseCooldownOverlay(): void {
-    if (
-      !this.pulseCard ||
-      !this.pulseCooldownFill ||
-      !this.currentPlayer ||
-      !this.pulseCard.active
-    )
-      return;
-    const endsAt =
-      (this.currentPlayer.data.get("pulseCdEndsAt") as number) ?? 0;
-    const now = Date.now();
-    if (endsAt > now) {
-      this.pulseCard.setAlpha(0.45);
-      this.pulseCooldownFill.setVisible(true);
-      const totalMs = 5000;
-      const remaining = endsAt - now;
-      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
-      const h = this.pulseCooldownFillBaseH * fillPct;
-      this.pulseCooldownFill.setSize(this.pulseCard.displayWidth, h);
-      this.pulseCooldownFill.setPosition(
-        this.pulseCard.x,
-        this.pulseCard.y + this.pulseCooldownFillBaseH - h,
-      );
-    } else {
-      this.pulseCard.setAlpha(1);
-      this.pulseCooldownFill.setVisible(false);
-    }
-  }
-
-  /** Update the dash cooldown overlay. */
-  private updateDashCooldownOverlay(): void {
-    if (!this.dashCard || !this.dashCooldownFill || !this.currentPlayer) return;
-    const endsAt = (this.currentPlayer.data.get("dashCdEndsAt") as number) ?? 0;
-    const now = Date.now();
-    if (endsAt > now) {
-      this.dashCard.setAlpha(0.45);
-      this.dashCooldownFill.setVisible(true);
-      const totalMs = 5000;
-      const remaining = endsAt - now;
-      const fillPct = Math.max(0, Math.min(1, 1 - remaining / totalMs));
-      const h = this.dashCooldownFillBaseH * fillPct;
-      this.dashCooldownFill.setSize(this.dashCard.displayWidth, h);
-      this.dashCooldownFill.setPosition(
-        this.dashCard.x,
-        this.dashCard.y + this.dashCooldownFillBaseH - h,
-      );
-    } else {
-      this.dashCard.setAlpha(1);
-      this.dashCooldownFill.setVisible(false);
-    }
-  }
-
   private showBolterTooltip(slot: Phaser.GameObjects.Rectangle): void {
-    const mods = skillMods("bolter", this.localBolterLevel);
+    const skill = this.slotSkill(this.cardSlots.indexOf(slot)) ?? "shock";
+    const lvl = this.skillLevelCache[skill] ?? 1;
+    const mods = skillMods(skill, lvl);
     const atk = this.currentPlayer ? Math.round(this.localPlayerAttack()) : 0;
-    const cd = 0.5;
+    const cd = ((SLOT_CD_MS[skill] ?? 500) / 1000).toFixed(1);
     const lines = [
-      "Bolter",
-      "Fires a bullet toward your aim. Chains at higher levels.",
+      skill.charAt(0).toUpperCase() + skill.slice(1),
+      "Slot input: " + GameScene.SLOT_INPUTS[this.cardSlots.indexOf(slot)],
       "ATK: " + atk,
       "Cooldown: " + cd + "s",
-      "Level: " + this.localBolterLevel,
+      "Level: " + lvl,
       ...mods,
     ];
     const txt = lines.join("\n");
@@ -2329,9 +2770,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** True if a skill is off cooldown (client-side check using synced data). */
-  private isSkillReady(
-    skill: "claw" | "shock" | "heal" | "pulse" | "slam" | "dash" | "vortex",
-  ): boolean {
+  private isSkillReady(skill: SkillId): boolean {
     if (!this.currentPlayer) return true;
     if (skill === "heal") {
       return (this.currentPlayer.data.get("healReady") as boolean) ?? true;
@@ -3100,6 +3539,77 @@ export class GameScene extends Phaser.Scene {
         txt!.setActive(false);
       },
     });
+  }
+
+  /**
+   * Show a short-lived centered announcement (elite spawn/kill, etc).
+   */
+  private announce(msg: string, color: string): void {
+    const x = this.cameras.main.width / 2;
+    const txt = this.add
+      .text(x, 60, msg, {
+        color,
+        fontSize: "18px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 4,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(3000);
+    this.tweens.add({
+      targets: txt,
+      alpha: 0,
+      delay: 1800,
+      duration: 700,
+      onComplete: () => txt.destroy(),
+    });
+  }
+
+  /**
+   * Elite HUD: announce spawn/kill via state.eliteAlive edge detection.
+   * (No fixed boss bar on screen - reserved for future bosses; the small
+   * floating HP bar above the elite itself is enough.)
+   */
+  private updateEliteHud(): void {
+    const eliteAlive = !!((this.room as any)?.state?.eliteAlive ?? false);
+    if (eliteAlive !== this.lastEliteAlive) {
+      this.lastEliteAlive = eliteAlive;
+      this.announce(
+        eliteAlive
+          ? "AN ELITE ENEMY HAS AWAKENED"
+          : "ELITE SLAIN - EXIT UNLOCKED",
+        eliteAlive ? "#ffd700" : "#66ff66",
+      );
+    }
+  }
+
+  /** Show/hide the "exit sealed" hint while on a locked exit tile. */
+  private updateExitLockedToast(show: boolean): void {
+    if (show) {
+      const x = this.cameras.main.width / 2;
+      const y = 36;
+      const msg = "EXIT SEALED - SLAY THE ELITE TO UNLOCK";
+      if (this.exitLockedToast) {
+        this.exitLockedToast.setText(msg).setPosition(x, y).setVisible(true);
+      } else {
+        this.exitLockedToast = this.add
+          .text(x, y, msg, {
+            color: "#ff8844",
+            fontSize: "16px",
+            fontFamily: "monospace",
+            fontStyle: "bold",
+            stroke: "#000000",
+            strokeThickness: 4,
+          })
+          .setOrigin(0.5)
+          .setScrollFactor(0)
+          .setDepth(3000);
+      }
+    } else if (this.exitLockedToast) {
+      this.exitLockedToast.setVisible(false);
+    }
   }
 
   /**
@@ -4408,16 +4918,23 @@ export class GameScene extends Phaser.Scene {
     // next room/scene. `transitioning` guards against re-entry.
     // Extra guard: ensure the player sprite is active and positioned
     // (not stale from the previous scene before server state arrives).
-    if (
+    const onExit =
       !this.transitioning &&
       this.nextSceneKey &&
       this.currentPlayer &&
       this.currentPlayer.active &&
       (this.currentPlayer.x !== 0 || this.currentPlayer.y !== 0) &&
-      this.isOnExitTile()
-    ) {
-      this.transitionToScene(this.nextSceneKey);
-      return;
+      this.isOnExitTile();
+    if (onExit) {
+      // ELITE GATE: the exit only works once this map's elite is dead.
+      if ((this.room as any)?.state?.exitUnlocked) {
+        this.updateExitLockedToast(false);
+        this.transitionToScene(this.nextSceneKey);
+        return;
+      }
+      this.updateExitLockedToast(true);
+    } else {
+      this.updateExitLockedToast(false);
     }
 
     // ---- Local player hit flash ----
@@ -4652,14 +5169,14 @@ export class GameScene extends Phaser.Scene {
       this.updateVignettes();
     }
     // ---- Update bolter cooldown fill on the card ----
-    this.updateBolterCooldownOverlay();
-    this.updatePulseCooldownOverlay();
-    this.updateDashCooldownOverlay();
-    this.updateClawCooldownOverlay();
-    this.updateHealCooldownOverlay();
-    this.updateVortexCooldownOverlay();
+    // ---- Slot card cooldown fills + drag update ----
+    this.updateSlotCooldowns();
+    if (this.dragCard) this.updateCardDrag(this.input.activePointer);
+    else if (this.groundGrab) this.updateGroundGrab(this.input.activePointer);
     // ---- Spawn-grace countdown toast (map-entry safety window) ----
     this.updateSpawnCountdown();
+    // ---- Elite enemy: announce toasts + boss HP bar ----
+    this.updateEliteHud();
     // ---- Sync viewport to server (for viewport-activated spawning) ----
     // ---- Update live entity hitbox overlay ----
     this.updateEntityHitboxes();
@@ -5044,10 +5561,11 @@ export class GameScene extends Phaser.Scene {
         this.scene.stop();
         return;
       }
-      // Normal respawn (same map)
+      // Normal respawn (same map): reset HUD cards to the default layout.
       if (this.room) {
         this.room.send(4, {});
       }
+      this.resetSlotLayoutToDefault();
       this.hideDeathScreen();
     });
     quitBtn.on("pointerdown", () => {

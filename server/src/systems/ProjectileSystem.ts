@@ -17,8 +17,6 @@
  *   Chain hits halve the carried damage each bounce.
  */
 import { RoomState } from "../schema/RoomState";
-import { Player } from "../schema/Player";
-import { Enemy } from "../schema/Enemy";
 import { Projectile, type ProjectileFaction } from "../schema/Projectile";
 import {
   BOLTER_DEF,
@@ -216,21 +214,6 @@ export class ProjectileSystem {
     if (enemy) {
       enemy.takeDamage(damage, "bolter", proj.ownerId, isCrit);
     }
-  }
-
-  /** Circle-vs-circle overlap test. */
-  private circleOverlap(
-    ax: number,
-    ay: number,
-    ar: number,
-    bx: number,
-    by: number,
-    br: number,
-  ): boolean {
-    const rr = ar + br;
-    const dx = ax - bx;
-    const dy = ay - by;
-    return dx * dx + dy * dy <= rr * rr;
   }
 
   /**

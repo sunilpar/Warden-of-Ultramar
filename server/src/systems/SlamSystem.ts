@@ -7,8 +7,6 @@
  * travelling its full range or hits a wall.
  */
 import { RoomState } from "../schema/RoomState";
-import { Player } from "../schema/Player";
-import { Enemy } from "../schema/Enemy";
 import { Slam, type SlamFaction } from "../schema/Slam";
 import { SLAM_DEF, applyCrit, computeSkillDamage } from "../config/skillDefs";
 import type { CollisionResolver } from "./EnemySystem";
@@ -184,38 +182,6 @@ export class SlamSystem {
       Math.abs(localX) <= slam.halfHeight + targetRadius &&
       Math.abs(localY) <= slam.halfWidth + targetRadius
     );
-  }
-
-  /** Knock back an enemy in the slam's travel direction. */
-  private knockback(enemy: Enemy, angle: number): void {
-    const force = 40;
-    enemy.x += Math.cos(angle) * force;
-    enemy.y += Math.sin(angle) * force;
-    enemy.x = Math.max(0, Math.min(this.mapSystem.width, enemy.x));
-    enemy.y = Math.max(0, Math.min(this.mapSystem.height, enemy.y));
-    const resolved = this.mapSystem.resolveTileCollision(
-      enemy.x,
-      enemy.y,
-      enemy.collisionRadius,
-    );
-    enemy.x = resolved.x;
-    enemy.y = resolved.y;
-  }
-
-  /** Knock back a player in the slam's travel direction. */
-  private knockbackPlayer(player: Player, angle: number): void {
-    const force = 40;
-    player.x += Math.cos(angle) * force;
-    player.y += Math.sin(angle) * force;
-    player.x = Math.max(0, Math.min(this.mapSystem.width, player.x));
-    player.y = Math.max(0, Math.min(this.mapSystem.height, player.y));
-    const resolved = this.mapSystem.resolveTileCollision(
-      player.x,
-      player.y,
-      10,
-    );
-    player.x = resolved.x;
-    player.y = resolved.y;
   }
 
   /** True if the slam center is inside a solid tile (unless bypassWalls). */

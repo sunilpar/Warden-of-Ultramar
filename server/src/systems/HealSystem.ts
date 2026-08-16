@@ -31,7 +31,7 @@ export class HealSystem {
    * Cast heal for a player.
    * Returns true if the heal was applied.
    */
-  castPlayerHeal(player: Player, sessionId: string): boolean {
+  castPlayerHeal(player: Player, _sessionId: string): boolean {
     const level = player.getSkillLevel("heal");
     if (level <= 0) return false;
     if (!player.isSkillReady("heal")) return false;

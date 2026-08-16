@@ -16,8 +16,6 @@
  *   big   (8-10): longest range, widest cone, inflicts BLEED (DoT).
  */
 import { RoomState } from "../schema/RoomState";
-import { Player } from "../schema/Player";
-import { Enemy } from "../schema/Enemy";
 import { SkillCast } from "../schema/SkillCast";
 import {
   CLAW_DEF,

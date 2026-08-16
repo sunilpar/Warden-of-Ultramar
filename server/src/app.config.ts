@@ -16,7 +16,7 @@ const server = defineServer({
         /**
          * Bind your custom express routes here:
          */
-        app.get("/hello", (req, res) => {
+        app.get("/hello", (_req, res) => {
             res.send("It's time to kick ass and chew bubblegum!");
         });
 

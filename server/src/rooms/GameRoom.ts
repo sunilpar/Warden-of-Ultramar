@@ -18,6 +18,8 @@
 
 import { Room, Client } from "colyseus";
 import { RoomState } from "../schema/RoomState";
+import { GroundCard } from "../schema/GroundCard";
+import { LootSystem } from "../systems/LootSystem";
 import { Player, InputData } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
 import { MapSystem } from "../systems/MapSystem";
@@ -56,6 +58,7 @@ export class GameRoom extends Room {
   private mapSystem!: MapSystem;
   private playerSystem!: PlayerSystem;
   private enemySystem!: EnemySystem;
+  private lootSystem!: LootSystem;
   private projectileSystem!: ProjectileSystem;
   private clawSystem!: ClawSystem;
   private slamSystem!: SlamSystem;
@@ -66,6 +69,10 @@ export class GameRoom extends Room {
   private vortexSystem!: VortexSystem;
   /** Spawn zones that have already triggered (one-time spawn each). */
   private spawnedZones = new Set<number>();
+  /** Enemies killed so far this map (drives the elite spawn threshold). */
+  private enemiesKilled: number = 0;
+  /** True once this map's single elite enemy has spawned. */
+  private eliteSpawned: boolean = false;
   private activeModifiers: ModifierId[] = MAP_MODIFIERS["game_room"] ?? [];
   /** Last reported viewport (world rect) per player session. */
   private viewports = new Map<
@@ -77,6 +84,7 @@ export class GameRoom extends Room {
     this.mapSystem = new MapSystem();
     this.playerSystem = new PlayerSystem(this.state, this.mapSystem);
     this.enemySystem = new EnemySystem(this.state, this.mapSystem);
+    this.lootSystem = new LootSystem(this.state);
     this.projectileSystem = new ProjectileSystem(this.state, this.mapSystem);
     this.clawSystem = new ClawSystem(this.state);
     this.slamSystem = new SlamSystem(this.state, this.mapSystem);
@@ -204,6 +212,41 @@ export class GameRoom extends Room {
   }
 
   /**
+   * Drop the player's equipped card for `skill` to the ground at their
+   * position. If they never picked up a card instance for it (default
+   * spawn skill), drops a plain common card at their current level.
+   */
+  private dropEquippedCardFor(player: Player, skill: SkillId): void {
+    const equipped = player.equippedCards.get(skill);
+    if (!equipped && player.getSkillLevel(skill) <= 0) return;
+    const gc = new GroundCard();
+    if (equipped) {
+      gc.card = equipped;
+      gc.skill = equipped.skill;
+      gc.level = equipped.level;
+      player.equippedCards.delete(skill);
+    } else {
+      const lvl = player.getSkillLevel(skill);
+      gc.skill = skill;
+      gc.level = lvl;
+      gc.card.skill = skill;
+      gc.card.level = lvl;
+      gc.card.rarity = "common";
+    }
+    gc.x = player.x;
+    gc.y = player.y;
+    gc.pickupLockUntil = Date.now() + 500;
+    this.state.groundCards.set(this.nextGroundCardId(), gc);
+  }
+
+  /** Monotonic id counter for dropped ground cards. */
+  private groundCardSeq: number = 0;
+  private nextGroundCardId(): string {
+    this.groundCardSeq += 1;
+    return `gc_${Date.now().toString(36)}_${this.groundCardSeq}`;
+  }
+
+  /**
    * Pick an enemy type by spawn ratio: 40% tyranid / 30% mechanicus /
    * 20% tau / 10% orck.
    */
@@ -255,8 +298,12 @@ export class GameRoom extends Room {
           enemyLevel,
         );
         const spawnedEnemy = this.state.enemies.get(spawnId);
-        if (spawnedEnemy)
+        if (spawnedEnemy) {
           applyEnemyModifiers(spawnedEnemy, this.activeModifiers);
+          // Loot roll: may attach a modded card to this enemy.
+          const card = this.lootSystem.rollEnemyCard(spawnedEnemy);
+          if (card) spawnedEnemy.card = card;
+        }
         this.spawnedZones.add(i);
       }
     }
@@ -327,11 +374,79 @@ export class GameRoom extends Room {
       if (enemy) {
         // Award XP: killer gets 100%, other damagers get 50%.
         this.awardKillXp(enemy);
+        // Loot drop: uncommon+ cards drop to the ground.
+        this.lootSystem.dropOnDeath(enemy, () => this.nextGroundCardId());
+        // Kill bookkeeping: elite threshold + exit unlock.
+        this.onEnemyKilled(enemy);
       }
       // Despawn any slams/projectiles owned by this enemy.
       if (this.enemySystem) this.enemySystem.cleanupOnEnemyDeath(id);
       this.state.enemies.delete(id);
     }
+  }
+
+  /**
+   * Kill bookkeeping: unlocks the map exit when the ELITE enemy dies,
+   * and triggers the one-time elite spawn once ~50% of the map's
+   * enemies have been killed.
+   */
+  private onEnemyKilled(enemy: Enemy): void {
+    if (enemy.isElite) {
+      this.state.eliteAlive = false;
+      this.state.exitUnlocked = true;
+      console.log("[ELITE] Elite defeated - map exit unlocked!");
+      return;
+    }
+    this.enemiesKilled++;
+    this.maybeSpawnElite();
+  }
+
+  /**
+   * Spawn the map's single ELITE enemy once players have killed ~50% of
+   * the map's target enemy count. The elite is a random type drawn from
+   * the normal enemy pool, ELITE.LEVEL_BONUS levels above the highest
+   * player, with +20% HP/shield and double XP on top of that. It spawns
+   * at the center of a random enemy spawn zone.
+   */
+  private maybeSpawnElite(): void {
+    if (this.eliteSpawned) return;
+    const target = this.getTargetEnemyCount();
+    if (
+      this.enemiesKilled <
+      Math.ceil(target * GAME_CONFIG.ELITE.SPAWN_KILL_THRESHOLD)
+    ) {
+      return;
+    }
+
+    const zones = LAYERED_MAP.enemySpawnZones;
+    if (zones.length === 0) return;
+    const zone = zones[Math.floor(Math.random() * zones.length)];
+
+    const eliteLevel =
+      this.getHighestPlayerLevel() + GAME_CONFIG.ELITE.LEVEL_BONUS;
+    const spawnId = this.enemySystem.spawn(
+      this.pickEnemyType(),
+      zone.x + zone.width / 2,
+      zone.y + zone.height / 2,
+      eliteLevel,
+    );
+    const elite = this.state.enemies.get(spawnId);
+    if (!elite) return;
+    // Elites always carry a card (no 50% gate).
+    const eliteCard = this.lootSystem.rollEnemyCardForced(elite);
+    if (eliteCard) elite.card = eliteCard;
+    elite.makeElite(
+      GAME_CONFIG.ELITE.HP_SHIELD_BONUS,
+      GAME_CONFIG.ELITE.XP_MULTIPLIER,
+      GAME_CONFIG.ELITE.SIZE_MULTIPLIER,
+    );
+    applyEnemyModifiers(elite, this.activeModifiers);
+    this.eliteSpawned = true;
+    this.state.eliteAlive = true;
+    console.log(
+      `[ELITE] Spawned elite ${elite.typeId} (level ${elite.level}) at ` +
+        `(${Math.round(elite.x)}, ${Math.round(elite.y)})`,
+    );
   }
 
   // ============================================================
@@ -409,8 +524,11 @@ export class GameRoom extends Room {
           player,
           client.sessionId,
           level,
-          skillCritRate("pulse", level, player.critRate),
-          player.critDamage,
+          skillCritRate("pulse", level, player.critRate) +
+            player.cardCritRateBonus("pulse"),
+          player.critDamage + player.cardCritDamageBonus("pulse"),
+          player.cardRadiusMult("pulse"),
+          player.cardDamageBonus("pulse") * player.cardUniqueDamageMult("pulse"),
         );
         player.startSkillCooldown(skill, pulseCooldown(level));
       } else if (skill === "shock") {
@@ -418,8 +536,9 @@ export class GameRoom extends Room {
           player,
           client.sessionId,
           level,
-          skillCritRate("shock", level, player.critRate),
-          player.critDamage,
+          skillCritRate("shock", level, player.critRate) +
+            player.cardCritRateBonus("shock"),
+          player.critDamage + player.cardCritDamageBonus("shock"),
           msg.angle,
         );
         player.startSkillCooldown(skill, SKILL_DEFS.shock.baseCooldown);
@@ -443,8 +562,11 @@ export class GameRoom extends Room {
           level,
           player.attack,
           player.damageMultiplier,
-          skillCritRate("vortex", level, player.critRate),
-          player.critDamage,
+          skillCritRate("vortex", level, player.critRate) +
+            player.cardCritRateBonus("vortex"),
+          player.critDamage + player.cardCritDamageBonus("vortex"),
+          player.cardRadiusMult("vortex"),
+          player.cardDamageBonus("vortex") * player.cardUniqueDamageMult("vortex"),
         );
         player.startSkillCooldown(skill, SKILL_DEFS.vortex.cooldown);
       }
@@ -561,6 +683,88 @@ export class GameRoom extends Room {
         `Player ${client.sessionId} forced level-up (now level ${player.level})`,
       );
     },
+
+    // ---- Drop the dragged HUD card to the ground ----
+    // msg: { skill: SkillId, level: number, x: number, y: number }
+    10: (client: Client, msg: { skill: SkillId; level: number; x: number; y: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+      if (!msg || !msg.skill) return;
+      // Card must be owned (level > 0) to drop.
+      if (player.getSkillLevel(msg.skill) <= 0) return;
+      // Drop at the player's position (not the cursor) so it stays near them.
+      const dropX = player.x;
+      const dropY = player.y;
+      const card = new GroundCard();
+      const equipped = player.equippedCards.get(msg.skill);
+      if (equipped) {
+        // Carry the full card (mods + rarity) and unequip it.
+        card.card = equipped;
+        card.skill = equipped.skill;
+        card.level = equipped.level;
+        player.equippedCards.delete(msg.skill);
+      } else {
+        card.skill = msg.skill;
+        card.level = Math.max(1, msg.level | 0);
+      }
+      card.x = dropX;
+      card.y = dropY;
+      card.pickupLockUntil = Date.now() + 500; // half-second pickup grace
+      this.state.groundCards.set(this.nextGroundCardId(), card);
+      console.log(
+        `[GROUND] ${client.sessionId} dropped ${msg.skill} L${card.level} at ` +
+          `(${Math.round(dropX)}, ${Math.round(dropY)})`,
+      );
+    },
+
+    // ---- Pick up a ground card (equip it) ----
+    // msg: { cardId: string, replaceSkill?: SkillId }
+    // replaceSkill = the skill whose card currently occupies the target
+    // HUD slot; its card is dropped to the ground (swap).
+    11: (client: Client, msg: { cardId: string; replaceSkill?: string }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+      const card = this.state.groundCards.get(msg?.cardId ?? "");
+      if (!card) return;
+      if (Date.now() < card.pickupLockUntil) return;
+      // Must be close enough to pick up (2 tiles ~ 96px).
+      const dx = card.x - player.x;
+      const dy = card.y - player.y;
+      if (dx * dx + dy * dy > 96 * 96) return;
+      const newSkill = card.card.skill as SkillId;
+      // Swap: the displaced card in the target slot drops to the ground.
+      if (msg.replaceSkill && msg.replaceSkill !== newSkill) {
+        this.dropEquippedCardFor(player, msg.replaceSkill as SkillId);
+      }
+      // The player's old card for the same skill (previous version) drops.
+      this.dropEquippedCardFor(player, newSkill);
+      // Equip the full card: skill level (max) + all mods.
+      player.equipCard(card.card);
+      this.state.groundCards.delete(msg.cardId);
+      console.log(
+        `[GROUND] ${client.sessionId} picked up ${card.skill} L${card.level}`,
+      );
+    },
+
+    // ---- Move (re-drop) a grabbed ground card to a new map position ----
+    // msg: { cardId: string, x: number, y: number }
+    12: (client: Client, msg: { cardId: string; x: number; y: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+      const card = this.state.groundCards.get(msg?.cardId ?? "");
+      if (!card) return;
+      if (!msg || typeof msg.x !== "number" || typeof msg.y !== "number") return;
+      // Reach: 3 tiles (~160px) from the player.
+      const dx = msg.x - player.x;
+      const dy = msg.y - player.y;
+      if (dx * dx + dy * dy > 160 * 160) return;
+      // Clamp to map bounds so the card never leaves the map.
+      const map = LAYERED_MAP;
+      card.x = Math.max(16, Math.min(map.widthPx - 16, msg.x));
+      card.y = Math.max(16, Math.min(map.heightPx - 16, msg.y));
+      card.pickupLockUntil = Date.now() + 500; // re-arm pickup grace
+    },
+
   };
 
   // ============================================================

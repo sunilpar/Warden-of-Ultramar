@@ -15,11 +15,9 @@ import { Player } from "../schema/Player";
 import { Enemy } from "../schema/Enemy";
 import { GAME_CONFIG } from "../config/game";
 import {
-  ENEMY_STATS,
   type EnemyTypeId,
   type SkillId,
 } from "../config/enemyStats";
-import { SKILL_DEFS } from "../config/skillDefs";
 import type { ProjectileSystem } from "./ProjectileSystem";
 import type { ClawSystem } from "./ClawSystem";
 import { SlamSystem } from "./SlamSystem";
@@ -502,6 +500,14 @@ export class EnemySystem {
    */
   private useSkill(enemy: Enemy, skill: SkillId, target: Player): void {
     const angle = Math.atan2(target.y - enemy.y, target.x - enemy.x);
+    // Loot card mods: only apply when casting the card's own skill.
+    const cardCrit =
+      enemy.critRate + enemy.cardCritRateBonus(skill);
+    const cardCritDmg =
+      enemy.critDamage + enemy.cardCritDamageBonus(skill);
+    const cardDmgMult =
+      enemy.cardDamageBonus(skill) * enemy.cardUniqueDamageMult(skill);
+    const cardRadiusMult = enemy.cardRadiusMult(skill);
     // Trigger attack animation EVERY time a skill is used.
     // Keep the flag true for 350ms (one full attack animation cycle).
     const now = Date.now();
@@ -524,9 +530,9 @@ export class EnemySystem {
         angle,
         enemy.attack,
         this.enemySkillLevel(enemy, skill),
-        enemy.damageMultiplier,
-        enemy.critRate,
-        enemy.critDamage,
+        enemy.damageMultiplier * cardDmgMult,
+        cardCrit,
+        cardCritDmg,
       );
     } else if (skill === "claw" && this.clawSystem) {
       this.clawSystem.castClaw(
@@ -537,10 +543,10 @@ export class EnemySystem {
         angle,
         enemy.attack,
         this.enemySkillLevel(enemy, skill),
-        enemy.damageMultiplier,
+        enemy.damageMultiplier * cardDmgMult,
         enemy.collisionRadius,
-        enemy.critRate,
-        enemy.critDamage,
+        cardCrit,
+        cardCritDmg,
       );
     } else if (skill === "slam" && this.slamSystem) {
       // Delay the slam hitbox until after the attack animation completes.
@@ -553,9 +559,9 @@ export class EnemySystem {
         level: this.enemySkillLevel(enemy, skill),
         castAt: now + 500,
         attack: enemy.attack,
-        damageMultiplier: enemy.damageMultiplier,
-        critRate: enemy.critRate,
-        critDamage: enemy.critDamage,
+        damageMultiplier: enemy.damageMultiplier * cardDmgMult,
+        critRate: cardCrit,
+        critDamage: cardCritDmg,
       });
     } else if (skill === "heal" && this.healSystem) {
       this.healSystem.castEnemyHeal(enemy, this.enemySkillLevel(enemy, skill));
@@ -563,8 +569,8 @@ export class EnemySystem {
       this.shockSystem.castEnemyShock(
         enemy,
         this.enemySkillLevel(enemy, skill),
-        enemy.critRate,
-        enemy.critDamage,
+        cardCrit,
+        cardCritDmg,
         angle,
       );
     } else if (skill === "dash" && this.dashSystem) {
@@ -574,8 +580,8 @@ export class EnemySystem {
         enemy,
         this.enemySkillLevel(enemy, skill),
         escapeAngle,
-        enemy.critRate,
-        enemy.critDamage,
+        cardCrit,
+        cardCritDmg,
       );
     } else if (skill === "vortex" && this.vortexSystem) {
       this.vortexSystem.castVortex(
@@ -587,8 +593,10 @@ export class EnemySystem {
         this.enemySkillLevel(enemy, skill),
         enemy.attack,
         enemy.damageMultiplier,
-        enemy.critRate,
-        enemy.critDamage,
+        cardCrit,
+        cardCritDmg,
+        cardRadiusMult,
+        cardDmgMult,
       );
     } else if (skill === "shield") {
       // Self-buff: instantly restore the shield to full capacity.
@@ -600,8 +608,10 @@ export class EnemySystem {
       this.pulseSystem.castEnemyPulse(
         enemy,
         this.enemySkillLevel(enemy, skill),
-        enemy.critRate,
-        enemy.critDamage,
+        cardCrit,
+        cardCritDmg,
+        cardRadiusMult,
+        cardDmgMult,
       );
     }
     enemy.startCooldown(skill);
@@ -615,12 +625,6 @@ export class EnemySystem {
   /** Enemy skill level — read from the per-enemy skillLevels map (1 if unset). */
   private enemySkillLevel(enemy: Enemy, skill: SkillId): number {
     return enemy.skillLevels.get(skill) ?? 1;
-  }
-
-  /** Cooldown lookup for a skill (kept for parity). */
-  private skillCooldown(skill: SkillId): number {
-    const def = (SKILL_DEFS as Record<string, { cooldown: number }>)[skill];
-    return def ? def.cooldown : (ENEMY_STATS.tyranid.skillCooldown[skill] ?? 0);
   }
 
   // ============================================================

@@ -16,7 +16,6 @@ import { SkillCast } from "../schema/SkillCast";
 import {
   applyCrit,
   dashRange,
-  dashCooldown,
   dashHasIceBlast,
   dashIceBlastDamage,
   dashIceBlastRadius,

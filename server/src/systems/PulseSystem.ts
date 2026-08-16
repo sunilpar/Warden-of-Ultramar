@@ -14,7 +14,6 @@ import {
   pulseRadius,
   pulseShockChance,
 } from "../config/skillDefs";
-import type { SkillId } from "../config/skillDefs";
 
 const PULSE_SHOCK_DURATION_MS = 10000; // 10 seconds
 
@@ -33,11 +32,13 @@ export class PulseSystem {
     skillLevel: number,
     critRate: number,
     critDamage: number,
+    cardRadiusMult: number = 1,
+    cardDamageMult: number = 1,
   ): boolean {
     if (skillLevel <= 0) return false;
 
-    const damage = pulseDamage(skillLevel);
-    const radius = pulseRadius(skillLevel);
+    const damage = pulseDamage(skillLevel) * cardDamageMult;
+    const radius = pulseRadius(skillLevel) * cardRadiusMult;
     const shockChance = pulseShockChance(skillLevel);
     const now = Date.now();
 
@@ -73,9 +74,11 @@ export class PulseSystem {
     skillLevel: number = 1,
     critRate: number = 0,
     critDamage: number = 1.5,
+    cardRadiusMult: number = 1,
+    cardDamageMult: number = 1,
   ): boolean {
-    const damage = pulseDamage(skillLevel);
-    const radius = pulseRadius(skillLevel);
+    const damage = pulseDamage(skillLevel) * cardDamageMult;
+    const radius = pulseRadius(skillLevel) * cardRadiusMult;
     const shockChance = pulseShockChance(skillLevel);
     const now = Date.now();
 

@@ -22,6 +22,7 @@
  *   SkillId to its current level; EnemySystem reads it when casting.
  */
 import { Schema, type } from "@colyseus/schema";
+import { CardInstance } from "./CardInstance";
 import {
   type SkillId,
   getSkillHitFeedback,
@@ -72,6 +73,16 @@ export class Enemy extends Schema {
   @type("number") critDamage: number = 1.5;
   /** XP awarded when this enemy is killed. */
   @type("number") xpReward: number = 0;
+
+  // ---- Elite (synced) - true for the map's elite (buffed boss variant). ----
+  @type("boolean") isElite: boolean = false;
+
+  /**
+   * Loot card this enemy spawned with (skill + mods). When this enemy
+   * dies, the card drops to the ground (if uncommon+). The enemy's
+   * casts of the card's skill use the card's mods.
+   */
+  card: CardInstance | null = null;
 
   // ---- Facing (synced) — true = facing right, false = facing left.
   //      The tyranid sprite faces LEFT by default; the client flips when
@@ -225,6 +236,77 @@ export class Enemy extends Schema {
     this.damageTrackers.clear();
 
     this.recalcDerivedStats();
+  }
+
+  // ============================================================
+  // LOOT CARD MODIFIER HELPERS
+  // ============================================================
+
+  /** True if the enemy has a card for the given skill. */
+  hasCardFor(skill: SkillId): boolean {
+    return !!this.card && this.card.skill === skill;
+  }
+
+  /**
+   * Crit-rate bonus from the card (sums all inc_crit_rate mods).
+   * Applies ONLY when casting the card's own skill.
+   */
+  cardCritRateBonus(skill: SkillId): number {
+    if (!this.hasCardFor(skill)) return 0;
+    return this.card!.modIds.filter((m) => m === "inc_crit_rate").length * 0.1;
+  }
+
+  /** Crit-damage bonus from the card (inc_crit_damage). */
+  cardCritDamageBonus(skill: SkillId): number {
+    if (!this.hasCardFor(skill)) return 0;
+    return this.card!.modIds.filter((m) => m === "inc_crit_damage").length * 0.2;
+  }
+
+  /** Skill-damage multiplier bonus (inc_atk_damage). */
+  cardDamageBonus(skill: SkillId): number {
+    if (!this.hasCardFor(skill)) return 0;
+    return 1 + this.card!.modIds.filter((m) => m === "inc_atk_damage").length * 0.1;
+  }
+
+  /** Radius multiplier (unique: wide_sweep -> 2x radius / 0.5x damage). */
+  cardRadiusMult(skill: SkillId): number {
+    if (!this.hasCardFor(skill)) return 1;
+    return this.card!.modIds.includes("wide_sweep") ? 2.0 : 1;
+  }
+
+  /** Damage multiplier from the unique wide_sweep (0.5 when present). */
+  cardUniqueDamageMult(skill: SkillId): number {
+    if (!this.hasCardFor(skill)) return 1;
+    return this.card!.modIds.includes("wide_sweep") ? 0.5 : 1;
+  }
+
+  /**
+   * Turn this enemy into the map's ELITE variant. Call AFTER init() -
+   * init() must already be given the boosted level (highest player level
+   * + ELITE.LEVEL_BONUS) so level scaling applies; this then layers the
+   * unique elite buffs on top:
+   *   - +20% HP and shield
+   *   - double XP vs the underlying enemy type
+   *   - bigger combat hitbox (client also renders a bigger sprite)
+   *
+   * NOTE: collisionRadius (tile collision) is intentionally NOT grown so
+   * the elite can still navigate 1-tile corridors.
+   */
+  makeElite(
+    hpBonus: number = 0.2,
+    xpMultiplier: number = 2.0,
+    sizeMultiplier: number = 1.6,
+  ): void {
+    this.isElite = true;
+    this.title = `Elite ${this.title}`;
+    const hpMult = 1 + hpBonus;
+    this.maxHealth = Math.round(this.maxHealth * hpMult);
+    this.currentHealth = this.maxHealth;
+    this.maxShield = Math.round(this.maxShield * hpMult);
+    this.shield = this.maxShield;
+    this.xpReward = Math.round(this.xpReward * xpMultiplier);
+    this.hitboxW = Math.round(this.hitboxW * sizeMultiplier);
+    this.hitboxH = Math.round(this.hitboxH * sizeMultiplier);
   }
 
   /**
@@ -393,7 +475,6 @@ export class Enemy extends Schema {
     this.bleedTickAccum += dt;
     if (this.bleedTickAccum >= 0.5) {
       this.bleedTickAccum -= 0.5;
-      const hpBefore = this.currentHealth;
       this.currentHealth = Math.max(
         0,
         this.currentHealth - this.bleedTickDamage,

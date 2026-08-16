@@ -28,6 +28,7 @@
  */
 import { Schema, type, MapSchema } from "@colyseus/schema";
 import { PLAYER_STATS } from "../config/playerStats";
+import { CardInstance } from "./CardInstance";
 import { type SkillId, getSkillHitFeedback } from "../config/skillDefs";
 
 export interface InputData {
@@ -166,6 +167,11 @@ export class Player extends Schema {
   /** Shield STAT level (controls shield amount). +20 shield per stat level.
    *  Grows automatically with player level (levelUp increments this). */
   @type("number") shieldStatLevel: number = 1;
+  /**
+   * Equipped loot cards per skill (SkillId -> rolled card with mods).
+   * Only the skill's own card's mods apply when casting that skill.
+   */
+  equippedCards: Map<SkillId, CardInstance> = new Map();
   /** Shield CARD/SLOT level (controls recovery delay). Lower delay per level.
    *  Upgraded via the C-tab / message 6 (stat === "shield"). */
   @type("number") shieldCardLevel: number = 1;
@@ -222,7 +228,9 @@ export class Player extends Schema {
   recomputeShield(): void {
     const S = PLAYER_STATS.SHIELD_STAT;
     this.maxShield =
-      S.BASE_AMOUNT + (this.shieldStatLevel - 1) * S.AMOUNT_PER_LEVEL;
+      S.BASE_AMOUNT +
+      (this.shieldStatLevel - 1) * S.AMOUNT_PER_LEVEL +
+      this.cardShieldBonus();
     this.shield = this.maxShield;
     this.shieldRechargeAt = 0;
     this.shieldState = 0;
@@ -462,6 +470,69 @@ export class Player extends Schema {
   /** Set a skill's level (clamped to >=1). */
   setSkillLevel(skill: SkillId, level: number): void {
     this.skillLevels.set(skill, Math.max(1, Math.floor(level)));
+  }
+
+  // ============================================================
+  // EQUIPPED CARD MODIFIER HELPERS
+  // ============================================================
+
+  private getCardFor(skill: SkillId): CardInstance | null {
+    return this.equippedCards.get(skill) ?? null;
+  }
+
+  /** Crit-rate bonus from the equipped card for this skill. */
+  cardCritRateBonus(skill: SkillId): number {
+    const c = this.getCardFor(skill);
+    if (!c) return 0;
+    return c.modIds.filter((m) => m === "inc_crit_rate").length * 0.1;
+  }
+
+  /** Crit-damage bonus from the equipped card for this skill. */
+  cardCritDamageBonus(skill: SkillId): number {
+    const c = this.getCardFor(skill);
+    if (!c) return 0;
+    return c.modIds.filter((m) => m === "inc_crit_damage").length * 0.2;
+  }
+
+  /** Skill-damage multiplier (inc_atk_damage). */
+  cardDamageBonus(skill: SkillId): number {
+    const c = this.getCardFor(skill);
+    if (!c) return 1;
+    return 1 + c.modIds.filter((m) => m === "inc_atk_damage").length * 0.1;
+  }
+
+  /** Radius multiplier (unique wide_sweep -> 2x radius). */
+  cardRadiusMult(skill: SkillId): number {
+    const c = this.getCardFor(skill);
+    if (!c) return 1;
+    return c.modIds.includes("wide_sweep") ? 2.0 : 1;
+  }
+
+  /** Damage multiplier from the unique wide_sweep (0.5 when present). */
+  cardUniqueDamageMult(skill: SkillId): number {
+    const c = this.getCardFor(skill);
+    if (!c) return 1;
+    return c.modIds.includes("wide_sweep") ? 0.5 : 1;
+  }
+
+  /** Flat shield bonus from all equipped shield cards. */
+  cardShieldBonus(): number {
+    let bonus = 0;
+    this.equippedCards.forEach((card) => {
+      if (card.skill === "shield") {
+        bonus += card.modIds.filter((m) => m === "inc_shield_amount").length * 100;
+      }
+    });
+    return bonus;
+  }
+
+  /** Equip a card, replacing any existing card for that skill. */
+  equipCard(card: CardInstance): void {
+    this.equippedCards.set(card.skill as SkillId, card);
+    if (card.skill === "shield") this.recomputeShield();
+    const lvl = this.getSkillLevel(card.skill as SkillId);
+    if (lvl <= 0) this.setSkillLevel(card.skill as SkillId, 1);
+    else this.setSkillLevel(card.skill as SkillId, Math.max(lvl, card.level));
   }
 
   /** Advance a skill's level by 1 (for the "0" upgrade key). */
