@@ -19,6 +19,7 @@
 import { Room, Client } from "colyseus";
 import { RoomState } from "../schema/RoomState";
 import { GroundCard } from "../schema/GroundCard";
+import { CardInstance } from "../schema/CardInstance";
 import { LootSystem } from "../systems/LootSystem";
 import { Player, InputData } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
@@ -528,7 +529,8 @@ export class GameRoom extends Room {
             player.cardCritRateBonus("pulse"),
           player.critDamage + player.cardCritDamageBonus("pulse"),
           player.cardRadiusMult("pulse"),
-          player.cardDamageBonus("pulse") * player.cardUniqueDamageMult("pulse"),
+          player.cardDamageBonus("pulse") *
+            player.cardUniqueDamageMult("pulse"),
         );
         player.startSkillCooldown(skill, pulseCooldown(level));
       } else if (skill === "shock") {
@@ -566,7 +568,8 @@ export class GameRoom extends Room {
             player.cardCritRateBonus("vortex"),
           player.critDamage + player.cardCritDamageBonus("vortex"),
           player.cardRadiusMult("vortex"),
-          player.cardDamageBonus("vortex") * player.cardUniqueDamageMult("vortex"),
+          player.cardDamageBonus("vortex") *
+            player.cardUniqueDamageMult("vortex"),
         );
         player.startSkillCooldown(skill, SKILL_DEFS.vortex.cooldown);
       }
@@ -686,7 +689,10 @@ export class GameRoom extends Room {
 
     // ---- Drop the dragged HUD card to the ground ----
     // msg: { skill: SkillId, level: number, x: number, y: number }
-    10: (client: Client, msg: { skill: SkillId; level: number; x: number; y: number }) => {
+    10: (
+      client: Client,
+      msg: { skill: SkillId; level: number; x: number; y: number },
+    ) => {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.isDead) return;
       if (!msg || !msg.skill) return;
@@ -757,7 +763,8 @@ export class GameRoom extends Room {
       if (!player || player.isDead) return;
       const card = this.state.groundCards.get(msg?.cardId ?? "");
       if (!card) return;
-      if (!msg || typeof msg.x !== "number" || typeof msg.y !== "number") return;
+      if (!msg || typeof msg.x !== "number" || typeof msg.y !== "number")
+        return;
       // Reach: 3 tiles (~160px) from the player.
       const dx = msg.x - player.x;
       const dy = msg.y - player.y;
@@ -768,7 +775,6 @@ export class GameRoom extends Room {
       card.y = Math.max(16, Math.min(map.heightPx - 16, msg.y));
       card.pickupLockUntil = Date.now() + 500; // re-arm pickup grace
     },
-
   };
 
   // ============================================================
@@ -802,6 +808,24 @@ export class GameRoom extends Room {
         for (const [skill, lvl] of Object.entries(ps.skillLevels)) {
           player.setSkillLevel(skill as any, lvl as number);
         }
+      }
+      // Restore equipped loot cards (mods + rarity) from the previous map.
+      // equipCard re-applies shield bonuses and clamps skill levels.
+      if (Array.isArray(ps.equippedCards)) {
+        for (const c of ps.equippedCards) {
+          if (!c || typeof c.skill !== "string") continue;
+          const card = new CardInstance();
+          card.skill = c.skill;
+          card.level = Math.max(1, c.level | 0);
+          card.rarity = typeof c.rarity === "string" ? c.rarity : "common";
+          if (Array.isArray(c.modIds)) {
+            for (const m of c.modIds) {
+              if (typeof m === "string") card.modIds.push(m);
+            }
+          }
+          player.equipCard(card);
+        }
+        player.recomputeShield();
       }
     } else {
       // Fresh player

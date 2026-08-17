@@ -256,7 +256,10 @@ export class GameScene extends Phaser.Scene {
    * Hover tooltip above a ground card: name, description and the card
    * sprite on the right of the box.
    */
-  private showGroundCardTooltip(card: any, entity: Phaser.GameObjects.Container): void {
+  private showGroundCardTooltip(
+    card: any,
+    entity: Phaser.GameObjects.Container,
+  ): void {
     this.hideGroundCardTooltip();
     const skill = card.skill as SkillId;
     const def = SKILL_CARDS[skill];
@@ -268,9 +271,7 @@ export class GameScene extends Phaser.Scene {
     const rarityColor = RARITY_COLORS[rarity] ?? RARITY_COLORS.common;
     const rarityHex = "#" + rarityColor.toString(16).padStart(6, "0");
     const modIds: string[] = (card.card?.modIds as string[]) ?? [];
-    const modLines = modIds.map(
-      (m) => "* " + (MOD_NAMES[m] ?? m),
-    );
+    const modLines = modIds.map((m) => "* " + (MOD_NAMES[m] ?? m));
     // Height grows with mod count (base 116 + 14 per mod, capped).
     const H = 116 + Math.min(4, modLines.length) * 14;
     const bg = this.add
@@ -342,7 +343,11 @@ export class GameScene extends Phaser.Scene {
    * cursor as a held card. Releasing on a HUD slot equips it (server
    * grants the skill); releasing on the map re-drops it at that spot.
    */
-  private beginGroundCardGrab(cardId: string, card: any, entity: Phaser.GameObjects.Container): void {
+  private beginGroundCardGrab(
+    cardId: string,
+    card: any,
+    entity: Phaser.GameObjects.Container,
+  ): void {
     if (!this.room || this.dragCard) return;
     // Range gate (same 96px reach rule the server enforces on pickup).
     const p = this.currentPlayer;
@@ -359,12 +364,22 @@ export class GameScene extends Phaser.Scene {
       .image(0, 0, "card_sheet", cardFrameForLevel(skill, card.level ?? 1))
       .setDisplaySize(slot0.width, slot0.height);
     const cdFill = this.add
-      .rectangle(0, 0, slot0.width, slot0.height, CARD_CD_COLORS[skill] ?? 0xffffff, 0.45)
+      .rectangle(
+        0,
+        0,
+        slot0.width,
+        slot0.height,
+        CARD_CD_COLORS[skill] ?? 0xffffff,
+        0.45,
+      )
       .setOrigin(0, 0)
       .setVisible(false);
     cdFill.setData("baseH", slot0.height);
     const container = this.add
-      .container(this.input.activePointer.x, this.input.activePointer.y, [img, cdFill])
+      .container(this.input.activePointer.x, this.input.activePointer.y, [
+        img,
+        cdFill,
+      ])
       .setScrollFactor(0)
       .setDepth(2000);
     container.setScale(1.08);
@@ -401,9 +416,9 @@ export class GameScene extends Phaser.Scene {
     this.groundGrab = null;
     const slotIdx = this.slotAtPointer(pointer);
     if (slotIdx >= 0) {
-      // EQUIP with INSERT semantics: other cards make way (shift toward
-      // the first empty slot); if the HUD is completely full, the card
-      // pushed off the end is dropped to the ground by the server.
+      // EQUIP: when a gap exists, other cards shift to make way; when the
+      // HUD is full, the card in the TARGET slot is replaced (the server
+      // drops it to the ground) with no shifting.
       const wantSkill = (g.card.card?.skill as SkillId) ?? g.card.skill;
       const displaced = this.computeInsertDisplacement(wantSkill, slotIdx);
       this.pendingPickups.add(g.cardId);
@@ -453,6 +468,10 @@ export class GameScene extends Phaser.Scene {
   ];
   /** Skill level cache (mirrors synced skillLevels for card art). */
   private skillLevelCache: Partial<Record<SkillId, number>> = {};
+  /** Full card data (rarity/modIds) per equipped skill, tracked for map transitions. */
+  private cardDataCache: Partial<
+    Record<SkillId, { rarity: string; modIds: string[] }>
+  > = {};
   /** Input hint labels under each slot. */
   private slotInputLabels: Phaser.GameObjects.Text[] = [];
   /** "+" hints shown on empty slots while dragging. */
@@ -510,10 +529,8 @@ export class GameScene extends Phaser.Scene {
   /** Toast shown while standing on a still-locked exit tile. */
   private exitLockedToast: Phaser.GameObjects.Text | null = null;
   /** Ground card entities by synced groundCards key. */
-  private groundCardEntities: Map<
-    string,
-    Phaser.GameObjects.Container
-  > = new Map();
+  private groundCardEntities: Map<string, Phaser.GameObjects.Container> =
+    new Map();
   /** Hover tooltip for ground cards (name / description / sprite). */
   private groundCardTooltip: Phaser.GameObjects.Container | null = null;
   /** Ground card ids we asked to pick up (awaiting server confirm). */
@@ -715,6 +732,7 @@ export class GameScene extends Phaser.Scene {
     this.slotLayout = [];
     this.hudCards = new Map();
     this.skillLevelCache = {};
+    this.cardDataCache = {};
     this.slotInputLabels = [];
     this.slotPlusHints = [];
     this.liveLayout = null;
@@ -1058,7 +1076,7 @@ export class GameScene extends Phaser.Scene {
                 );
               }
             }
-            (void 0);
+            void 0;
             // Track vortex cooldown for slot 5
             this.currentPlayer.setData(
               "vortexCdEndsAt",
@@ -1592,6 +1610,11 @@ export class GameScene extends Phaser.Scene {
         const wantSlot = this.pendingPickupSlots.get(cardId) ?? -1;
         this.pendingPickupSlots.delete(cardId);
         this.addPickedUpCardToHud(card.skill, card.level ?? 1, wantSlot);
+        // Track the full card (mods/rarity) for map transitions.
+        this.cardDataCache[card.skill as SkillId] = {
+          rarity: card.card?.rarity ?? "common",
+          modIds: card.card?.modIds ? Array.from(card.card.modIds) : [],
+        };
         this.syncAllCardPositions();
       }
     });
@@ -2241,10 +2264,37 @@ export class GameScene extends Phaser.Scene {
   private initSlotCards(): void {
     if (!this.cardSlots || this.cardSlots.length === 0) return;
     this.slotLayout = Array(5).fill(null);
-    // Default layout: shock, pulse, dash, heal, vortex.
-    const defaults = GameScene.DEFAULT_LAYOUT;
-    for (let i = 0; i < Math.min(5, defaults.length); i++) {
-      this.slotLayout[i] = defaults[i];
+    // Map transition: restore the exact HUD layout the player left with.
+    // Falls back to the default layout for fresh players.
+    const startData = this.sys.settings.data as
+      | { playerState?: any }
+      | undefined;
+    const carried = startData?.playerState;
+    if (
+      carried &&
+      Array.isArray(carried.slotLayout) &&
+      carried.slotLayout.length > 0
+    ) {
+      for (let i = 0; i < Math.min(5, carried.slotLayout.length); i++) {
+        this.slotLayout[i] = carried.slotLayout[i] ?? null;
+      }
+      // Restore full card data (rarity/mods) for the carried cards.
+      if (Array.isArray(carried.equippedCards)) {
+        for (const c of carried.equippedCards) {
+          if (c && c.skill) {
+            this.cardDataCache[c.skill as SkillId] = {
+              rarity: c.rarity ?? "common",
+              modIds: Array.isArray(c.modIds) ? c.modIds : [],
+            };
+          }
+        }
+      }
+    } else {
+      // Default layout: shock, pulse, dash, heal, vortex.
+      const defaults = GameScene.DEFAULT_LAYOUT;
+      for (let i = 0; i < Math.min(5, defaults.length); i++) {
+        this.slotLayout[i] = defaults[i];
+      }
     }
     this.createSlotInputIcons();
     this.createSlotPlusHints();
@@ -2253,6 +2303,9 @@ export class GameScene extends Phaser.Scene {
 
   /** Reset all slots to the default card arrangement (used on death). */
   private resetSlotLayoutToDefault(): void {
+    // Death wipes equipped loot cards on the server — clear the local
+    // card data cache so a later map transition doesn't resurrect them.
+    this.cardDataCache = {};
     this.commitLayout(GameScene.DEFAULT_LAYOUT.slice());
     this.hideBolterTooltip();
   }
@@ -2285,14 +2338,19 @@ export class GameScene extends Phaser.Scene {
     for (let i = 0; i < this.cardSlots.length; i++) {
       const c = this.slotCenter(i);
       const label = this.add
-        .text(c.x, c.y + this.cardSlots[i].height / 2 + 10, GameScene.SLOT_INPUTS[i], {
-          color: "#dddddd",
-          fontSize: "11px",
-          fontFamily: "monospace",
-          fontStyle: "bold",
-          stroke: "#000000",
-          strokeThickness: 3,
-        })
+        .text(
+          c.x,
+          c.y + this.cardSlots[i].height / 2 + 10,
+          GameScene.SLOT_INPUTS[i],
+          {
+            color: "#dddddd",
+            fontSize: "11px",
+            fontFamily: "monospace",
+            fontStyle: "bold",
+            stroke: "#000000",
+            strokeThickness: 3,
+          },
+        )
         .setOrigin(0.5)
         .setScrollFactor(0)
         .setDepth(104);
@@ -2315,7 +2373,14 @@ export class GameScene extends Phaser.Scene {
         .image(0, 0, "card_sheet", frame)
         .setDisplaySize(slot.width, slot.height);
       const cdFill = this.add
-        .rectangle(0, 0, slot.width, slot.height, CARD_CD_COLORS[skill] ?? 0xffffff, 0.45)
+        .rectangle(
+          0,
+          0,
+          slot.width,
+          slot.height,
+          CARD_CD_COLORS[skill] ?? 0xffffff,
+          0.45,
+        )
         .setOrigin(0, 0)
         .setVisible(false);
       cdFill.setData("baseH", slot.height);
@@ -2343,14 +2408,11 @@ export class GameScene extends Phaser.Scene {
 
   /** Right-click grab + hover tooltip handling for one card. */
   private attachCardHandlers(obj: HudCardObj): void {
-    obj.container.on(
-      "pointerdown",
-      (pointer: Phaser.Input.Pointer) => {
-        // Only LEFT button grabs a card (right stays the cast button).
-        if (pointer.rightButtonDown()) return;
-        this.beginCardDrag(obj);
-      },
-    );
+    obj.container.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      // Only LEFT button grabs a card (right stays the cast button).
+      if (pointer.rightButtonDown()) return;
+      this.beginCardDrag(obj);
+    });
     obj.container.on("pointerover", () => {
       const i = this.slotLayout.indexOf(obj.skill);
       if (i >= 0 && !this.dragCard) this.showBolterTooltip(this.cardSlots[i]);
@@ -2469,6 +2531,7 @@ export class GameScene extends Phaser.Scene {
       this.dropCardToGround(d.obj.skill, pointer);
       d.obj.container.destroy();
       this.hudCards.delete(d.obj.skill);
+      this.cardDataCache[d.obj.skill] = undefined;
       this.dragCard = null;
       this.liveLayout = null;
       this.updatePlusHints();
@@ -2499,7 +2562,10 @@ export class GameScene extends Phaser.Scene {
    * for everyone. The card leaves this player's HUD (slotLayout keeps
    * the now-empty slot).
    */
-  private dropCardToGround(skill: SkillId, pointer: Phaser.Input.Pointer): void {
+  private dropCardToGround(
+    skill: SkillId,
+    pointer: Phaser.Input.Pointer,
+  ): void {
     if (!this.room) return;
     const level = this.skillLevelCache[skill] ?? 1;
     this.room.send(10, {
@@ -2514,7 +2580,11 @@ export class GameScene extends Phaser.Scene {
    * Add a picked-up skill card to the HUD: first empty slot, else it
    * replaces nothing (kept for later inventory work).
    */
-  private addPickedUpCardToHud(skill: SkillId, level: number, preferSlot = -1): void {
+  private addPickedUpCardToHud(
+    skill: SkillId,
+    level: number,
+    preferSlot = -1,
+  ): void {
     this.skillLevelCache[skill] = level;
     const idx = this.slotLayout.indexOf(skill);
     if (idx >= 0) return; // already on the HUD
@@ -2544,18 +2614,16 @@ export class GameScene extends Phaser.Scene {
           this.slotLayout[preferSlot] = null;
           empty = preferSlot;
         } else {
-          // Full HUD: last card is displaced (server drops it).
-          const displaced = this.slotLayout[4];
-          if (displaced) {
+          // Full HUD: the card in the TARGET slot is replaced (the server
+          // already dropped it to the ground). No shifting of other cards.
+          const displaced = this.slotLayout[preferSlot];
+          if (displaced && displaced !== skill) {
             const oldCard = this.hudCards.get(displaced);
             if (oldCard) {
               oldCard.container.destroy();
               this.hudCards.delete(displaced);
             }
-            this.slotLayout[4] = null;
-            for (let i = 4; i > preferSlot; i--) {
-              this.slotLayout[i] = this.slotLayout[i - 1];
-            }
+            this.cardDataCache[displaced] = undefined;
             this.slotLayout[preferSlot] = null;
             empty = preferSlot;
           }
@@ -2581,7 +2649,14 @@ export class GameScene extends Phaser.Scene {
       .image(0, 0, "card_sheet", frame)
       .setDisplaySize(slot.width, slot.height);
     const cdFill = this.add
-      .rectangle(0, 0, slot.width, slot.height, CARD_CD_COLORS[skill] ?? 0xffffff, 0.45)
+      .rectangle(
+        0,
+        0,
+        slot.width,
+        slot.height,
+        CARD_CD_COLORS[skill] ?? 0xffffff,
+        0.45,
+      )
       .setOrigin(0, 0)
       .setVisible(false);
     cdFill.setData("baseH", slot.height);
@@ -2589,7 +2664,13 @@ export class GameScene extends Phaser.Scene {
       .container(c.x, c.y, [img, cdFill])
       .setScrollFactor(0)
       .setDepth(102);
-    const obj: HudCardObj = { skill, container, img, cdFill, targetSlot: empty };
+    const obj: HudCardObj = {
+      skill,
+      container,
+      img,
+      cdFill,
+      targetSlot: empty,
+    };
     container.setSize(slot.width, slot.height);
     const PAD = 12; // generous grab padding (cards sit 25px apart)
     container.setInteractive(
@@ -2607,17 +2688,23 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * Simulate inserting `skill` at `slot`: return the skill that gets
-   * pushed off the HUD (null when a gap absorbs the shift). Does NOT
-   * mutate state - the actual layout is applied when the server
-   * confirms the pickup.
+   * Simulate equipping `skill` at `slot`: return the skill that must be
+   * dropped to make room (null when nobody is displaced). Does NOT mutate
+   * state - the actual layout is applied when the server confirms.
+   *
+   * - An empty slot exists: cards shift to make way, nobody is dropped.
+   * - HUD full: the card in the TARGET slot is replaced (dropped to the
+   *   ground), no shifting of the other cards.
    */
-  private computeInsertDisplacement(skill: SkillId, slot: number): SkillId | null {
-    if (this.slotLayout.indexOf(skill) >= 0) return null; // already placed
+  private computeInsertDisplacement(
+    skill: SkillId,
+    slot: number,
+  ): SkillId | null {
+    if (this.slotLayout.indexOf(skill) >= 0) return null; // already placed (upgrade)
     const empty = this.firstEmptySlot();
     if (empty >= 0) return null; // a gap absorbs the shift, nobody falls off
-    // Full HUD: the last slot's card is pushed off.
-    return this.slotLayout[4] === skill ? null : this.slotLayout[4];
+    // Full HUD: replace the card sitting in the target slot.
+    return this.slotLayout[slot] === skill ? null : this.slotLayout[slot];
   }
 
   /** Red toast when a pickup/grab is rejected. */
@@ -2816,13 +2903,7 @@ export class GameScene extends Phaser.Scene {
           const healLvl = this.skillLevelCache.heal ?? 1;
           const totalMs =
             1000 *
-            (healLvl <= 6
-              ? 15
-              : healLvl === 7
-                ? 13
-                : healLvl === 8
-                  ? 11
-                  : 10);
+            (healLvl <= 6 ? 15 : healLvl === 7 ? 13 : healLvl === 8 ? 11 : 10);
           fillPct = Math.max(0, Math.min(1, 1 - (endsAtH - now) / totalMs));
         } else {
           const kills =
@@ -5798,6 +5879,20 @@ export class GameScene extends Phaser.Scene {
             skillLevels[skill] = lvl;
           });
         }
+        // Preserve equipped cards (mods/rarity) across the map change.
+        // Server-side equippedCards is not synced, so rebuild it from the
+        // local HUD state: one entry per skill currently on the HUD.
+        const equippedCards: any[] = [];
+        for (const skill of this.slotLayout) {
+          if (!skill) continue;
+          const data = this.cardDataCache[skill];
+          equippedCards.push({
+            skill,
+            level: this.skillLevelCache[skill] ?? 1,
+            rarity: data?.rarity ?? "common",
+            modIds: data?.modIds ?? [],
+          });
+        }
         // Apply map transition XP bonus directly to the serialized state
         const TRANSITION_XP = this.sys.settings.key === "game2" ? 1000 : 500;
         let txp = (p.currentXp ?? 0) + TRANSITION_XP;
@@ -5825,6 +5920,8 @@ export class GameScene extends Phaser.Scene {
           moveSpeed: p.moveSpeed,
           skillLevels,
           skillPoints: tSkillPoints,
+          equippedCards,
+          slotLayout: this.slotLayout.slice(),
         };
       }
 

@@ -443,6 +443,8 @@ export class Player extends Schema {
    * Called when the player presses the Respawn button.
    */
   respawn(): void {
+    // Death is the only thing that wipes equipped loot cards.
+    this.equippedCards.clear();
     this.initBaseStats();
     // Reset skills to level 1 defaults
     this.skillLevels.clear();
