@@ -31,10 +31,11 @@ export class HealSystem {
    * Cast heal for a player.
    * Returns true if the heal was applied.
    */
-  castPlayerHeal(player: Player, _sessionId: string): boolean {
-    const level = player.getSkillLevel("heal");
-    if (level <= 0) return false;
-    if (!player.isSkillReady("heal")) return false;
+  castPlayerHeal(player: Player, slot: number): boolean {
+    const card = player.slotCard(slot);
+    if (!card || card.skill !== "heal") return false;
+    const level = Math.max(1, Math.floor(card.level || 1));
+    if (!player.isSlotReady(slot)) return false;
 
     const def = SKILL_DEFS.heal;
     const pct = healPercent(level);
@@ -56,17 +57,12 @@ export class HealSystem {
           e.heal(Math.round(e.maxHealth * pct));
         }
       });
-      // Time-cooldown based (L6+)
-      player.startSkillCooldown("heal", healCooldown(level));
-      // VFX: AoE circle
+      // VFX: AoE circle (cooldown applied by the room, per slot)
       this.spawnHealVfx(player.x, player.y, radius, "player");
     } else {
       // Self-only heal (percentage of max HP)
       player.heal(Math.round(player.maxHealth * pct));
-      // Kill-charge: consume readiness, reset kills
-      player.healReady = false;
-      player.healKills = 0;
-      // VFX: green flash on self
+      // VFX: green flash on self (charge consumed by the room, per slot)
       this.spawnHealVfx(player.x, player.y, 0, "player");
     }
 

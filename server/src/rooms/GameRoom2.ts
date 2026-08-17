@@ -1,27 +1,36 @@
 /**
- * Game Room
- * =========
- * The authoritative server room. Handles:
- *   - Player join/leave
- *   - Movement input (message type 0)
- *   - Skill cast (message type 1)
- *   - Skill upgrade (message type 2)
- *   - Fixed timestep simulation (60 ticks/sec)
- *   - Enemy AI + projectile simulation
+ * Game Room 2 (Map 2)
+ * ===================
+ * Identical rules to GameRoom (see that file) but on LAYERED_MAP_2.
+ *
+ * CARD MODEL (shared with GameRoom)
+ * ---------------------------------
+ * The player HUD is `player.equippedSlots` — a synced array of 5 card
+ * slots (null = empty). Each slot is a pure skill TRIGGER: message 1
+ * names the SLOT, and the card in that slot casts its skill with ITS OWN
+ * mods. Duplicates of the same skill are allowed across slots.
  *
  * MESSAGE TYPES:
  *   0: Movement input { left, right, up, down, tick }
- *   1: Cast skill     { skill: SkillId, angle: number }
+ *   1: Cast slot      { slot: number (0..4), angle: number }
  *   2: Upgrade skill  { skill: SkillId }
- *   3: Viewport rect   { x, y, w, h } (camera world view)
+ *   3: Viewport rect  { x, y, w, h }
+ *   4: Respawn
+ *   5: Map transition XP (map2 -> map3: +1000 XP)
+ *   6: Stat point spend { stat }
+ *   7: Card upgrade    { skill }
+ *   8: Grant skill point (debug)
+ *   9: Force level-up (debug)
+ *  10: Drop slot card  { slot: number }
+ *  11: Pick up card    { cardId, slot: number }
+ *  12: Move ground card{ cardId, x, y }
  */
-
 import { Room, Client } from "colyseus";
 import { RoomState } from "../schema/RoomState";
 import { GroundCard } from "../schema/GroundCard";
 import { CardInstance } from "../schema/CardInstance";
 import { LootSystem } from "../systems/LootSystem";
-import { Player, InputData } from "../schema/Player";
+import { Player, InputData, NUM_CARD_SLOTS } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
 import { MapSystem2 } from "../systems/MapSystem2";
 import { PlayerSystem } from "../systems/PlayerSystem";
@@ -42,6 +51,7 @@ import {
   skillCritRate,
   pulseCooldown,
   dashCooldown,
+  healCooldown,
   type SkillId,
 } from "../config/skillDefs";
 import {
@@ -51,6 +61,15 @@ import {
   applyEnemyModifiers,
   type ModifierId,
 } from "../config/modifiers";
+
+/** Starter cards handed to FRESH players (all 5 slots filled). */
+const STARTER_CARDS: { skill: SkillId; level: number }[] = [
+  { skill: "shock", level: 1 },
+  { skill: "pulse", level: 1 },
+  { skill: "dash", level: 1 },
+  { skill: "heal", level: 1 },
+  { skill: "vortex", level: 1 },
+];
 
 export class GameRoom2 extends Room {
   state = new RoomState();
@@ -69,9 +88,7 @@ export class GameRoom2 extends Room {
   private dashSystem!: DashSystem;
   private vortexSystem!: VortexSystem;
   private spawnedZones = new Set<number>();
-  /** Enemies killed so far this map (drives the elite spawn threshold). */
   private enemiesKilled: number = 0;
-  /** True once this map's single elite enemy has spawned. */
   private eliteSpawned: boolean = false;
   private activeModifiers: ModifierId[] = MAP_MODIFIERS["game_room_2"] ?? [];
   private viewports = new Map<
@@ -175,8 +192,7 @@ export class GameRoom2 extends Room {
     // Tick player skill cooldowns + bleed DoT
     this.state.players.forEach((p) => {
       p.tickShield(dt);
-      p.tickSkillCooldowns(dt);
-      p.tickHealCooldown(dt);
+      p.tickSlotCooldowns(dt);
       if (p.tickBleed(dt)) {
         // Player died from bleed
         p.die();
@@ -213,32 +229,17 @@ export class GameRoom2 extends Room {
     return 20 + Math.floor(this.getHighestPlayerLevel() / 2);
   }
 
-  /**
-   * Drop the player's equipped card for `skill` to the ground at their
-   * position. If they never picked up a card instance for it (default
-   * spawn skill), drops a plain common card at their current level.
-   */
-  private dropEquippedCardFor(player: Player, skill: SkillId): void {
-    const equipped = player.equippedCards.get(skill);
-    if (!equipped && player.getSkillLevel(skill) <= 0) return;
+  /** Drop a rolled card instance to the ground at the player's position. */
+  private dropCardToGround(player: Player, card: CardInstance): GroundCard {
     const gc = new GroundCard();
-    if (equipped) {
-      gc.card = equipped;
-      gc.skill = equipped.skill;
-      gc.level = equipped.level;
-      player.equippedCards.delete(skill);
-    } else {
-      const lvl = player.getSkillLevel(skill);
-      gc.skill = skill;
-      gc.level = lvl;
-      gc.card.skill = skill;
-      gc.card.level = lvl;
-      gc.card.rarity = "common";
-    }
+    gc.card = card;
+    gc.skill = card.skill;
+    gc.level = card.level;
     gc.x = player.x;
     gc.y = player.y;
     gc.pickupLockUntil = Date.now() + 500;
     this.state.groundCards.set(this.nextGroundCardId(), gc);
+    return gc;
   }
 
   /** Monotonic id counter for dropped ground cards. */
@@ -392,10 +393,7 @@ export class GameRoom2 extends Room {
 
   /**
    * Spawn the map's single ELITE enemy once players have killed ~50% of
-   * the map's target enemy count. The elite is a random type drawn from
-   * the normal enemy pool, ELITE.LEVEL_BONUS levels above the highest
-   * player, with +20% HP/shield and double XP on top of that. It spawns
-   * at the center of a random enemy spawn zone.
+   * the map's target enemy count.
    */
   private maybeSpawnElite(): void {
     if (this.eliteSpawned) return;
@@ -448,17 +446,30 @@ export class GameRoom2 extends Room {
       if (player) player.inputQueue.push(input);
     },
 
-    // Cast a skill (player -> server). { skill, angle }
-    1: (client: Client, msg: { skill: SkillId; angle: number }) => {
+    // Cast the card in a HUD slot. { slot: 0..4, angle }
+    1: (client: Client, msg: { slot: number; angle: number }) => {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.isDead) return;
-      const skill = msg.skill;
-      const level = player.getSkillLevel(skill);
-      if (level <= 0) return; // skill not owned
-      if (!player.isSkillReady(skill)) return; // on cooldown
+      const slot = msg?.slot | 0;
+      if (slot < 0 || slot >= NUM_CARD_SLOTS) return;
+      // The slot IS the skill trigger: cast its card with ITS mods.
+      const card = player.slotCard(slot);
+      if (!card) return; // empty slot — nothing to cast
+      const skill = card.skill as SkillId;
+      // THIS card's own level — duplicates never share cast power.
+      const level = Math.max(1, Math.floor(card.level || 1));
+      if (!player.isSlotReady(slot)) return; // this SLOT is on cooldown
 
       if (skill === "heal") {
-        this.healSystem.castPlayerHeal(player, client.sessionId);
+        const healed = this.healSystem.castPlayerHeal(player, slot);
+        if (healed) {
+          const lvl6 = level >= SKILL_DEFS.heal.aoeUnlockLevel;
+          if (lvl6) {
+            player.startSlotCooldown(slot, healCooldown(level));
+          } else {
+            player.consumeHealCharge(slot);
+          }
+        }
         return;
       }
 
@@ -471,12 +482,13 @@ export class GameRoom2 extends Room {
           msg.angle,
           player.attack,
           level,
-          player.damageMultiplier,
-          skillCritRate("bolter", level, player.critRate),
-          player.critDamage,
+          player.damageMultiplier * player.slotDamageBonus(slot),
+          skillCritRate("bolter", level, player.critRate) +
+            player.slotCritRateBonus(slot),
+          player.critDamage + player.slotCritDamageBonus(slot),
         );
         if (fired) {
-          player.startSkillCooldown(skill, SKILL_DEFS.bolter.cooldown);
+          player.startSlotCooldown(slot, SKILL_DEFS.bolter.cooldown);
         }
       } else if (skill === "claw") {
         this.clawSystem.castClaw(
@@ -487,12 +499,13 @@ export class GameRoom2 extends Room {
           msg.angle,
           player.attack,
           level,
-          player.damageMultiplier,
+          player.damageMultiplier * player.slotDamageBonus(slot),
           10,
-          skillCritRate("claw", level, player.critRate),
-          player.critDamage,
+          skillCritRate("claw", level, player.critRate) +
+            player.slotCritRateBonus(slot),
+          player.critDamage + player.slotCritDamageBonus(slot),
         );
-        player.startSkillCooldown(skill, SKILL_DEFS.claw.cooldown);
+        player.startSlotCooldown(slot, SKILL_DEFS.claw.cooldown);
       } else if (skill === "slam") {
         this.slamSystem.castSlam(
           client.sessionId,
@@ -502,45 +515,46 @@ export class GameRoom2 extends Room {
           msg.angle,
           level,
           player.attack,
-          player.damageMultiplier,
-          skillCritRate("slam", level, player.critRate),
-          player.critDamage,
+          player.damageMultiplier * player.slotDamageBonus(slot),
+          skillCritRate("slam", level, player.critRate) +
+            player.slotCritRateBonus(slot),
+          player.critDamage + player.slotCritDamageBonus(slot),
         );
-        player.startSkillCooldown(skill, SKILL_DEFS.slam.cooldown);
+        player.startSlotCooldown(slot, SKILL_DEFS.slam.cooldown);
       } else if (skill === "pulse") {
         this.pulseSystem.castPlayerPulse(
           player,
           client.sessionId,
           level,
           skillCritRate("pulse", level, player.critRate) +
-            player.cardCritRateBonus("pulse"),
-          player.critDamage + player.cardCritDamageBonus("pulse"),
-          player.cardRadiusMult("pulse"),
-          player.cardDamageBonus("pulse") *
-            player.cardUniqueDamageMult("pulse"),
+            player.slotCritRateBonus(slot),
+          player.critDamage + player.slotCritDamageBonus(slot),
+          player.slotRadiusMult(slot),
+          player.slotDamageBonus(slot) * player.slotUniqueDamageMult(slot),
         );
-        player.startSkillCooldown(skill, pulseCooldown(level));
+        player.startSlotCooldown(slot, pulseCooldown(level));
       } else if (skill === "shock") {
         this.shockSystem.castPlayerShock(
           player,
           client.sessionId,
           level,
           skillCritRate("shock", level, player.critRate) +
-            player.cardCritRateBonus("shock"),
-          player.critDamage + player.cardCritDamageBonus("shock"),
+            player.slotCritRateBonus(slot),
+          player.critDamage + player.slotCritDamageBonus(slot),
           msg.angle,
         );
-        player.startSkillCooldown(skill, SKILL_DEFS.shock.baseCooldown);
+        player.startSlotCooldown(slot, SKILL_DEFS.shock.baseCooldown);
       } else if (skill === "dash") {
         this.dashSystem.castPlayerDash(
           player,
           client.sessionId,
           level,
           msg.angle,
-          skillCritRate("dash", level, player.critRate),
-          player.critDamage,
+          skillCritRate("dash", level, player.critRate) +
+            player.slotCritRateBonus(slot),
+          player.critDamage + player.slotCritDamageBonus(slot),
         );
-        player.startSkillCooldown(skill, dashCooldown(level));
+        player.startSlotCooldown(slot, dashCooldown(level));
       } else if (skill === "vortex") {
         this.vortexSystem.castVortex(
           client.sessionId,
@@ -550,15 +564,17 @@ export class GameRoom2 extends Room {
           msg.angle,
           level,
           player.attack,
-          player.damageMultiplier,
+          player.damageMultiplier * player.slotDamageBonus(slot),
           skillCritRate("vortex", level, player.critRate) +
-            player.cardCritRateBonus("vortex"),
-          player.critDamage + player.cardCritDamageBonus("vortex"),
-          player.cardRadiusMult("vortex"),
-          player.cardDamageBonus("vortex") *
-            player.cardUniqueDamageMult("vortex"),
+            player.slotCritRateBonus(slot),
+          player.critDamage + player.slotCritDamageBonus(slot),
+          player.slotRadiusMult(slot),
+          player.slotDamageBonus(slot) * player.slotUniqueDamageMult(slot),
         );
-        player.startSkillCooldown(skill, SKILL_DEFS.vortex.cooldown);
+        player.startSlotCooldown(slot, SKILL_DEFS.vortex.cooldown);
+      } else if (skill === "shield") {
+        // Shield has no active cast — it's a passive equipped card.
+        return;
       }
     },
 
@@ -569,8 +585,8 @@ export class GameRoom2 extends Room {
       const skill = msg.skill;
       const cur = player.getSkillLevel(skill);
       if (cur <= 0) {
-        // Learn it at level 1 if not owned
-        player.setSkillLevel(skill, 1);
+        // Not owned — can only be gained by equipping a card now.
+        return;
       } else if (cur < MAX_SKILL_LEVEL) {
         player.upgradeSkill(skill);
       }
@@ -589,18 +605,11 @@ export class GameRoom2 extends Room {
       const player = this.state.players.get(client.sessionId);
       if (!player || !player.isDead) return;
       // Respawn: reset stats, heal to full, move to spawn point.
+      // respawn() empties all HUD slots (death wipes equipped cards).
       player.respawn();
       const spawn = this.mapSystem.getSpawnPoint();
       player.x = spawn.x;
       player.y = spawn.y;
-      // Give shock + claw + heal + pulse + slam at level 1
-      player.setSkillLevel("shock", 1);
-      player.setSkillLevel("claw", 1);
-      player.setSkillLevel("heal", 1);
-      player.setSkillLevel("pulse", 1);
-      player.setSkillLevel("slam", 1);
-      player.setSkillLevel("dash", 1);
-      player.setSkillLevel("vortex", 1);
     },
 
     // Map transition XP reward (map2 -> map3: +1000 XP).
@@ -633,7 +642,9 @@ export class GameRoom2 extends Room {
         player.speedMultiplier += 0.05;
         player.recalcDerivedStats();
       } else if (stat === "shield") {
-        // Don't spend a skill point if shield card already at max level (10).
+        // Upgrades shield CARD/SLOT level (faster recovery), NOT shield amount.
+        // Shield amount grows automatically with player level.
+        // Don't spend a skill point if already at max level (10).
         if (player.shieldCardLevel >= 10) return;
         player.upgradeShieldSlot();
       } else {
@@ -673,72 +684,53 @@ export class GameRoom2 extends Room {
       );
     },
 
-    // ---- Drop the dragged HUD card to the ground ----
-    // msg: { skill: SkillId, level: number, x: number, y: number }
-    10: (
-      client: Client,
-      msg: { skill: SkillId; level: number; x: number; y: number },
-    ) => {
+    // ---- Drop the card in a HUD slot to the ground ----
+    // msg: { slot: number }
+    10: (client: Client, msg: { slot: number }) => {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.isDead) return;
-      if (!msg || !msg.skill) return;
-      // Card must be owned (level > 0) to drop.
-      if (player.getSkillLevel(msg.skill) <= 0) return;
-      // Drop at the player's position (not the cursor) so it stays near them.
-      const dropX = player.x;
-      const dropY = player.y;
-      const card = new GroundCard();
-      const equipped = player.equippedCards.get(msg.skill);
-      if (equipped) {
-        // Carry the full card (mods + rarity) and unequip it.
-        card.card = equipped;
-        card.skill = equipped.skill;
-        card.level = equipped.level;
-        player.equippedCards.delete(msg.skill);
-      } else {
-        card.skill = msg.skill;
-        card.level = Math.max(1, msg.level | 0);
-      }
-      card.x = dropX;
-      card.y = dropY;
-      card.pickupLockUntil = Date.now() + 500; // half-second pickup grace
-      this.state.groundCards.set(this.nextGroundCardId(), card);
+      const slot = msg?.slot | 0;
+      if (slot < 0 || slot >= NUM_CARD_SLOTS) return;
+      // Empty slot: nothing to drop, no-op (fixes the "empty card drop" bug).
+      if (!player.hasSlotCard(slot)) return;
+      const card = player.clearSlotCard(slot);
+      if (!card) return;
+      this.dropCardToGround(player, card);
       console.log(
-        `[GROUND] ${client.sessionId} dropped ${msg.skill} L${card.level} at ` +
-          `(${Math.round(dropX)}, ${Math.round(dropY)})`,
+        `[GROUND] ${client.sessionId} dropped slot ${slot} (${card.skill} ` +
+          `L${card.level}) at (${Math.round(player.x)}, ${Math.round(player.y)})`,
       );
     },
 
-    // ---- Pick up a ground card (equip it) ----
-    // msg: { cardId: string, replaceSkill?: SkillId }
-    // replaceSkill = when the client planned an INSERT that pushes a card
-    // off a full HUD, that skill's equipped card drops to the ground.
-    11: (client: Client, msg: { cardId: string; replaceSkill?: string }) => {
+    // ---- Pick up a ground card into a HUD slot ----
+    // msg: { cardId: string, slot: number }
+    // The picked card lands in `slot`. If that slot was occupied, its old
+    // card drops to the ground at the player's feet (swap-out rule).
+    // Empty target slot: nothing drops. No other slot is touched, so the
+    // same skill can exist in several slots at once.
+    11: (client: Client, msg: { cardId: string; slot: number }) => {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.isDead) return;
-      const card = this.state.groundCards.get(msg?.cardId ?? "");
-      if (!card) return;
-      if (Date.now() < card.pickupLockUntil) return;
+      const gc = this.state.groundCards.get(msg?.cardId ?? "");
+      if (!gc) return;
+      if (Date.now() < gc.pickupLockUntil) return;
+      const slot = msg?.slot | 0;
+      if (slot < 0 || slot >= NUM_CARD_SLOTS) return;
       // Must be close enough to pick up (2 tiles ~ 96px).
-      const dx = card.x - player.x;
-      const dy = card.y - player.y;
+      const dx = gc.x - player.x;
+      const dy = gc.y - player.y;
       if (dx * dx + dy * dy > 96 * 96) return;
-      const newSkill = card.card.skill as SkillId;
-      // Insert-push: only when the client says a card gets displaced.
-      if (
-        msg.replaceSkill &&
-        msg.replaceSkill !== newSkill &&
-        player.equippedCards.has(msg.replaceSkill as SkillId)
-      ) {
-        this.dropEquippedCardFor(player, msg.replaceSkill as SkillId);
-      }
-      // The player's old card for the same skill (previous version) drops.
-      this.dropEquippedCardFor(player, newSkill);
-      // Equip the full card: skill level (max) + all mods.
-      player.equipCard(card.card);
+      const card = gc.card;
+      if (!card || !card.skill) return;
+      // Equip into the slot; if occupied, drop the old card at the feet.
+      const old = player.setSlotCard(slot, card);
+      if (old) this.dropCardToGround(player, old);
+      // Remove from the ground.
       this.state.groundCards.delete(msg.cardId);
       console.log(
-        `[GROUND] ${client.sessionId} picked up ${card.skill} L${card.level}`,
+        `[GROUND] ${client.sessionId} picked up ${card.skill} L${card.level} ` +
+          `into slot ${slot}` +
+          (old ? ` (dropped ${old.skill} L${old.level})` : ""),
       );
     },
 
@@ -789,17 +781,14 @@ export class GameRoom2 extends Room {
       // Use the speedMultiplier directly from the serialized state.
       player.speedMultiplier = ps.speedMultiplier ?? 1.0;
       player.skillPoints = ps.skillPoints ?? 0;
-      // Restore skill levels
-      if (ps.skillLevels) {
-        for (const [skill, lvl] of Object.entries(ps.skillLevels)) {
-          player.setSkillLevel(skill as any, lvl as number);
-        }
-      }
-      // Restore equipped loot cards (mods + rarity) from the previous map.
-      // equipCard re-applies shield bonuses and clamps skill levels.
-      if (Array.isArray(ps.equippedCards)) {
-        for (const c of ps.equippedCards) {
-          if (!c || typeof c.skill !== "string") continue;
+      // Restore the HUD slots (cards + mods + rarity). skillLevels are
+      // re-derived from the cards by recomputeSkillLevels().
+      const carried = ps.equippedSlots;
+      if (Array.isArray(carried)) {
+        for (let i = 0; i < NUM_CARD_SLOTS; i++) {
+          const c = carried[i];
+          // Empty carried slot: the constructor's sentinel stays in place.
+          if (!c || typeof c.skill !== "string" || !c.skill) continue;
           const card = new CardInstance();
           card.skill = c.skill;
           card.level = Math.max(1, c.level | 0);
@@ -809,20 +798,24 @@ export class GameRoom2 extends Room {
               if (typeof m === "string") card.modIds.push(m);
             }
           }
-          player.equipCard(card);
+          player.equippedSlots[i] = card;
         }
+        player.recomputeSkillLevels();
         player.recomputeShield();
       }
     } else {
-      // Fresh player
+      // Fresh player: starter cards fill all 5 slots.
       player.initBaseStats();
-      player.setSkillLevel("shock", 1);
-      player.setSkillLevel("claw", 1);
-      player.setSkillLevel("heal", 1);
-      player.setSkillLevel("pulse", 1);
-      player.setSkillLevel("slam", 1);
-      player.setSkillLevel("dash", 1);
-      player.setSkillLevel("vortex", 1);
+      for (let i = 0; i < NUM_CARD_SLOTS && i < STARTER_CARDS.length; i++) {
+        const sc = STARTER_CARDS[i];
+        const card = new CardInstance();
+        card.skill = sc.skill;
+        card.level = sc.level;
+        card.rarity = "common";
+        player.equippedSlots[i] = card;
+      }
+      player.recomputeSkillLevels();
+      player.recomputeShield();
     }
 
     applyPlayerModifiers(player, this.activeModifiers);

@@ -24,12 +24,26 @@
  *   after a recovery delay. Shield amount grows with the shield SLOT level
  *   (SHIELD_LEVEL), not with a castable skill.
  *
+ * EQUIPPED CARD SLOTS (the HUD)
+ * -----------------------------
+ * `equippedSlots` is a SYNCED array of exactly 5 entries (one per HUD
+ * slot; null = empty). Each entry is a rolled CardInstance. A slot is a
+ * pure skill TRIGGER: when the input bound to slot i fires, the card in
+ * slot i casts its skill using ONLY that card's modifiers. Duplicates of
+ * the same skill are allowed across slots — each copy casts with its own
+ * mods. Skill levels (skillLevels) are derived: a skill's level = the
+ * highest card level among that skill's cards across all slots.
+ *
  * Only the fields marked @type are sent to clients; inputQueue is local.
  */
-import { Schema, type, MapSchema } from "@colyseus/schema";
+import { Schema, type, MapSchema, ArraySchema } from "@colyseus/schema";
 import { PLAYER_STATS } from "../config/playerStats";
 import { CardInstance } from "./CardInstance";
-import { type SkillId, getSkillHitFeedback } from "../config/skillDefs";
+import {
+  type SkillId,
+  getSkillHitFeedback,
+  SKILL_DEFS,
+} from "../config/skillDefs";
 
 export interface InputData {
   left: boolean;
@@ -38,6 +52,9 @@ export interface InputData {
   down: boolean;
   tick?: number;
 }
+
+/** Number of HUD card slots (input bindings: LMB, RMB, SPC, 1, 2). */
+export const NUM_CARD_SLOTS = 5;
 
 export class Player extends Schema {
   // ---- Position (synced) ----
@@ -106,31 +123,19 @@ export class Player extends Schema {
   // ---- Input queue (local — never synced) ----
   inputQueue: InputData[] = [];
 
-  // ---- Skill levels (synced) — per-skill level owned by this player.
-  //      Drives damage, color tiers, chain count, card art tier. Keys are
-  //      SkillId strings; values are the skill level (1..MAX_SKILL_LEVEL). ----
+  // ---- Skill levels (synced) — DERIVED from the equipped slots.
+  //      Level of a skill = highest level among that skill's cards in the
+  //      HUD slots. 0 / absent = not equipped anywhere. ----
   @type({ map: "number" }) skillLevels = new MapSchema<number>();
 
-  /** Server timestamp (ms) when the bolter comes off cooldown (for HUD fill). */
-  @type("number") bolterCooldownEndsAt: number = 0;
-  /** Server timestamp (ms) when slam comes off cooldown (for client HUD). */
-  @type("number") slamCooldownEndsAt: number = 0;
-  /** Server timestamp (ms) when claw comes off cooldown (for client HUD). */
-  @type("number") clawCooldownEndsAt: number = 0;
-  /** Server timestamp (ms) when pulse comes off cooldown (for client HUD). */
-  @type("number") pulseCooldownEndsAt: number = 0;
-  /** Server timestamp (ms) when shock comes off cooldown (for client HUD). */
-  @type("number") shockCooldownEndsAt: number = 0;
-  /** Server timestamp (ms) when heal comes off cooldown (for client HUD, L5+). */
-  @type("number") healCooldownEndsAt: number = 0;
-  /** Server timestamp (ms) when dash comes off cooldown (for client HUD). */
-  @type("number") dashCooldownEndsAt: number = 0;
-  /** Server timestamp (ms) when vortex comes off cooldown (for client HUD). */
-  @type("number") vortexCooldownEndsAt: number = 0;
-  /** Kill count towards next heal charge (L1-4 mode). Resets to 0 at killsToRecharge. */
-  @type("number") healKills: number = 0;
-  /** True if heal is ready to cast (for client HUD display). */
-  @type("boolean") healReady: boolean = true;
+  /**
+   * Per-slot cooldown end timestamps (ms), synced for the HUD fill.
+   * Every HUD slot cools down INDEPENDENTLY — duplicates of the same
+   * skill each run their own cooldown, mods, and cast level.
+   */
+  @type(["number"]) slotCooldownEndsAt = new ArraySchema<number>();
+  /** Per-slot heal kill charges (kill-charged heal cards, L1-5). */
+  @type(["number"]) slotHealKills = new ArraySchema<number>();
 
   /** Server timestamp (ms) until which the player flashes white (hit feedback). */
   @type("number") hitFlashUntil: number = 0;
@@ -152,9 +157,8 @@ export class Player extends Schema {
   /** Server timestamp (ms) until which the player is bleeding (DoT). */
   @type("number") bleedUntil: number = 0;
 
-  // ---- Skill cooldowns (NOT synced; server-only) — remaining seconds
-  //      before each skill can be cast again. ----
-  skillCooldowns: Map<SkillId, number> = new Map();
+  // ---- Per-slot cooldowns (NOT synced) — remaining seconds per slot. ----
+  slotCooldownRemaining: number[] = [0, 0, 0, 0, 0];
   /** Bleed damage per second (server-only; applied while bleedUntil > now). */
   bleedDps: number = 0;
   /** Damage per bleed tick (10% of claw damage). */
@@ -167,11 +171,16 @@ export class Player extends Schema {
   /** Shield STAT level (controls shield amount). +20 shield per stat level.
    *  Grows automatically with player level (levelUp increments this). */
   @type("number") shieldStatLevel: number = 1;
+
   /**
-   * Equipped loot cards per skill (SkillId -> rolled card with mods).
-   * Only the skill's own card's mods apply when casting that skill.
+   * THE HUD. Synced array of exactly NUM_CARD_SLOTS entries. Each entry is
+   * the CardInstance equipped in that HUD slot; an EMPTY slot is a
+   * CardInstance sentinel with skill === "" (ArraySchema cannot hold
+   * nulls). Slots are skill triggers — the card's skill is cast with the
+   * card's own mods when the slot's input fires. Duplicate skills are
+   * allowed; each slot is independent.
    */
-  equippedCards: Map<SkillId, CardInstance> = new Map();
+  @type([CardInstance]) equippedSlots = new ArraySchema<CardInstance>();
   /** Shield CARD/SLOT level (controls recovery delay). Lower delay per level.
    *  Upgraded via the C-tab / message 6 (stat === "shield"). */
   @type("number") shieldCardLevel: number = 1;
@@ -181,6 +190,18 @@ export class Player extends Schema {
    * while at 0. While Date.now() < this value, no recharge happens.
    */
   shieldRechargeAt: number = 0;
+
+  constructor() {
+    super();
+    // Fixed-size HUD: 5 entries, all empty sentinels to start.
+    // (ArraySchema cannot hold nulls — an empty slot is a CardInstance
+    // with skill === ""; only access slots through the helpers below.)
+    for (let i = 0; i < NUM_CARD_SLOTS; i++) {
+      this.equippedSlots.push(new CardInstance());
+      this.slotCooldownEndsAt.push(0);
+      this.slotHealKills.push(0);
+    }
+  }
 
   // ============================================================
   // LIFECYCLE
@@ -204,10 +225,8 @@ export class Player extends Schema {
     this.speedMultiplier = 1.0;
     this.damageMultiplier = 1.0;
     this.incomingDamageMultiplier = 1.0;
-    // Reset heal state
-    this.healKills = 0;
-    this.healReady = true;
-    this.healCooldownEndsAt = 0;
+    // Reset per-slot cooldowns + heal charges
+    this.resetSlotCooldowns();
     // Default shield: stat level 1 (controls amount), card level 1 (controls recovery)
     this.shieldStatLevel = 1;
     this.shieldCardLevel = 1;
@@ -277,7 +296,7 @@ export class Player extends Schema {
   }
 
   /** Spend a skill point to upgrade the shield CARD/SLOT (faster recovery).
-   *  Does NOT affect shield amount â€” shield amount is stat-based (grows with level). */
+   *  Does NOT affect shield amount — shield amount is stat-based (grows with level). */
   /** Max shield card/slot level (recovery can't be upgraded past this). */
   static readonly MAX_SHIELD_CARD_LEVEL = 10;
 
@@ -438,22 +457,15 @@ export class Player extends Schema {
   }
 
   /**
-   * Respawn: reset to full health, reset XP/level to base stats,
-   * and reset all skills to their defaults.
-   * Called when the player presses the Respawn button.
+   * Respawn: reset to full health, reset XP/level to base stats, and
+   * empty every HUD slot (death wipes equipped cards — they must be found
+   * again). Derived skill levels drop to 0 until re-equipped.
    */
   respawn(): void {
-    // Death is the only thing that wipes equipped loot cards.
-    this.equippedCards.clear();
     this.initBaseStats();
-    // Reset skills to level 1 defaults
-    this.skillLevels.clear();
-    this.skillLevels.set("shock", 1);
-    this.skillLevels.set("claw", 1);
-    this.skillLevels.set("heal", 1);
-    this.skillLevels.set("pulse", 1);
-    this.skillLevels.set("dash", 1);
-    this.skillCooldowns.clear();
+    // Death is the only thing that wipes equipped loot cards: empty all slots.
+    this.clearSlots();
+    this.resetSlotCooldowns();
     // Clear bleed
     this.bleedUntil = 0;
     this.bleedDps = 0;
@@ -461,165 +473,250 @@ export class Player extends Schema {
   }
 
   // ============================================================
-  // SKILLS
+  // SKILLS (levels derived from equipped slots)
   // ============================================================
 
-  /** Get a skill's level (0 if not owned/learned). */
+  /** Get a skill's level (0 if not equipped in any slot). */
   getSkillLevel(skill: SkillId): number {
     return this.skillLevels.get(skill) ?? 0;
   }
 
-  /** Set a skill's level (clamped to >=1). */
+  /** Set a skill's level directly (clamped to >=1). Debug/back-compat only. */
   setSkillLevel(skill: SkillId, level: number): void {
     this.skillLevels.set(skill, Math.max(1, Math.floor(level)));
   }
 
-  // ============================================================
-  // EQUIPPED CARD MODIFIER HELPERS
-  // ============================================================
-
-  private getCardFor(skill: SkillId): CardInstance | null {
-    return this.equippedCards.get(skill) ?? null;
+  /**
+   * Recompute the derived skill-level map from the equipped slots.
+   * A skill's level = the HIGHEST level among its cards in all slots.
+   * Skills with no card anywhere are removed (level 0).
+   * Called automatically after ANY equippedSlots change.
+   */
+  recomputeSkillLevels(): void {
+    const highest = new Map<SkillId, number>();
+    for (const card of this.equippedSlots) {
+      if (!card || !card.skill) continue;
+      const s = card.skill as SkillId;
+      const lvl = Math.max(1, Math.floor(card.level || 1));
+      const cur = highest.get(s) ?? 0;
+      if (lvl > cur) highest.set(s, lvl);
+    }
+    this.skillLevels.clear();
+    highest.forEach((lvl, skill) => this.skillLevels.set(skill, lvl));
   }
 
-  /** Crit-rate bonus from the equipped card for this skill. */
-  cardCritRateBonus(skill: SkillId): number {
-    const c = this.getCardFor(skill);
+  // ============================================================
+  // EQUIPPED SLOT OPERATIONS (the HUD)
+  // ============================================================
+
+  /** The card in slot i, or null when the slot is empty. */
+  slotCard(i: number): CardInstance | null {
+    const c = this.equippedSlots[i];
+    return c && c.skill ? c : null;
+  }
+
+  /** True if slot i holds a card. */
+  hasSlotCard(i: number): boolean {
+    return this.slotCard(i) !== null;
+  }
+
+  /**
+   * Place a card into slot i (0..4). Returns the card that previously
+   * occupied the slot (null when it was empty) — the CALLER is responsible
+   * for dropping that card to the ground (replace = swap-out rule).
+   * On an invalid index the card is returned unchanged so the caller can
+   * abort without losing it.
+   */
+  setSlotCard(i: number, card: CardInstance): CardInstance | null {
+    if (i < 0 || i >= NUM_CARD_SLOTS) return card;
+    const old = this.slotCard(i);
+    this.equippedSlots[i] = card;
+    this.onSlotsChanged();
+    return old;
+  }
+
+  /** Remove + return the card in slot i (null when empty). The slot gets
+   *  a fresh empty sentinel; the returned card is INTACT — its skill,
+   *  level, rarity and mods survive so it can drop to the ground. */
+  clearSlotCard(i: number): CardInstance | null {
+    if (i < 0 || i >= NUM_CARD_SLOTS) return null;
+    const old = this.slotCard(i);
+    if (!old) return null;
+    this.equippedSlots[i] = new CardInstance();
+    this.onSlotsChanged();
+    return old;
+  }
+
+  /** Reset a CardInstance to the empty-slot sentinel state (synced). */
+  private emptyCardInPlace(c: CardInstance): void {
+    c.skill = "";
+    c.level = 1;
+    c.rarity = "common";
+    c.modIds.clear();
+  }
+
+  /** Empty all slots (death). */
+  clearSlots(): void {
+    for (let i = 0; i < NUM_CARD_SLOTS; i++) {
+      const c = this.equippedSlots[i];
+      if (c && c.skill) this.emptyCardInPlace(c);
+    }
+    this.recomputeSkillLevels();
+    this.recomputeShield();
+  }
+
+  /** Shared post-change hook: derive skill levels + refresh shield bonus. */
+  private onSlotsChanged(): void {
+    this.recomputeSkillLevels();
+    this.recomputeShield();
+  }
+
+  /** First slot containing a card for `skill` (search 0..4), or -1. */
+  firstSlotWithSkill(skill: SkillId): number {
+    for (let i = 0; i < this.equippedSlots.length; i++) {
+      const c = this.equippedSlots[i];
+      if (c && c.skill === skill) return i;
+    }
+    return -1;
+  }
+
+  // ============================================================
+  // CARD MODIFIER HELPERS (per slot — mods come from THAT slot's card)
+  // ============================================================
+
+  /** Crit-rate bonus from the card in slot i. */
+  slotCritRateBonus(i: number): number {
+    const c = this.slotCard(i);
     if (!c) return 0;
     return c.modIds.filter((m) => m === "inc_crit_rate").length * 0.1;
   }
 
-  /** Crit-damage bonus from the equipped card for this skill. */
-  cardCritDamageBonus(skill: SkillId): number {
-    const c = this.getCardFor(skill);
+  /** Crit-damage bonus from the card in slot i. */
+  slotCritDamageBonus(i: number): number {
+    const c = this.slotCard(i);
     if (!c) return 0;
     return c.modIds.filter((m) => m === "inc_crit_damage").length * 0.2;
   }
 
-  /** Skill-damage multiplier (inc_atk_damage). */
-  cardDamageBonus(skill: SkillId): number {
-    const c = this.getCardFor(skill);
+  /** Skill-damage multiplier from the card in slot i (inc_atk_damage). */
+  slotDamageBonus(i: number): number {
+    const c = this.slotCard(i);
     if (!c) return 1;
     return 1 + c.modIds.filter((m) => m === "inc_atk_damage").length * 0.1;
   }
 
-  /** Radius multiplier (unique wide_sweep -> 2x radius). */
-  cardRadiusMult(skill: SkillId): number {
-    const c = this.getCardFor(skill);
+  /** Radius multiplier from the card in slot i (unique wide_sweep -> 2x). */
+  slotRadiusMult(i: number): number {
+    const c = this.slotCard(i);
     if (!c) return 1;
     return c.modIds.includes("wide_sweep") ? 2.0 : 1;
   }
 
-  /** Damage multiplier from the unique wide_sweep (0.5 when present). */
-  cardUniqueDamageMult(skill: SkillId): number {
-    const c = this.getCardFor(skill);
+  /** Damage multiplier from the unique wide_sweep in slot i (0.5 when present). */
+  slotUniqueDamageMult(i: number): number {
+    const c = this.slotCard(i);
     if (!c) return 1;
     return c.modIds.includes("wide_sweep") ? 0.5 : 1;
   }
 
-  /** Flat shield bonus from all equipped shield cards. */
+  /** Flat shield bonus from ALL equipped shield cards (any slot). */
   cardShieldBonus(): number {
     let bonus = 0;
-    this.equippedCards.forEach((card) => {
+    for (const card of this.equippedSlots) {
+      if (!card || !card.skill) continue;
       if (card.skill === "shield") {
-        bonus += card.modIds.filter((m) => m === "inc_shield_amount").length * 100;
+        bonus +=
+          card.modIds.filter((m) => m === "inc_shield_amount").length * 100;
       }
-    });
+    }
     return bonus;
   }
 
-  /** Equip a card, replacing any existing card for that skill. */
-  equipCard(card: CardInstance): void {
-    this.equippedCards.set(card.skill as SkillId, card);
-    if (card.skill === "shield") this.recomputeShield();
-    const lvl = this.getSkillLevel(card.skill as SkillId);
-    if (lvl <= 0) this.setSkillLevel(card.skill as SkillId, 1);
-    else this.setSkillLevel(card.skill as SkillId, Math.max(lvl, card.level));
-  }
-
-  /** Advance a skill's level by 1 (for the "0" upgrade key). */
+  /** Advance a skill's level by 1 (upgrades its highest-level card). */
   upgradeSkill(skill: SkillId): void {
-    this.setSkillLevel(skill, this.getSkillLevel(skill) + 1);
+    // Upgrade EVERY card of that skill so duplicates stay in sync.
+    for (const c of this.equippedSlots) {
+      if (!c || c.skill !== skill || !c.skill) continue;
+      c.level = Math.min(10, Math.max(1, c.level + 1));
+    }
+    this.recomputeSkillLevels();
   }
 
-  /** Advance ALL owned skills by 1 (used by the debug upgrade key). */
+  /** Advance ALL equipped skills by 1 (debug key). */
   upgradeAllSkills(): void {
-    this.skillLevels.forEach((_lvl, skill) => {
-      this.skillLevels.set(skill as SkillId, (_lvl ?? 0) + 1);
-    });
+    for (const c of this.equippedSlots) {
+      if (!c || !c.skill) continue;
+      c.level = Math.min(10, Math.max(1, c.level + 1));
+    }
+    this.recomputeSkillLevels();
   }
 
-  /** True if a skill is off cooldown / ready to cast. */
-  isSkillReady(skill: SkillId): boolean {
-    if (skill === "heal") {
-      // L6+ heal is cooldown-based; L1-5 is kill-charged (healReady flag).
-      const lvl = this.getSkillLevel("heal");
-      if (lvl >= 6) return (this.skillCooldowns.get("heal") ?? 0) <= 0;
-      return this.healReady;
-    }
-    return (this.skillCooldowns.get(skill) ?? 0) <= 0;
+  /** Kill threshold for a kill-charged heal card (L1-2: 4, L3-5: 3). */
+  healKillThreshold(level: number): number {
+    return level <= 2 ? 4 : 3;
   }
 
-  /** Put a skill on cooldown (seconds). Also stamps the synced end-time
-   *  for the bolter so the client HUD can render a fill animation. */
-  startSkillCooldown(skill: SkillId, cooldown: number): void {
-    if (skill === "heal") {
-      this.healReady = false;
-      this.healCooldownEndsAt = Date.now() + cooldown * 1000;
-      this.skillCooldowns.set("heal", cooldown);
-      return;
+  /**
+   * True if slot i is ready: its cooldown has elapsed AND (for a
+   * kill-charged heal card) its kill charge is full. Slots are fully
+   * independent — a shock on cooldown in slot 0 never blocks the shock
+   * in slot 1.
+   */
+  isSlotReady(i: number): boolean {
+    if (i < 0 || i >= NUM_CARD_SLOTS) return false;
+    if ((this.slotCooldownRemaining[i] ?? 0) > 0) return false;
+    const c = this.equippedSlots[i];
+    if (
+      c &&
+      c.skill === "heal" &&
+      c.level < SKILL_DEFS.heal.aoeUnlockLevel
+    ) {
+      return (this.slotHealKills[i] ?? 0) >= this.healKillThreshold(c.level);
     }
-    this.skillCooldowns.set(skill, cooldown);
-    const endsAt = Date.now() + cooldown * 1000;
-    if (skill === "bolter") {
-      this.bolterCooldownEndsAt = endsAt;
-    } else if (skill === "slam") {
-      this.slamCooldownEndsAt = endsAt;
-    } else if (skill === "claw") {
-      this.clawCooldownEndsAt = endsAt;
-    } else if (skill === "pulse") {
-      this.pulseCooldownEndsAt = endsAt;
-    } else if (skill === "shock") {
-      this.shockCooldownEndsAt = endsAt;
-    } else if (skill === "dash") {
-      this.dashCooldownEndsAt = endsAt;
-    } else if (skill === "vortex") {
-      this.vortexCooldownEndsAt = endsAt;
-    }
+    return true;
   }
 
-  /** Tick heal cooldown (called each fixedTick). When cooldown expires, heal becomes ready again. */
-  tickHealCooldown(dt: number): void {
-    const healLvl = this.getSkillLevel("heal");
-    if (healLvl <= 0) return;
-    const cd = this.skillCooldowns.get("heal") ?? 0;
-    if (cd > 0) {
-      const newCd = Math.max(0, cd - dt);
-      this.skillCooldowns.set("heal", newCd);
-      if (newCd <= 0) {
-        this.healReady = true;
-        this.healCooldownEndsAt = 0;
-      }
-    }
+  /** Put slot i on cooldown (seconds). Stamps the synced end-time for
+   *  the HUD fill. Only THIS slot is affected. */
+  startSlotCooldown(i: number, cooldown: number): void {
+    if (i < 0 || i >= NUM_CARD_SLOTS) return;
+    this.slotCooldownRemaining[i] = cooldown;
+    this.slotCooldownEndsAt[i] = Date.now() + cooldown * 1000;
   }
 
-  /** Register a kill towards the heal charge (L1-5 kill-charged mode).
-   *  Threshold is level-based: 4 kills at L1-2, 3 kills at L3-5. */
+  /** Consume a kill-charged heal's charge in slot i. */
+  consumeHealCharge(i: number): void {
+    if (i < 0 || i >= NUM_CARD_SLOTS) return;
+    this.slotHealKills[i] = 0;
+  }
+
+  /** Register a kill: charges every kill-charged heal card that is not
+   *  full yet (each slot charges independently from the same kills). */
   addHealKill(): void {
-    const healLvl = this.getSkillLevel("heal");
-    if (healLvl <= 0 || healLvl >= 6) return;
-    const threshold = healLvl <= 2 ? 4 : 3;
-    this.healKills += 1;
-    if (this.healKills >= threshold) {
-      this.healReady = true;
-      this.healKills = 0;
+    for (let i = 0; i < NUM_CARD_SLOTS; i++) {
+      const c = this.equippedSlots[i];
+      if (!c || c.skill !== "heal") continue;
+      if (c.level >= SKILL_DEFS.heal.aoeUnlockLevel) continue; // cd-based
+      const threshold = this.healKillThreshold(c.level);
+      const kills = this.slotHealKills[i] ?? 0;
+      if (kills < threshold) this.slotHealKills[i] = kills + 1;
     }
   }
 
-  /** Advance all skill cooldowns by dt seconds (clamped at 0). */
-  tickSkillCooldowns(dt: number): void {
-    for (const [skill, cd] of this.skillCooldowns) {
-      this.skillCooldowns.set(skill, Math.max(0, cd - dt));
+  /** Advance every slot cooldown by dt seconds (clamped at 0). */
+  tickSlotCooldowns(dt: number): void {
+    for (let i = 0; i < NUM_CARD_SLOTS; i++) {
+      const cd = this.slotCooldownRemaining[i] ?? 0;
+      if (cd > 0) this.slotCooldownRemaining[i] = Math.max(0, cd - dt);
+    }
+  }
+
+  /** Reset all slot cooldowns + heal charges (spawn / respawn). */
+  resetSlotCooldowns(): void {
+    for (let i = 0; i < NUM_CARD_SLOTS; i++) {
+      this.slotCooldownRemaining[i] = 0;
+      this.slotCooldownEndsAt[i] = 0;
+      this.slotHealKills[i] = 0;
     }
   }
 
@@ -641,7 +738,7 @@ export class Player extends Schema {
       return false;
     }
     // Tick bleed damage twice per second (every 0.5s).
-    // BLEED BYPASSES SHIELD â€” damages HP directly.
+    // BLEED BYPASSES SHIELD — damages HP directly.
     this.bleedTickAccum += dt;
     if (this.bleedTickAccum >= 0.5) {
       this.bleedTickAccum -= 0.5;

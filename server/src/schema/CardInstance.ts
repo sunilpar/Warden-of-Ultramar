@@ -1,13 +1,14 @@
 /**
  * Card Instance
  * =============
- * One concretely rolled card: skill + level + modifiers.
+ * One concretely rolled card: skill + level + rarity + modifiers.
+ * A card IS a skill trigger: when the HUD slot holding it fires, the
+ * card's skill casts with only this card's mods applied.
  * Used by:
- *   - Enemy.card      (the card an enemy spawns with; drops on death)
- *   - GroundCard.card (the rolled card lying on the map)
- *   - Player.equippedCards (the player's equipped card per skill)
+ *   - Enemy.card       (the card an enemy spawns with; drops on death)
+ *   - GroundCard.card  (the rolled card lying on the map)
+ *   - Player.equippedSlots[i] (the card equipped in HUD slot i)
  */
-
 import { Schema, type, ArraySchema } from "@colyseus/schema";
 
 export class CardInstance extends Schema {

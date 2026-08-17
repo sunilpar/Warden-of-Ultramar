@@ -12,7 +12,7 @@ export const GAME_CONFIG = {
     /** Player settings */
     PLAYER: {
         SPEED: 120, // pixels per second
-        COLLISION_RADIUS: 20,
+        COLLISION_RADIUS: 10,
     },
     /** Enemy settings */
     ENEMY: {
@@ -25,5 +25,18 @@ export const GAME_CONFIG = {
          * don't fire every frame.
          */
         SKILL_ATTEMPT_CHANCE: 0.1,
+    },
+    /** Elite enemy settings (one elite per map; killing it unlocks the exit). */
+    ELITE: {
+        /** Levels added on top of the highest player level. */
+        LEVEL_BONUS: 4,
+        /** Extra HP and shield on top of the level-scaled base (0.2 = +20%). */
+        HP_SHIELD_BONUS: 0.2,
+        /** XP multiplier vs what the underlying enemy type would give. */
+        XP_MULTIPLIER: 2.0,
+        /** Fraction of the map's target enemy count to kill before the elite spawns. */
+        SPAWN_KILL_THRESHOLD: 0.5,
+        /** Hitbox (and client sprite) size multiplier. */
+        SIZE_MULTIPLIER: 1.6,
     },
 };

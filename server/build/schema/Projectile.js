@@ -48,6 +48,10 @@ export class Projectile extends Schema {
         this.hitSet = new Set();
         /** Session/id of the caster (never damage the caster itself). */
         this.ownerId = "";
+        /** Crit rate of the caster (fraction 0..1). */
+        this.critRate = 0;
+        /** Crit damage multiplier of the caster (e.g. 1.5 = 150%). */
+        this.critDamage = 1.5;
     }
 }
 __decorate([

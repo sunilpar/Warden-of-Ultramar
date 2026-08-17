@@ -1,5 +1,5 @@
 import { Projectile } from "../schema/Projectile";
-import { BOLTER_DEF, SKILL_DEFS, computeSkillDamage, bolterColorTier, chainDamageMultiplier, } from "../config/skillDefs";
+import { BOLTER_DEF, SKILL_DEFS, computeSkillDamage, applyCrit, bolterColorTier, chainDamageMultiplier, } from "../config/skillDefs";
 export class ProjectileSystem {
     constructor(state, mapSystem) {
         this.state = state;
@@ -57,10 +57,11 @@ export class ProjectileSystem {
      *
      * Returns true if a projectile was spawned, false otherwise (e.g. bad aim).
      */
-    castBolter(ownerId, faction, x, y, angle, attack, skillLevel, damageMultiplier) {
+    castBolter(ownerId, faction, x, y, angle, attack, skillLevel, damageMultiplier, critRate = 0, critDamage = 1.5) {
         const def = BOLTER_DEF;
-        const vx = Math.cos(angle) * def.projectileSpeed;
-        const vy = Math.sin(angle) * def.projectileSpeed;
+        const speed = typeof def.projectileSpeed === "function" ? def.projectileSpeed(skillLevel) : def.projectileSpeed;
+        const vx = Math.cos(angle) * speed;
+        const vy = Math.sin(angle) * speed;
         if (Math.hypot(vx, vy) < 0.0001)
             return false;
         const proj = new Projectile();
@@ -76,6 +77,8 @@ export class ProjectileSystem {
         proj.radius = def.projectileRadius;
         proj.remainingRange = def.maxRange;
         proj.chainRemaining = def.chainCount(skillLevel);
+        proj.critRate = critRate;
+        proj.critDamage = critDamage;
         proj.damage = computeSkillDamage("bolter", attack, skillLevel, damageMultiplier);
         proj.hitSet = new Set([ownerId]); // never hit caster
         const id = `proj_${this.nextId++}_${Date.now()}`;
@@ -113,7 +116,7 @@ export class ProjectileSystem {
                     return;
                 if (enemy.isDead)
                     return;
-                if (this.circleOverlap(proj.x, proj.y, r, enemy.x, enemy.y, enemy.collisionRadius)) {
+                if (this.rectOverlap(proj.x, proj.y, r, r, enemy.x, enemy.y, enemy.hitboxW, enemy.hitboxH)) {
                     hit = id;
                 }
             });
@@ -128,7 +131,7 @@ export class ProjectileSystem {
                 return;
             if (player.isDead)
                 return;
-            if (this.circleOverlap(proj.x, proj.y, r, player.x, player.y, 20)) {
+            if (this.rectOverlap(proj.x, proj.y, r, r, player.x, player.y, player.hitboxW, player.hitboxH)) {
                 hit = id;
             }
         });
@@ -141,7 +144,7 @@ export class ProjectileSystem {
                 return;
             if (enemy.isDead)
                 return;
-            if (this.circleOverlap(proj.x, proj.y, r, enemy.x, enemy.y, enemy.collisionRadius)) {
+            if (this.rectOverlap(proj.x, proj.y, r, r, enemy.x, enemy.y, enemy.hitboxW, enemy.hitboxH)) {
                 hit = id;
             }
         });
@@ -149,21 +152,23 @@ export class ProjectileSystem {
     }
     /** Apply the projectile's damage to a target id (player or enemy). */
     applyDamage(proj, targetId) {
+        const { damage, isCrit } = applyCrit(proj.damage, proj.critRate, proj.critDamage);
         const player = this.state.players.get(targetId);
         if (player) {
-            player.takeDamage(proj.damage);
+            player.takeDamage(damage, "bolter", undefined, isCrit);
             return;
         }
         const enemy = this.state.enemies.get(targetId);
         if (enemy) {
-            enemy.takeDamage(proj.damage);
+            enemy.takeDamage(damage, "bolter", proj.ownerId, isCrit);
         }
     }
-    /** Circle-vs-circle overlap test. */
-    circleOverlap(ax, ay, ar, bx, by, br) {
-        const rr = ar + br;
-        const dx = ax - bx;
-        const dy = ay - by;
-        return dx * dx + dy * dy <= rr * rr;
+    /**
+     * AABB overlap test between two rectangles.
+     * (ax,ay) center with half (aw,ah); (bx,by) center with half (bw,bh).
+     */
+    rectOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+        return (Math.abs(ax - bx) <= aw + bw &&
+            Math.abs(ay - by) <= ah + bh);
     }
 }

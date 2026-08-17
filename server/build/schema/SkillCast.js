@@ -32,6 +32,8 @@ export class SkillCast extends Schema {
         this.tier = "small";
         /** Faction of the caster (for client tint: player vs enemy). */
         this.faction = "player";
+        /** Cone range in pixels (the outer edge of the hitbox). */
+        this.range = 0;
     }
 }
 __decorate([
@@ -55,3 +57,6 @@ __decorate([
 __decorate([
     type("string")
 ], SkillCast.prototype, "faction", void 0);
+__decorate([
+    type("number")
+], SkillCast.prototype, "range", void 0);

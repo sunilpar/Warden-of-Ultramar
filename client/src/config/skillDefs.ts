@@ -4,16 +4,22 @@
  * Client-side skill data for RENDERING ONLY. Behavior (damage, cooldown,
  * chain, color tiers) is server-authoritative (server/src/config/skillDefs.ts).
  *
- * This file defines:
- *   - The card spritesheet frame for each skill, by tier (base vs upgraded).
- *   - The "mods" array: human-readable strings shown on card hover, derived
- *     from the skill level.
- *   - Bolter bullet color tiers (must match the server).
- *
  * CARD SPRITESHEET (cardSpritesheet128_200.png, 9 cols x 4 rows, 128x200):
- *   Row 2 (frames 18..26): base skill art
- *   Row 3 (frames 27..35): upgraded skill art (shown at skill level > 5)
- *   Column for bolter = 1.
+ *   Row 0 (frames  0..8): card backs
+ *   Row 1 (frames  9..17): RARITY BASES — the card frame/floor whose color
+ *                          encodes rarity (white common / green uncommon /
+ *                          blue rare / purple epic / gold legendary /
+ *                          blue-gold unique). Drawn at full opacity under
+ *                          the art.
+ *   Row 2 (frames 18..26): base skill art (drawn ON TOP of the rarity base
+ *                          at reduced opacity)
+ *   Row 3 (frames 27..35): upgraded skill art (level > 5)
+ *
+ * CARD COMPOSITION RULE
+ * ---------------------
+ * Every card is rendered as: rarity base (row 1) at alpha 1, then the
+ * skill art (row 2/3) on top at reduced opacity. The base provides the
+ * rounded edges; the art identifies the skill.
  */
 
 export type SkillId =
@@ -59,6 +65,76 @@ export const SKILL_CARDS: Record<SkillId, SkillCardArt> = {
 
 export const CARD_SPRITESHEET_COLUMNS = 9;
 
+// ============================================================
+// RARITY
+// ============================================================
+
+/** All card rarities (order matches loot roll tiers). */
+export type Rarity =
+  | "common"
+  | "uncommon"
+  | "rare"
+  | "epic"
+  | "legendary"
+  | "exotic"
+  | "unique";
+
+/** Column (1..9) of each rarity's base frame in spritesheet ROW 1. */
+export const RARITY_BASE_COLUMNS: Record<Rarity, number> = {
+  common: 1, // white
+  uncommon: 2, // green
+  rare: 3, // blue
+  epic: 4, // purple
+  legendary: 5, // gold
+  exotic: 6, // red (reserved — not dropping yet)
+  unique: 7, // blue with gold hint
+};
+
+/** Accent colors for labels / strokes (must match server loot.ts). */
+export const RARITY_COLORS: Record<Rarity, number> = {
+  common: 0x9e9e9e,
+  uncommon: 0x00c853,
+  rare: 0x2979ff,
+  epic: 0xaa00ff,
+  legendary: 0xffd700,
+  exotic: 0xd50000,
+  unique: 0x00e5ff,
+};
+
+/** Human-readable rarity names. */
+export const RARITY_NAMES: Record<Rarity, string> = {
+  common: "Common",
+  uncommon: "Uncommon",
+  rare: "Rare",
+  epic: "Epic",
+  legendary: "Legendary",
+  exotic: "Exotic",
+  unique: "Unique",
+};
+
+/** Spritesheet ROW 1 holds the rarity bases. */
+const RARITY_BASE_ROW = 1;
+
+/**
+ * Spritesheet frame for a rarity's base card (row 1). Draw this at FULL
+ * opacity under everything else — it provides the card shape + rounded
+ * edges and encodes the rarity by color.
+ */
+export function rarityBaseFrame(rarity: string): number {
+  const r = (rarity as Rarity) ?? "common";
+  const col = RARITY_BASE_COLUMNS[r] ?? RARITY_BASE_COLUMNS.common;
+  return cardFrameAt(RARITY_BASE_ROW, col);
+}
+
+/** Coerce an unknown string into a valid Rarity (default common). */
+export function asRarity(rarity: string | undefined | null): Rarity {
+  const r = rarity as Rarity;
+  return RARITY_BASE_COLUMNS[r] ? r : "common";
+}
+
+/** Opacity applied to the skill-art layer drawn over the rarity base. */
+export const CARD_ART_ALPHA = 0.85;
+
 /** Frame index for a card at a given row (0-indexed) and column (1-indexed). */
 export function cardFrameAt(row: number, column1: number): number {
   return row * CARD_SPRITESHEET_COLUMNS + (column1 - 1);
@@ -73,7 +149,7 @@ export function cardTierForLevel(level: number): CardTier {
 }
 
 /**
- * Spritesheet frame for a skill's card at a given level.
+ * Spritesheet frame for a skill's ART at a given level.
  * Row 2 = base art, Row 3 = upgraded art.
  */
 export function cardFrameForLevel(skill: SkillId, level: number): number {
@@ -167,20 +243,17 @@ export function skillMods(skill: SkillId, level: number): string[] {
   }
   return mods;
 }
-
 // ============================================================
 // VORTEX COLOR TIER
 // ============================================================
 
 /** Vortex visual colour tier. grey (1-2), brown (3-5), purple (6-10). */
 export type VortexColorTier = "grey" | "brown" | "purple";
-
 export function vortexColorTier(level: number): VortexColorTier {
   if (level >= 6) return "purple";
   if (level >= 3) return "brown";
   return "grey";
 }
-
 export const VORTEX_COLORS: Record<VortexColorTier, number> = {
   grey: 0x999999,
   brown: 0x8b4513,
