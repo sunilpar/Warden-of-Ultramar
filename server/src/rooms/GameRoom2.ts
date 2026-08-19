@@ -823,6 +823,12 @@ export class GameRoom2 extends Room {
               if (typeof m === "string") card.modIds.push(m);
             }
           }
+          // Tier-rolled per-mod values (parallel to modIds).
+          if (Array.isArray(c.modValues)) {
+            for (const v of c.modValues) {
+              if (typeof v === "number") card.modValues.push(v);
+            }
+          }
           player.equippedSlots[i] = card;
         }
         player.recomputeSkillLevels();

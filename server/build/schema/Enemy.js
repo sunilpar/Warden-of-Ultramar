@@ -224,22 +224,42 @@ export class Enemy extends Schema {
      * Crit-rate bonus from the card (sums all inc_crit_rate mods).
      * Applies ONLY when casting the card's own skill.
      */
+    /**
+     * Sum the ROLLED values of every mod with the given id on this
+     * enemy's card. Falls back to 'fallback * count' for legacy cards
+     * without stored values (approximates tier-1).
+     */
+    sumModValues(modId, fallback) {
+        const c = this.card;
+        let total = 0;
+        let count = 0;
+        for (let i = 0; i < c.modIds.length; i++) {
+            if (c.modIds[i] !== modId)
+                continue;
+            count++;
+            const v = c.modValues[i];
+            total += typeof v === "number" && v > 0 ? v : fallback;
+        }
+        if (count === 0)
+            return 0;
+        return total > 0 ? total : fallback * count;
+    }
     cardCritRateBonus(skill) {
         if (!this.hasCardFor(skill))
             return 0;
-        return this.card.modIds.filter((m) => m === "inc_crit_rate").length * 0.1;
+        return this.sumModValues("inc_crit_rate", 0.03);
     }
     /** Crit-damage bonus from the card (inc_crit_damage). */
     cardCritDamageBonus(skill) {
         if (!this.hasCardFor(skill))
             return 0;
-        return this.card.modIds.filter((m) => m === "inc_crit_damage").length * 0.2;
+        return this.sumModValues("inc_crit_damage", 0.3);
     }
     /** Skill-damage multiplier bonus (inc_atk_damage). */
     cardDamageBonus(skill) {
         if (!this.hasCardFor(skill))
             return 0;
-        return 1 + this.card.modIds.filter((m) => m === "inc_atk_damage").length * 0.1;
+        return 1 + this.sumModValues("inc_atk_damage", 0.03);
     }
     /** Radius multiplier (unique: wide_sweep -> 2x radius / 0.5x damage). */
     cardRadiusMult(skill) {

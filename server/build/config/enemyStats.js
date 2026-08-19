@@ -109,16 +109,41 @@ export const ENEMY_STATS = {
         collisionRadius: 10,
         hitboxW: 14,
         hitboxH: 14,
-        // Primary: shock. Buff: shield (self-buff, restores shield to max).
-        // Then: pulse (2nd damage skill), vortex (3rd).
+        // Primary: bolter (ranged projectile). Secondary: shock.
+        // Then: vortex (3rd damage skill).
         // (A shield level is ALSO derived separately as the remainder slot.)
-        potentialSkills: ["shock", "shield", "pulse", "vortex"],
+        potentialSkills: ["bolter", "shock", "vortex"],
         aggroRadius: 700, // long aggro range — ranged caster
-        skillCooldown: { shock: 5.0, shield: 10.0, pulse: 8.0, vortex: 12.0 },
+        skillCooldown: { bolter: 3.0, shock: 5.0, vortex: 12.0 },
         growth: {
             maxHealth: 80,
             moveSpeed: 0,
             attack: 10,
+        },
+        xpReward: 250,
+    },
+    caster: {
+        id: "caster",
+        title: "Caster",
+        description: "A warp-touched sorcerer. Drags prey in with vortexes, knits wounds with dark healing, and detonates pulse blasts up close.",
+        // Same HP pool as tyranid (200) but +100 base shield.
+        maxHealth: 200,
+        moveSpeed: 60, // same as tyranid; +30% surge within 200px (EnemySystem)
+        attack: 20,
+        defence: 0.01,
+        critRate: 0.2,
+        shield: 150, // tyranid shield (50) + 100
+        collisionRadius: 9,
+        hitboxW: 16,
+        hitboxH: 8,
+        // Primary: vortex. Secondary: heal. Then: pulse.
+        potentialSkills: ["vortex", "heal", "pulse"],
+        aggroRadius: 500, // same as tyranid
+        skillCooldown: { vortex: 12.0, heal: 10.0, pulse: 8.0 },
+        growth: {
+            maxHealth: 120, // matches tyranid growth
+            moveSpeed: 0,
+            attack: 8,
         },
         xpReward: 250,
     },

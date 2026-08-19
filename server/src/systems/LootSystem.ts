@@ -24,6 +24,7 @@ import {
   type Rarity,
 } from "../config/loot";
 import { type SkillId } from "../config/skillDefs";
+import { tierForLevel, rollModValue } from "../config/lootTiers";
 
 /** Cast-time stat deltas produced from a card's mods. */
 export interface CardStats {
@@ -56,6 +57,21 @@ export const MOD_EFFECTS: Record<string, (tier: number) => Partial<CardStats>> =
 
 export class LootSystem {
   constructor(private state: RoomState) {}
+
+  /**
+   * Roll and attach per-mod values for a freshly built card. The tier is
+   * derived from the enemy's LEVEL (map level will factor in later), so a
+   * legendary dropped by a level-1 enemy rolls tier-1 values on all mods.
+   */
+  private attachModValues(card: CardInstance, level: number): CardInstance {
+    const tier = tierForLevel(level);
+    const values: number[] = [];
+    for (const id of card.modIds) {
+      values.push(rollModValue(id, tier));
+    }
+    card.modValues = new ArraySchema<number>(...values);
+    return card;
+  }
 
   // ============================================================
   // ROLLING
@@ -107,6 +123,7 @@ export class LootSystem {
         card.level = enemy.skillLevels.get(skill) ?? 1;
         card.modIds = new ArraySchema<string>(allowed[0].id);
         card.rarity = "unique";
+        this.attachModValues(card, enemy.level);
         return card;
       }
       const uniSkill = castable.find((sk) =>
@@ -119,6 +136,7 @@ export class LootSystem {
         card.level = enemy.skillLevels.get(uniSkill) ?? 1;
         card.modIds = new ArraySchema<string>(uni.id);
         card.rarity = "unique";
+        this.attachModValues(card, enemy.level);
         return card;
       }
       // Enemy has no pulse/vortex: degrade to a legendary mod roll.
@@ -147,8 +165,13 @@ export class LootSystem {
     let prefixes = 0;
     let suffixes = 0;
     for (let i = 0; i < modCount; i++) {
-      // Alternate prefix/suffix fills to respect 2+2 max slots.
-      const wantPrefix = i < 2 ? prefixes < 2 : suffixes < 2;
+      // Fill prefix/suffix slots randomly (while respecting the 2+2 max)
+      // so offensive AND defensive/utility mods can drop at every rarity.
+      const canPrefix = prefixes < 2;
+      const canSuffix = suffixes < 2;
+      if (!canPrefix && !canSuffix) break;
+      const wantPrefix =
+        canPrefix && canSuffix ? Math.random() < 0.5 : canPrefix;
       const pool = wantPrefix
         ? PREFIX_POOL.filter(
             (m) => m.appliesTo.length === 0 || m.appliesTo.includes(skill),
@@ -164,6 +187,7 @@ export class LootSystem {
     }
     card.modIds = new ArraySchema<string>(...mods);
     card.rarity = rarityForModCount(prefixes, suffixes, false);
+    this.attachModValues(card, enemy.level);
     return card;
   }
 

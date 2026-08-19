@@ -81,6 +81,8 @@ interface HudCardObj {
   rarity: Rarity;
   /** Rolled mod ids on this card. */
   modIds: string[];
+  /** Tier-rolled per-mod values (parallel to modIds). */
+  modValues?: number[];
 }
 
 /** A card equipped in one HUD slot (mirror of the server's CardInstance). */
@@ -89,6 +91,8 @@ interface SlotCard {
   level: number;
   rarity: Rarity;
   modIds: string[];
+  /** Tier-rolled per-mod values (parallel to modIds; tier system). */
+  modValues?: number[];
 }
 
 /** Approximate full cooldown (ms) per skill, for the HUD fill animation. */
@@ -122,12 +126,41 @@ const RARITY_NAMES: Record<string, string> = {
   unique: "Unique",
 };
 
-/** Mod display names (client copy). */
+/**
+ * Mod display labels. Percent values are formatted from the card's
+ * ROLLED per-mod values (tier system); shield shows flat points.
+ * Fallback values approximate tier-1 rolls for legacy cards.
+ */
+const MOD_LABELS: Record<string, string> = {
+  inc_crit_rate: "Crit Rate",
+  inc_crit_damage: "Crit Damage",
+  inc_atk_damage: "Damage",
+  inc_cooldown: "Cooldown Reduction",
+  inc_shield_amount: "Shield",
+  wide_sweep: "2x Radius, 1/2 Damage",
+};
+
+/** Format a mod line with its rolled value (value comes from the
+ *  server-synced modValues array; parallel to modIds). */
+function formatModLine(id: string, value: number | undefined): string {
+  const label = MOD_LABELS[id] ?? id;
+  if (id === "wide_sweep") return label;
+  if (id === "inc_shield_amount") {
+    const v = typeof value === "number" && value > 0 ? value : 60;
+    return "+" + Math.round(v) + " " + label;
+  }
+  const fallback = id === "inc_crit_damage" ? 0.3 : 0.03;
+  const v = typeof value === "number" && value > 0 ? value : fallback;
+  return "+" + Math.round(v * 100) + "% " + label;
+}
+
+/** Back-compat alias used by tooltips that only have the id. */
 const MOD_NAMES: Record<string, string> = {
-  inc_crit_rate: "+10% Crit Rate",
-  inc_crit_damage: "+20% Crit Damage",
-  inc_atk_damage: "+10% Damage",
-  inc_shield_amount: "+100 Shield",
+  inc_crit_rate: "+3% Crit Rate",
+  inc_crit_damage: "+30% Crit Damage",
+  inc_atk_damage: "+3% Damage",
+  inc_cooldown: "+3% Cooldown Reduction",
+  inc_shield_amount: "+60 Shield",
   wide_sweep: "2x Radius, 1/2 Damage",
 };
 
@@ -212,7 +245,7 @@ export class GameScene extends Phaser.Scene {
   private upgradeToast!: Phaser.GameObjects.Text;
 
   /** Hover tooltip for the card in the hovered slot. */
-  private bolterTooltip!: Phaser.GameObjects.Text;
+  private bolterTooltip: Phaser.GameObjects.Container | null = null;
 
   // ============================================================
   // GROUND CARDS (dropped card pickups)
@@ -307,17 +340,40 @@ export class GameScene extends Phaser.Scene {
     entity: Phaser.GameObjects.Container,
   ): void {
     this.hideGroundCardTooltip();
-    const skill = card.skill as SkillId;
+    const panel = this.buildCardTooltipPanel({
+      skill: card.skill as SkillId,
+      level: card.level ?? 1,
+      rarity: asRarity(card.card?.rarity ?? "common"),
+      modIds: (card.card?.modIds as string[]) ?? [],
+      modValues: (card.card?.modValues as number[]) ?? [],
+    });
+    this.groundCardTooltip = panel;
+    panel.setPosition(entity.x, entity.y - panel.height / 2 - 28);
+    panel.setDepth(100);
+  }
+
+  /**
+   * Build the styled card hover panel (title, rarity, description,
+   * rolled mod lines, card art preview) used by ground drops, the HUD
+   * slots and the character screen alike. Position it yourself.
+   */
+  private buildCardTooltipPanel(info: {
+    skill: SkillId;
+    level: number;
+    rarity: Rarity;
+    modIds: string[];
+    modValues: number[];
+  }): Phaser.GameObjects.Container {
+    const { skill, level, rarity } = info;
     const def = SKILL_CARDS[skill];
-    const level = card.level ?? 1;
     const title = def ? def.title : skill;
     const description = def ? def.description : "";
     const W = 220;
-    const rarity = (card.card?.rarity as string) ?? "common";
     const rarityColor = RARITY_COLORS[rarity] ?? RARITY_COLORS.common;
     const rarityHex = "#" + rarityColor.toString(16).padStart(6, "0");
-    const modIds: string[] = (card.card?.modIds as string[]) ?? [];
-    const modLines = modIds.map((m) => "* " + (MOD_NAMES[m] ?? m));
+    const modLines = info.modIds.map((m, idx) =>
+      "* " + formatModLine(m, info.modValues[idx]),
+    );
     // Height grows with mod count (base 116 + 14 per mod, capped).
     const H = 116 + Math.min(4, modLines.length) * 14;
     const bg = this.add
@@ -370,17 +426,15 @@ export class GameScene extends Phaser.Scene {
       .image(W / 2 - 32, 0, "card_sheet", cardFrameForLevel(skill, level))
       .setDisplaySize(48 - ttInset * 2, 64 - ttInset * 2)
       .setAlpha(1);
-    this.groundCardTooltip = this.add
-      .container(entity.x, entity.y - H / 2 - 28, [
-        bg,
-        nameText,
-        rarityText,
-        descText,
-        modsText,
-        sprBase,
-        sprArt,
-      ])
-      .setDepth(100);
+    return this.add.container(0, 0, [
+      bg,
+      nameText,
+      rarityText,
+      descText,
+      modsText,
+      sprBase,
+      sprArt,
+    ]);
   }
 
   /** Hide (destroy) the ground card hover tooltip. */
@@ -459,6 +513,9 @@ export class GameScene extends Phaser.Scene {
       targetSlot: -1,
       rarity: gRarity,
       modIds: card.card?.modIds ? Array.from(card.card.modIds) : [],
+      modValues: card.card?.modValues
+        ? Array.from(card.card.modValues as number[])
+        : [],
     };
     // Take the card off the ground visually (server state untouched).
     entity.setVisible(false);
@@ -2384,6 +2441,7 @@ export class GameScene extends Phaser.Scene {
           level: c.level ?? 1,
           rarity: asRarity(c.rarity),
           modIds: c.modIds ? Array.from(c.modIds) : [],
+          modValues: c.modValues ? Array.from(c.modValues as number[]) : [],
         };
       }
     }
@@ -2464,6 +2522,7 @@ export class GameScene extends Phaser.Scene {
       targetSlot: i,
       rarity: sc.rarity,
       modIds: sc.modIds,
+      modValues: sc.modValues,
     };
     container.setSize(slot.width, slot.height);
     const PAD = 12; // generous grab padding (cards sit 25px apart)
@@ -2881,47 +2940,38 @@ export class GameScene extends Phaser.Scene {
     }
   }
   private showBolterTooltip(slot: Phaser.GameObjects.Rectangle): void {
+    this.hideBolterTooltip();
     const i = this.cardSlots.indexOf(slot);
     const skill = this.slotSkill(i) ?? "shock";
     const lvl = this.skillLevelCache[skill] ?? 1;
     const card = this.hudCards[i];
-    const mods = skillMods(skill, lvl);
-    if (card) {
-      for (const m of card.modIds) mods.push(MOD_NAMES[m] ?? m);
-    }
-    const atk = this.currentPlayer ? Math.round(this.localPlayerAttack()) : 0;
-    const cd = ((SLOT_CD_MS[skill] ?? 500) / 1000).toFixed(1);
-    const lines = [
-      skill.charAt(0).toUpperCase() + skill.slice(1),
-      "Rarity: " + (card ? RARITY_NAMES[card.rarity] : "Common"),
-      "Slot input: " + GameScene.SLOT_INPUTS[i],
-      "ATK: " + atk,
-      "Cooldown: " + cd + "s",
-      "Level: " + lvl,
-      ...mods,
-    ];
-    const txt = lines.join("\n");
-    const tx = slot.x + slot.width + 6;
-    const ty = slot.y;
-    if (this.bolterTooltip) {
-      this.bolterTooltip.setText(txt).setPosition(tx, ty).setVisible(true);
-    } else {
-      this.bolterTooltip = this.add
-        .text(tx, ty, txt, {
-          color: "#ffffff",
-          fontSize: "13px",
-          fontFamily: "monospace",
-          backgroundColor: "#000000cc",
-          padding: { x: 6, y: 4 },
-        })
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setDepth(300);
-    }
+    const panel = this.buildCardTooltipPanel({
+      skill,
+      level: lvl,
+      rarity: card ? card.rarity : "common",
+      modIds: card ? card.modIds : [],
+      modValues: card ? (card.modValues as number[] | undefined) ?? [] : [],
+    });
+    panel.setScrollFactor(0);
+    panel.setDepth(300);
+    // Hover the panel ABOVE THE WHOLE HUD IMAGE (its art extends well
+    // above the slots), bottom edge 10px over the HUD top. Clamp in-screen;
+    // if the screen is too short, fall back to below the slot.
+    const cam = this.cameras.main;
+    let px = slot.x + slot.width / 2;
+    px = Math.max(panel.width / 2 + 4, Math.min(cam.width - panel.width / 2 - 4, px));
+    const hudTop = this.hudImage ? this.hudImage.y : slot.y;
+    let py = hudTop - panel.height / 2 - 30;
+    if (py < panel.height / 2 + 4) py = slot.y + slot.height + panel.height / 2 + 10;
+    panel.setPosition(px, py);
+    this.bolterTooltip = panel;
   }
 
   private hideBolterTooltip(): void {
-    if (this.bolterTooltip) this.bolterTooltip.setVisible(false);
+    if (this.bolterTooltip) {
+      this.bolterTooltip.destroy();
+      this.bolterTooltip = null;
+    }
   }
 
   /** Approximate local player attack value for the tooltip. */
@@ -4673,27 +4723,25 @@ export class GameScene extends Phaser.Scene {
         .setScrollFactor(0);
       this.addDyn(lvlText);
 
-      // Hover tooltip for card
-      const title = cardInfo?.title ?? skillId;
-      const desc = cardInfo?.description ?? "";
-      const mods = skillMods(skillId as any, skillLvl);
-      const hoverLines = [title + "  (Lv " + skillLvl + ")", desc, ...mods];
-      const hoverStr = hoverLines.join("\n");
+      // Hover tooltip: same styled panel as ground drops / HUD slots.
+      const ttCard = (p.equippedSlots as any)[i];
       cardImg.on("pointerover", () => {
-        const tt = this.add
-          .text(cardX, y + cardDispH + 4, hoverStr, {
-            color: "#ffffff",
-            fontSize: "11px",
-            fontFamily: "monospace",
-            backgroundColor: "#0a0a14",
-            padding: { x: 6, y: 4 },
-            wordWrap: { width: 220 },
-          })
-          .setOrigin(0, 0)
-          .setScrollFactor(0)
-          .setDepth(450);
-        (this.charScreen as any)._hoverTT = tt;
-        this.charScreen.add(tt);
+        const panel = this.buildCardTooltipPanel({
+          skill: skillId as SkillId,
+          level: skillLvl,
+          rarity: asRarity(ttCard?.rarity ?? "common"),
+          modIds: (ttCard?.modIds as string[]) ?? [],
+          modValues: (ttCard?.modValues as number[]) ?? [],
+        });
+        // Fixed to the camera (char screen is a screen-space UI).
+        panel.setScrollFactor(0);
+        panel.setDepth(450);
+        panel.setPosition(
+          cardX + cardDispW / 2,
+          y - panel.height / 2 - 8,
+        );
+        (this.charScreen as any)._hoverTT = panel;
+        this.charScreen.add(panel);
       });
       cardImg.on("pointerout", () => {
         const tt = (this.charScreen as any)._hoverTT;
@@ -4704,6 +4752,7 @@ export class GameScene extends Phaser.Scene {
       });
 
       // Right-click to upgrade card. Left-click is free for later use.
+      const title = cardInfo?.title ?? skillId;
       cardImg.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
         if (!pointer.rightButtonDown()) return;
         if (sp <= 0) return;
@@ -5849,6 +5898,7 @@ export class GameScene extends Phaser.Scene {
             level: sc.level,
             rarity: sc.rarity,
             modIds: sc.modIds,
+            modValues: (sc.modValues as number[] | undefined) ?? [],
           };
         }
         // Apply map transition XP bonus directly to the serialized state

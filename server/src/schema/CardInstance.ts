@@ -20,4 +20,11 @@ export class CardInstance extends Schema {
   @type("string") rarity: string = "common";
   /** Rolled modifier ids (prefix/suffix/unique ids from loot config). */
   @type(["string"]) modIds = new ArraySchema<string>();
+  /**
+   * Rolled modifier VALUES (parallel to modIds). Populated at roll time
+   * from the tier ranges in config/lootTiers.ts — a tier-5 crit rate mod
+   * carries ~0.30-0.40 while a tier-1 one carries ~0.01-0.05. Kept in
+   * sync so the client tooltip can show the real rolled value.
+   */
+  @type(["number"]) modValues = new ArraySchema<number>();
 }

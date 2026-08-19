@@ -503,8 +503,10 @@ export class GameRoom2 extends Room {
         const r = Math.random();
         if (r < 0.4)
             return "tyranid";
+        if (r < 0.55)
+            return "mechanicus"; // halved 30% -> 15%, rest moved to caster
         if (r < 0.7)
-            return "mechanicus";
+            return "caster"; // 15% (taken from mechanicus)
         if (r < 0.9)
             return "tau";
         return "orck";
@@ -710,6 +712,13 @@ export class GameRoom2 extends Room {
                         for (const m of c.modIds) {
                             if (typeof m === "string")
                                 card.modIds.push(m);
+                        }
+                    }
+                    // Tier-rolled per-mod values (parallel to modIds).
+                    if (Array.isArray(c.modValues)) {
+                        for (const v of c.modValues) {
+                            if (typeof v === "number")
+                                card.modValues.push(v);
                         }
                     }
                     player.equippedSlots[i] = card;

@@ -68,6 +68,13 @@ export const SUFFIX_POOL: CardModDef[] = [
     tier: 1,
   },
   {
+    id: "inc_cooldown",
+    name: "Increased Cooldown Reduction",
+    slot: "suffix",
+    appliesTo: [],
+    tier: 1,
+  },
+  {
     id: "inc_shield_amount",
     name: "Increased Shield",
     slot: "suffix",

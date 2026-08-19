@@ -599,25 +599,58 @@ export class Player extends Schema {
   // CARD MODIFIER HELPERS (per slot — mods come from THAT slot's card)
   // ============================================================
 
+  /**
+   * Sum the ROLLED values of every mod with the given id on a card.
+   * Falls back to 'fallback * count' for legacy cards rolled before
+   * the tier system stored per-mod values (approximates tier-1).
+   */
+  private sumModValues(
+    c: CardInstance,
+    modId: string,
+    fallback: number,
+  ): number {
+    let total = 0;
+    let count = 0;
+    for (let i = 0; i < c.modIds.length; i++) {
+      if (c.modIds[i] !== modId) continue;
+      count++;
+      const v = c.modValues[i];
+      total += typeof v === "number" && v > 0 ? v : fallback;
+    }
+    if (count === 0) return 0;
+    return total > 0 ? total : fallback * count;
+  }
+
   /** Crit-rate bonus from the card in slot i. */
   slotCritRateBonus(i: number): number {
     const c = this.slotCard(i);
     if (!c) return 0;
-    return c.modIds.filter((m) => m === "inc_crit_rate").length * 0.1;
+    return this.sumModValues(c, "inc_crit_rate", 0.03);
   }
 
   /** Crit-damage bonus from the card in slot i. */
   slotCritDamageBonus(i: number): number {
     const c = this.slotCard(i);
     if (!c) return 0;
-    return c.modIds.filter((m) => m === "inc_crit_damage").length * 0.2;
+    return this.sumModValues(c, "inc_crit_damage", 0.3);
   }
 
   /** Skill-damage multiplier from the card in slot i (inc_atk_damage). */
   slotDamageBonus(i: number): number {
     const c = this.slotCard(i);
     if (!c) return 1;
-    return 1 + c.modIds.filter((m) => m === "inc_atk_damage").length * 0.1;
+    return 1 + this.sumModValues(c, "inc_atk_damage", 0.03);
+  }
+
+  /**
+   * Cooldown reduction fraction from the card in slot i (inc_cooldown).
+   * 0..~0.4 at tier 5 (two mods can stack); callers multiply the base
+   * cooldown by (1 - reduction).
+   */
+  slotCooldownReduction(i: number): number {
+    const c = this.slotCard(i);
+    if (!c) return 0;
+    return Math.min(0.6, this.sumModValues(c, "inc_cooldown", 0));
   }
 
   /** Radius multiplier from the card in slot i (unique wide_sweep -> 2x). */
@@ -640,8 +673,7 @@ export class Player extends Schema {
     for (const card of this.equippedSlots) {
       if (!card || !card.skill) continue;
       if (card.skill === "shield") {
-        bonus +=
-          card.modIds.filter((m) => m === "inc_shield_amount").length * 100;
+        bonus += this.sumModValues(card, "inc_shield_amount", 60);
       }
     }
     return bonus;
@@ -745,8 +777,11 @@ export class Player extends Schema {
    *  the HUD fill. Only THIS slot is affected. */
   startSlotCooldown(i: number, cooldown: number): void {
     if (i < 0 || i >= NUM_CARD_SLOTS) return;
-    this.slotCooldownRemaining[i] = cooldown;
-    this.slotCooldownEndsAt[i] = Date.now() + cooldown * 1000;
+    // Tier-rolled 'inc_cooldown' mods on the equipped card shorten
+    // this slot's cooldown (multiplicative, capped at 60% reduction).
+    const reduced = cooldown * (1 - this.slotCooldownReduction(i));
+    this.slotCooldownRemaining[i] = reduced;
+    this.slotCooldownEndsAt[i] = Date.now() + reduced * 1000;
   }
 
   /** Consume a kill-charged heal's charge in slot i. */
