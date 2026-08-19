@@ -675,15 +675,26 @@ export class GameRoom extends Room {
       player.recalcDerivedStats();
     },
 
-    // ---- Spend skill point on a card upgrade ----
-    7: (client: Client, msg: { skill: SkillId }) => {
+    // ---- Spend skill point on ONE card upgrade ----
+    // msg: { slot } preferred (the CARD is upgraded, not the skill —
+    // duplicates in other slots keep their own level). Legacy { skill }
+    // still works: it upgrades the FIRST slot holding that skill.
+    7: (client: Client, msg: { slot?: number; skill?: SkillId }) => {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.skillPoints <= 0) return;
-      const cur = player.getSkillLevel(msg.skill);
-      if (cur <= 0) return;
-      if (cur >= MAX_SKILL_LEVEL) return;
-      player.upgradeSkill(msg.skill);
-      player.skillPoints -= 1;
+      let slot = typeof msg?.slot === "number" ? msg.slot | 0 : -1;
+      if (slot < 0 || slot >= NUM_CARD_SLOTS || !player.hasSlotCard(slot)) {
+        // Legacy fallback: first slot with the named skill.
+        const skill = msg?.skill as SkillId | undefined;
+        if (!skill) return;
+        slot = player.firstSlotWithSkill(skill);
+        if (slot < 0) return;
+      }
+      const card = player.slotCard(slot);
+      if (!card || card.level >= MAX_SKILL_LEVEL) return;
+      if (player.upgradeSlotCard(slot)) {
+        player.skillPoints -= 1;
+      }
     },
 
     // ---- Test: grant a skill point (debug key 9) ----
@@ -726,10 +737,10 @@ export class GameRoom extends Room {
 
     // ---- Pick up a ground card into a HUD slot ----
     // msg: { cardId: string, slot: number }
-    // The picked card lands in `slot`. If that slot was occupied, its old
-    // card drops to the ground at the player's feet (swap-out rule).
-    // Empty target slot: nothing drops. No other slot is touched, so the
-    // same skill can exist in several slots at once.
+    // The picked card lands EXACTLY in `slot` — no shifting. The
+    // previous occupant of that slot (if any) drops to the ground at the
+    // player's feet. Reordering/shifting is a separate drag-only action
+    // (message 13), never a side effect of equipping from the ground.
     11: (client: Client, msg: { cardId: string; slot: number }) => {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.isDead) return;
@@ -744,7 +755,7 @@ export class GameRoom extends Room {
       if (dx * dx + dy * dy > 96 * 96) return;
       const card = gc.card;
       if (!card || !card.skill) return;
-      // Equip into the slot; if occupied, drop the old card at the feet.
+      // Equip into the exact slot; the replaced card (if any) drops.
       const old = player.setSlotCard(slot, card);
       if (old) this.dropCardToGround(player, old);
       // Remove from the ground.
@@ -774,6 +785,19 @@ export class GameRoom extends Room {
       card.x = Math.max(16, Math.min(map.widthPx - 16, msg.x));
       card.y = Math.max(16, Math.min(map.heightPx - 16, msg.y));
       card.pickupLockUntil = Date.now() + 500; // re-arm pickup grace
+    },
+
+    // ---- Reorder the card in one HUD slot to another slot ----
+    // msg: { from: number, to: number }
+    // The dragged card lands in 'to'; the cards between shift by one to
+    // fill the freed slot (no swap: untouched cards keep their order).
+    13: (client: Client, msg: { from: number; to: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+      const from = msg?.from | 0;
+      const to = msg?.to | 0;
+      if (from === to) return;
+      player.moveSlotCard(from, to);
     },
   };
 

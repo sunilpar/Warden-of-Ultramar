@@ -510,6 +510,22 @@ export class Player extends Schema {
         this.recomputeSkillLevels();
         this.recomputeShield();
     }
+    /** Move slot cooldown + heal-kill counters from index a to index b. */
+    moveSlotCooldown(a, b) {
+        this.slotCooldownEndsAt[b] = this.slotCooldownEndsAt[a] ?? 0;
+        this.slotHealKills[b] = this.slotHealKills[a] ?? 0;
+    }
+    /** Shift slot cooldowns/heal-kills [from, to] one step in `dir`. */
+    shiftSlotCooldowns(from, to, dir) {
+        if (dir === 1) {
+            for (let i = to; i >= from; i--)
+                this.moveSlotCooldown(i, i + 1);
+        }
+        else {
+            for (let i = to; i <= from; i++)
+                this.moveSlotCooldown(i, i - 1);
+        }
+    }
     /** First slot containing a card for `skill` (search 0..4), or -1. */
     firstSlotWithSkill(skill) {
         for (let i = 0; i < this.equippedSlots.length; i++) {
@@ -579,6 +595,61 @@ export class Player extends Schema {
             c.level = Math.min(10, Math.max(1, c.level + 1));
         }
         this.recomputeSkillLevels();
+    }
+    /**
+     * Advance ONE slot's card by 1 level. A skill upgrade belongs to the
+     * CARD, not the skill: duplicate cards in other slots stay untouched,
+     * and dropping the card drops its level with it (level cap = 10).
+     */
+    upgradeSlotCard(i) {
+        const c = this.slotCard(i);
+        if (!c)
+            return false;
+        if (c.level >= 10)
+            return false;
+        c.level = Math.min(10, Math.max(1, c.level + 1));
+        this.recomputeSkillLevels();
+        return true;
+    }
+    /**
+     * Move the card in slot `from` to slot `to` (both 0..4). All cards
+     * between shift by one toward the freed slot (insert semantics), so
+     * dragging a card into the middle of the row never swaps two cards
+     * the player didn't touch. No-op on invalid/identical indices or an
+     * empty `from` slot.
+     */
+    moveSlotCard(from, to) {
+        if (from === to)
+            return false;
+        if (from < 0 || from >= NUM_CARD_SLOTS)
+            return false;
+        if (to < 0 || to >= NUM_CARD_SLOTS)
+            return false;
+        const card = this.slotCard(from);
+        if (!card)
+            return false;
+        // Save the dragged card's counters BEFORE the shift overwrites them.
+        const cdFrom = this.slotCooldownEndsAt[from] ?? 0;
+        const killsFrom = this.slotHealKills[from] ?? 0;
+        if (from < to) {
+            // shift the block between (from, to] one slot LEFT
+            for (let i = from; i < to; i++) {
+                this.equippedSlots[i] = this.equippedSlots[i + 1];
+            }
+            this.shiftSlotCooldowns(from + 1, to, -1);
+        }
+        else {
+            // shift the block [to, from) one slot RIGHT
+            for (let i = from; i > to; i--) {
+                this.equippedSlots[i] = this.equippedSlots[i - 1];
+            }
+            this.shiftSlotCooldowns(to, from - 1, 1);
+        }
+        this.equippedSlots[to] = card;
+        this.slotCooldownEndsAt[to] = cdFrom;
+        this.slotHealKills[to] = killsFrom;
+        this.onSlotsChanged();
+        return true;
     }
     /** Advance ALL equipped skills by 1 (debug key). */
     upgradeAllSkills() {

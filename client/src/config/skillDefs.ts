@@ -135,6 +135,13 @@ export function asRarity(rarity: string | undefined | null): Rarity {
 /** Opacity applied to the skill-art layer drawn over the rarity base. */
 export const CARD_ART_ALPHA = 0.85;
 
+/**
+ * How far the skill art is inset (as a fraction of card WIDTH) inside the
+ * rarity base so the rarity-colored border shows around it. Every card
+ * render site uses base-first, art-on-top layering with this inset.
+ */
+export const CARD_ART_INSET_RATIO = 0.07;
+
 /** Frame index for a card at a given row (0-indexed) and column (1-indexed). */
 export function cardFrameAt(row: number, column1: number): number {
   return row * CARD_SPRITESHEET_COLUMNS + (column1 - 1);

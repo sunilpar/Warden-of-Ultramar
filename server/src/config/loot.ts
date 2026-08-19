@@ -135,12 +135,12 @@ export const CARD_DROP = {
   SPAWN_WITH_CARD: 0.5,
   /** Rarity weights (spawn-time roll, only when a card is rolled). */
   RARITY_WEIGHTS: {
-    common: 53, // remainder (100 - 20 - 10 - 5 - 2 - 10)
+    common: 43, // remainder (100 - 20 - 10 - 5 - 2 - 20)
     uncommon: 20,
     rare: 10,
     epic: 5,
     legendary: 2,
-    unique: 10,
+    unique: 20, // pulse/vortex unique drops (mechanicus re-points the skill)
   },
   /** Drop on death: only uncommon+ cards drop (common cards stay hidden). */
   DROP_ONLY_UNCOMMON_PLUS: true,

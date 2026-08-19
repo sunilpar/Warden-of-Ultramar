@@ -43,6 +43,7 @@ import {
   rarityBaseFrame,
   asRarity,
   CARD_ART_ALPHA,
+  CARD_ART_INSET_RATIO,
   type Rarity,
   BOLTER_COLORS,
   bolterColorTier,
@@ -257,11 +258,11 @@ export class GameScene extends Phaser.Scene {
     );
     container.on("pointerover", () => {
       container.setAlpha(0.9);
-      this.showGroundCardTooltip(card, container);
+      this.scheduleGroundCardTooltip(card, container);
     });
     container.on("pointerout", () => {
       container.setAlpha(1);
-      this.hideGroundCardTooltip();
+      this.cancelGroundCardTooltip();
     });
     container.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       // Left-click grabs the card (right-click stays a cast).
@@ -276,6 +277,31 @@ export class GameScene extends Phaser.Scene {
    * Hover tooltip above a ground card: name, description and the card
    * sprite on the right of the box.
    */
+  /**
+   * Show the loot tooltip only after the pointer DWELLS on the card for
+   * a moment (~350ms). A quick pass-over (combat aiming, shooting past a
+   * drop) no longer pops the panel into view; moving away cancels it.
+   */
+  private scheduleGroundCardTooltip(
+    card: any,
+    entity: Phaser.GameObjects.Container,
+  ): void {
+    this.cancelGroundCardTooltip();
+    this.groundTooltipTimer = this.time.delayedCall(350, () => {
+      this.groundTooltipTimer = null;
+      this.showGroundCardTooltip(card, entity);
+    });
+  }
+
+  /** Cancel any pending dwell timer and hide a shown tooltip. */
+  private cancelGroundCardTooltip(): void {
+    if (this.groundTooltipTimer) {
+      this.groundTooltipTimer.remove(false);
+      this.groundTooltipTimer = null;
+    }
+    this.hideGroundCardTooltip();
+  }
+
   private showGroundCardTooltip(
     card: any,
     entity: Phaser.GameObjects.Container,
@@ -339,10 +365,11 @@ export class GameScene extends Phaser.Scene {
     const sprBase = this.add
       .image(W / 2 - 32, 0, "card_sheet", rarityBaseFrame(rarity))
       .setDisplaySize(48, 64);
+    const ttInset = 48 * CARD_ART_INSET_RATIO;
     const sprArt = this.add
       .image(W / 2 - 32, 0, "card_sheet", cardFrameForLevel(skill, level))
-      .setDisplaySize(48, 64)
-      .setAlpha(CARD_ART_ALPHA);
+      .setDisplaySize(48 - ttInset * 2, 64 - ttInset * 2)
+      .setAlpha(1);
     this.groundCardTooltip = this.add
       .container(entity.x, entity.y - H / 2 - 28, [
         bg,
@@ -376,24 +403,30 @@ export class GameScene extends Phaser.Scene {
   ): void {
     if (!this.room || this.dragCard) return;
     // Range gate (same 96px reach rule the server enforces on pickup).
+    // Measured against the VISIBLE box (what the player is clicking),
+    // which is kept in sync with the schema position by the onChange
+    // listener — never a stale copy.
     const p = this.currentPlayer;
     if (!p) return;
-    if (Math.hypot(card.x - p.x, card.y - p.y) > 96) {
+    const ex = entity.x;
+    const ey = entity.y;
+    if (Math.hypot(card.x - p.x, card.y - p.y) > 96 && Math.hypot(ex - p.x, ey - p.y) > 96) {
       this.showPickupFailedToast("TOO FAR TO GRAB");
       return;
     }
-    this.hideGroundCardTooltip();
+    this.cancelGroundCardTooltip();
     // Build a held-card visual from the ground box (base + art layers).
     const skill = ((card.card?.skill as SkillId) ?? card.skill) as SkillId;
     const slot0 = this.cardSlots[0];
     const gRarity = asRarity(card.card?.rarity);
+    const gInset = slot0.width * CARD_ART_INSET_RATIO;
     const base = this.add
       .image(0, 0, "card_sheet", rarityBaseFrame(gRarity))
       .setDisplaySize(slot0.width, slot0.height);
     const img = this.add
       .image(0, 0, "card_sheet", cardFrameForLevel(skill, card.level ?? 1))
-      .setDisplaySize(slot0.width, slot0.height)
-      .setAlpha(CARD_ART_ALPHA);
+      .setDisplaySize(slot0.width - gInset * 2, slot0.height - gInset * 2)
+      .setAlpha(1);
     const cdFill = this.add
       .rectangle(
         0,
@@ -406,6 +439,8 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0, 0)
       .setVisible(false);
     cdFill.setData("baseH", slot0.height);
+    cdFill.setData("baseW", slot0.width);
+    cdFill.x = -slot0.width / 2; // align fill with the card hitbox (origin 0,0)
     const container = this.add
       .container(this.input.activePointer.x, this.input.activePointer.y, [
         base,
@@ -555,6 +590,8 @@ export class GameScene extends Phaser.Scene {
     new Map();
   /** Hover tooltip for ground cards (name / description / sprite). */
   private groundCardTooltip: Phaser.GameObjects.Container | null = null;
+  /** Pending dwell timer for the ground-card hover tooltip. */
+  private groundTooltipTimer: Phaser.Time.TimerEvent | null = null;
   /** Ground card ids we asked to pick up (awaiting server confirm). */
   private pendingPickups: Set<string> = new Set();
   /** Slot index a pending pickup should land in (cardId -> slot). */
@@ -760,6 +797,7 @@ export class GameScene extends Phaser.Scene {
     this.dragCard = null;
     this.groundCardEntities = new Map();
     this.groundCardTooltip = null;
+    this.groundTooltipTimer = null;
     this.pendingPickups = new Set();
     this.pendingPickupSlots = new Map();
     this.groundGrab = null;
@@ -1582,13 +1620,23 @@ export class GameScene extends Phaser.Scene {
     // ============================================================
     callbacks.onAdd("groundCards", (card: any, cardId: string) => {
       this.createGroundCardEntity(card, cardId);
+      // Keep the visible box glued to the card's real position: a grabbed
+      // card re-dropped elsewhere (msg 12) updates its schema x/y, and
+      // without this the box stayed at the OLD spot (the "too far to
+      // grab while standing right on it" bug).
+      callbacks.onChange(card, () => {
+        const entity = this.groundCardEntities.get(cardId);
+        if (entity) entity.setPosition(card.x, card.y);
+      });
     });
 
     callbacks.onRemove("groundCards", (card: any, cardId: string) => {
       const entity = this.groundCardEntities.get(cardId);
       if (entity) entity.destroy();
       this.groundCardEntities.delete(cardId);
-      this.hideGroundCardTooltip();
+      // Cancel the dwell timer too: a pending hover would otherwise fire
+      // and render a tooltip for the now-destroyed card.
+      this.cancelGroundCardTooltip();
       // Own pending pickup confirmed: the server already put the card in
       // player.equippedSlots. Pull the authoritative slots and rebuild the
       // HUD from them (replaces insert/replace bookkeeping entirely).
@@ -2247,11 +2295,12 @@ export class GameScene extends Phaser.Scene {
     if (lvl !== this.skillLevelCache[skill]) {
       this.skillLevelCache[skill] = lvl;
       // Refresh the art layer of every slot holding this skill
-      // (duplicates allowed — each slot is independent).
+      // (duplicates allowed — each card keeps its OWN level).
       for (let i = 0; i < this.hudCards.length; i++) {
         const card = this.hudCards[i];
-        if (card && card.skill === skill && lvl > 0) {
-          card.img.setFrame(cardFrameForLevel(skill, lvl));
+        const sc = this.slotCards[i];
+        if (card && card.skill === skill && sc) {
+          card.img.setFrame(cardFrameForLevel(skill, sc.level));
         }
       }
     }
@@ -2344,13 +2393,16 @@ export class GameScene extends Phaser.Scene {
     const slot = this.cardSlots[i];
     const c = this.slotCenter(i);
     const artFrame = cardFrameForLevel(sc.skill, sc.level);
+    // Rarity base fills the card; art sits ON TOP, inset so the rarity
+    // border stays visible (legendary = gold border, common = white...).
+    const inset = slot.width * CARD_ART_INSET_RATIO;
     const base = this.add
       .image(0, 0, "card_sheet", rarityBaseFrame(sc.rarity))
       .setDisplaySize(slot.width, slot.height);
     const img = this.add
       .image(0, 0, "card_sheet", artFrame)
-      .setDisplaySize(slot.width, slot.height)
-      .setAlpha(CARD_ART_ALPHA);
+      .setDisplaySize(slot.width - inset * 2, slot.height - inset * 2)
+      .setAlpha(1);
     const cdFill = this.add
       .rectangle(
         0,
@@ -2363,6 +2415,7 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0, 0)
       .setVisible(false);
     cdFill.setData("baseH", slot.height);
+      cdFill.x = -slot.width / 2; // align fill with the card hitbox (origin 0,0)
     cdFill.setData("baseW", slot.width);
     const container = this.add
       .container(c.x, c.y, [base, img, cdFill])
@@ -2527,6 +2580,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Finish the drag: reorder (swap), drop to ground, or snap back. */
+  /** Finish the drag: reorder (server-authoritative), drop to ground, or snap back. */
   private endCardDrag(pointer: Phaser.Input.Pointer): void {
     if (!this.dragCard) return;
     const d = this.dragCard;
@@ -2541,30 +2595,38 @@ export class GameScene extends Phaser.Scene {
       this.hideBolterTooltip();
       return;
     }
-    // Released over a slot: swap this card with whatever sits there
-    // (visual reorder only — a swap between two HUD slots keeps every
-    // skill identical, so no server round-trip is needed).
+    // Released over a slot: ask the server to MOVE the card there.
+    // insert-shift semantics run server-side (msg 13); the HUD will be
+    // rebuilt from the authoritative equippedSlots sync.
     if (dropSlot !== d.fromSlot) {
-      const other = this.hudCards[dropSlot] ?? null;
-      const otherCard = this.slotCards[dropSlot] ?? null;
+      this.room?.send(13, { from: d.fromSlot, to: dropSlot });
+      // Optimistic local insert-shift so the motion matches the server.
       const myCard = this.slotCards[d.fromSlot] ?? null;
-      this.slotCards[dropSlot] = myCard;
-      this.slotCards[d.fromSlot] = otherCard;
-      this.hudCards[dropSlot] = d.obj;
-      d.obj.targetSlot = dropSlot;
-      if (other) {
-        this.hudCards[d.fromSlot] = other;
-        other.targetSlot = d.fromSlot;
-        this.tweenCardTo(other, d.fromSlot, true);
+      const myObj = d.obj;
+      if (d.fromSlot < dropSlot) {
+        for (let i = d.fromSlot; i < dropSlot; i++) {
+          this.slotCards[i] = this.slotCards[i + 1];
+          this.hudCards[i] = this.hudCards[i + 1];
+        }
       } else {
-        this.hudCards[d.fromSlot] = null;
+        for (let i = d.fromSlot; i > dropSlot; i--) {
+          this.slotCards[i] = this.slotCards[i - 1];
+          this.hudCards[i] = this.hudCards[i - 1];
+        }
       }
+      this.slotCards[dropSlot] = myCard;
+      this.hudCards[dropSlot] = myObj;
     }
-    this.tweenCardTo(d.obj, dropSlot, true);
+    // Tween every displaced card to its (possibly new) slot.
     d.obj.container.setScale(1);
     d.obj.container.setDepth(102);
+    for (let i = 0; i < this.hudCards.length; i++) {
+      const c = this.hudCards[i];
+      if (c && c !== d.obj) this.tweenCardTo(c, i, true);
+    }
+    this.tweenCardTo(d.obj, dropSlot, true);
     this.dragCard = null;
-    this.syncAllCardPositions();
+    this.updatePlusHints();
   }
 
   /**
@@ -4437,16 +4499,23 @@ export class GameScene extends Phaser.Scene {
       const itX = itemStartX + i * (itemDispW + itemGap);
       // Shield uses the shield card art frame (column 2, tier 0).
       const frame = (cardFrameForLevel as any)("shield", 1) ?? 0;
+      const shieldInset = itemDispW * CARD_ART_INSET_RATIO;
       const slotBg = this.add
         .rectangle(itX, y, itemDispW + 6, itemDispH + 6, 0x113355, 0.8)
         .setOrigin(0, 0)
         .setScrollFactor(0)
         .setStrokeStyle(2, 0x33b5ff);
       this.addDyn(slotBg);
-      const slotImg = this.add
-        .sprite(itX + 3, y + 3, "card_sheet", frame)
+      const slotBase = this.add
+        .image(itX + 3, y + 3, "card_sheet", rarityBaseFrame("common"))
         .setOrigin(0, 0)
         .setDisplaySize(itemDispW, itemDispH)
+        .setScrollFactor(0);
+      this.addDyn(slotBase);
+      const slotImg = this.add
+        .sprite(itX + 3 + shieldInset, y + 3 + shieldInset, "card_sheet", frame)
+        .setOrigin(0, 0)
+        .setDisplaySize(itemDispW - shieldInset * 2, itemDispH - shieldInset * 2)
         .setScrollFactor(0)
         .setInteractive({ useHandCursor: true });
       this.addDyn(slotImg);
@@ -4521,16 +4590,26 @@ export class GameScene extends Phaser.Scene {
 
     for (let i = 0; i < equipped.length; i++) {
       const skillId = equipped[i];
-      const skillLvl = p.skillLevels.get(skillId) ?? 1;
+      // THIS slot's card level (duplicate cards upgrade independently).
+      const slotCard = (p.equippedSlots as any)[i];
+      const skillLvl = slotCard?.level ?? p.skillLevels.get(skillId) ?? 1;
       const cardX = cardStartX + i * (cardDispW + cardGap);
       const cardInfo =
         SKILL_CARDS_LOOKUP[skillId as keyof typeof SKILL_CARDS_LOOKUP];
 
-      // Card sprite from spritesheet
+      // Card = rarity base (white default) + skill art inset on top.
       const frame = cardFrameForLevel(skillId as any, skillLvl);
-      const cardImg = this.add
-        .image(cardX, y, "card_sheet", frame)
+      const rarity = asRarity((p.equippedSlots as any)[i]?.rarity);
+      const csInset = cardDispW * CARD_ART_INSET_RATIO;
+      const cardBase = this.add
+        .image(cardX, y, "card_sheet", rarityBaseFrame(rarity))
         .setDisplaySize(cardDispW, cardDispH)
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      this.addDyn(cardBase);
+      const cardImg = this.add
+        .image(cardX + csInset, y + csInset, "card_sheet", frame)
+        .setDisplaySize(cardDispW - csInset * 2, cardDispH - csInset * 2)
         .setOrigin(0, 0)
         .setScrollFactor(0)
         .setInteractive({ useHandCursor: true });
@@ -4626,7 +4705,7 @@ export class GameScene extends Phaser.Scene {
             cardUpgradeDesc +
             "\nAre you sure you want to upgrade the card?",
           () => {
-            if (this.room) this.room.send(7, { skill: skillId });
+            if (this.room) this.room.send(7, { slot: i }); // upgrade THIS card only
             this.time.delayedCall(200, () => {
               if (this.charScreenVisible) this.updateCharacterScreen();
             });
