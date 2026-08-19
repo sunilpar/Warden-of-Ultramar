@@ -65,6 +65,17 @@ export class SceneSelector extends Phaser.Scene {
         frameHeight: 256,
       },
     );
+    // Caster enemy sprite sheet (256x256 frames, 2 rows x 5 cols).
+    // Row 0 (frames 0-4) = idle animation (faces LEFT by default).
+    // Row 1 (frames 5-9) = attack animation.
+    this.load.spritesheet(
+      "caster_sheet",
+      "assets/skills/pulseenemy-sheet.png",
+      {
+        frameWidth: 256,
+        frameHeight: 256,
+      },
+    );
     // Map1 tile sprite sheet (2 rows x 4 cols, 64x64 each)
     this.load.spritesheet(
       "map1_tiles",

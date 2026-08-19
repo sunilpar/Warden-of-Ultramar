@@ -259,10 +259,11 @@ export class GameRoom extends Room {
    * Pick an enemy type by spawn ratio: 40% tyranid / 30% mechanicus /
    * 20% tau / 10% orck.
    */
-  private pickEnemyType(): "tyranid" | "orck" | "tau" | "mechanicus" {
+  private pickEnemyType(): "tyranid" | "orck" | "tau" | "mechanicus" | "caster" {
     const r = Math.random();
     if (r < 0.4) return "tyranid";
-    if (r < 0.7) return "mechanicus";
+    if (r < 0.55) return "mechanicus"; // halved 30% -> 15%, rest moved to caster
+    if (r < 0.7) return "caster"; // 15% (taken from mechanicus)
     if (r < 0.9) return "tau";
     return "orck";
   }

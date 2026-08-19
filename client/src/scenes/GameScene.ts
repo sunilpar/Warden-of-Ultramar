@@ -1142,10 +1142,13 @@ export class GameScene extends Phaser.Scene {
       const isOrck = enemy.typeId === "orck";
       const isTau = enemy.typeId === "tau";
       const isMech = enemy.typeId === "mechanicus";
+        const isCaster = enemy.typeId === "caster";
       const textureKey = isTau
         ? "tau_sheet"
         : isMech
           ? "mechanicus_sheet"
+          : isCaster
+            ? "caster_sheet"
           : isOrck
             ? "orck_sheet"
             : "tyranid_sheet";
@@ -1153,11 +1156,21 @@ export class GameScene extends Phaser.Scene {
         ? "tau_idle"
         : isMech
           ? "mechanicus_idle"
+          : isCaster
+            ? "caster_idle"
           : isOrck
             ? "orck_idle"
             : "tri_idle";
       const isElite = !!enemy.isElite;
-      const displaySize = isTau ? 88 : isMech ? 88 : isOrck ? 80 : 64;
+      const displaySize = isTau
+          ? 88
+          : isMech
+            ? 88
+            : isCaster
+              ? 88
+              : isOrck
+                ? 80
+                : 64;
       const eliteSize = Math.round(displaySize * 1.6);
       const sprite = this.add
         .sprite(enemy.x, enemy.y, textureKey, 0)
@@ -2157,6 +2170,27 @@ export class GameScene extends Phaser.Scene {
       frameRate: 12,
       repeat: 0,
     });
+      // Caster idle animation (row 0, frames 0-4, loops)
+      this.anims.create({
+        key: "caster_idle",
+        frames: this.anims.generateFrameNumbers("caster_sheet", {
+          start: 0,
+          end: 4,
+        }),
+        frameRate: 8,
+        repeat: -1,
+      });
+
+      // Caster attack animation (row 1, frames 6-10, plays once)
+      this.anims.create({
+        key: "caster_attack",
+        frames: this.anims.generateFrameNumbers("caster_sheet", {
+          start: 6,
+          end: 10,
+        }),
+        frameRate: 10,
+        repeat: 0,
+      });
   }
 
   // ============================================================
@@ -5174,10 +5208,13 @@ export class GameScene extends Phaser.Scene {
       const isOrck = textureKey === "orck_sheet";
       const isTau = textureKey === "tau_sheet";
       const isMech = textureKey === "mechanicus_sheet";
+        const isCaster = textureKey === "caster_sheet";
       const atkKey = isTau
         ? "tau_attack"
         : isMech
           ? "mechanicus_attack"
+          : isCaster
+            ? "caster_attack"
           : isOrck
             ? "orck_attack"
             : "tri_attack";
@@ -5185,6 +5222,8 @@ export class GameScene extends Phaser.Scene {
         ? "tau_idle"
         : isMech
           ? "mechanicus_idle"
+          : isCaster
+            ? "caster_idle"
           : isOrck
             ? "orck_idle"
             : "tri_idle";

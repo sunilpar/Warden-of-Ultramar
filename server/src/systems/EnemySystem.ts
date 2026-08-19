@@ -148,6 +148,9 @@ export class EnemySystem {
         case "mechanicus":
           this.updateMechanicus(enemy, dt);
           break;
+          case "caster":
+          this.updateCaster(enemy, dt);
+          break;
         default:
           break;
       }
@@ -403,6 +406,78 @@ export class EnemySystem {
   }
 
   // ============================================================
+  // CASTER (close-combat caster: vortex / heal / pulse)
+  // ============================================================
+
+  /** Caster close-combat skill range. */
+  private static readonly CASTER_ATTACK_RANGE = 100;
+  /** Within this radius of the target the caster surges +30% speed. */
+  private static readonly CASTER_SURGE_RADIUS = 200;
+  /** Speed multiplier applied while inside the surge radius. */
+  private static readonly CASTER_SURGE_MULT = 1.3;
+  /** Caster skill trigger interval: at most one skill attempt per second. */
+  private static readonly CASTER_TRIGGER_INTERVAL_MS = 1000;
+
+  /**
+   * Caster AI: close-combat caster. Chases like a tyranid; once the target
+   * is within 200px it surges +30% move speed and closes to melee range to
+   * unleash vortex/pulse. Heals itself (or allies) via its skill pool.
+   */
+  private updateCaster(enemy: Enemy, _dt: number): void {
+    const now = Date.now();
+    const target = this.findNearestPlayer(enemy);
+    if (!target) {
+      enemy.attacking = false;
+      enemy.speedMultiplier = 1; // no surge while wandering
+      this.wander(enemy, _dt);
+      return;
+    }
+
+    enemy.facingRight = target.x > enemy.x;
+
+    const dx = target.x - enemy.x;
+    const dy = target.y - enemy.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    enemy.attacking = now < enemy.attackingUntil;
+
+    // Surge: +30% move speed while the target is within 200px.
+    enemy.speedMultiplier =
+      dist <= EnemySystem.CASTER_SURGE_RADIUS
+        ? EnemySystem.CASTER_SURGE_MULT
+        : 1;
+
+    if (dist <= EnemySystem.CASTER_ATTACK_RANGE) {
+      this.tryUseCasterSkill(enemy, target, now);
+    } else {
+      // Out of range: charge toward the target (with surge if close).
+      this.moveToward(enemy, target.x, target.y, _dt);
+    }
+  }
+
+  /**
+   * Caster skill attempt with a fixed 1-second trigger interval
+   * (reuses the tau/mechanicus random-pick + throttle pacing).
+   */
+  private tryUseCasterSkill(
+    enemy: Enemy,
+    target: Player,
+    now: number,
+  ): void {
+    const id = (enemy as any).__id as string | undefined;
+    if (!id) return;
+    const nextAt = this.nextSkillTriggerAt.get(id) ?? 0;
+    if (now < nextAt) return;
+    if (enemy.skillPool.length === 0) return;
+    const skill: SkillId =
+      enemy.skillPool[Math.floor(Math.random() * enemy.skillPool.length)];
+    if (!enemy.isSkillReady(skill)) return;
+    this.useSkill(enemy, skill, target);
+    this.nextSkillTriggerAt.set(
+      id,
+      now + EnemySystem.CASTER_TRIGGER_INTERVAL_MS,
+    );
+  }
+  // ============================================================
   // SHARED AI HELPERS
   // ============================================================
 
@@ -518,7 +593,9 @@ export class EnemySystem {
           ? 400
           : enemy.typeId === "mechanicus"
             ? 400
-            : 350;
+            : enemy.typeId === "caster"
+              ? 500
+              : 350;
     enemy.attackingUntil = now + atkDur;
     enemy.attacking = true;
     if (skill === "bolter" && this.projectileSystem) {
