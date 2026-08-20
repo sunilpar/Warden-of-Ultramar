@@ -4137,6 +4137,72 @@ export class GameScene extends Phaser.Scene {
   // CHARACTER STATS SCREEN (press C to toggle)
   // ============================================================
 
+  /** Build a 9-slice outline frame around a rect using the
+   *  "ui_outline" spritesheet: frame 0 = corner (top-left),
+   *  frame 1 = horizontal edge, frame 2 = vertical edge.
+   *  Corners are flipped copies (TR = flipX, BL = flipY, BR = both)
+   *  and edges are tiled to fit exactly between the corners. */
+  private buildOutlineFrame(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+  ): Phaser.GameObjects.Container {
+    // ================= TWEAK HERE =================
+    const T = 16; // displayed tile size (art is 64px, scaled down)
+    const INSET = 0; // 0 = ring hugs the box edge. Raise to pull the
+    //   border CLOSER to / over the box (e.g. 4 or 8), lower (negative)
+    //   to push it further out.
+    // =============================================
+
+    const ART = 64; // source tile size
+    const cw = Math.min(T, w / 2); // corner display width
+    const ch = Math.min(T, h / 2); // corner display height
+    const frame = this.add.container(0, 0);
+
+    // Place a tile scaled so it fills the rect [tx, ty, tw, th]
+    const tile = (
+      tx: number,
+      ty: number,
+      fr: number,
+      tw: number,
+      th: number,
+    ): Phaser.GameObjects.Image =>
+      this.add
+        .image(tx, ty, "ui_outline", fr)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setScale(tw / ART, th / ART);
+
+    // Left/top edge of the ring, and where the right/bottom ring starts
+    const ox = x - cw + INSET;
+    const oy = y - ch + INSET;
+    const rx = x + w - INSET;
+    const by = y + h - INSET;
+
+    // Corners (frame 0 is the top-left corner; flip for the others)
+    frame.add(tile(ox, oy, 0, cw, ch));
+    frame.add(tile(rx, oy, 0, cw, ch).setFlipX(true));
+    frame.add(tile(ox, by, 0, cw, ch).setFlipY(true));
+    frame.add(tile(rx, by, 0, cw, ch).setFlipX(true).setFlipY(true));
+
+    // Horizontal edges: tile frame 1 between the corners
+    // (bottom edge flipped so the line hugs the bottom side)
+    for (let c = x + cw; c < x + w - cw; c += T) {
+      const tw = Math.min(T, x + w - cw - c);
+      frame.add(tile(c, oy, 1, tw, ch));
+      frame.add(tile(c, by, 1, tw, ch).setFlipY(true));
+    }
+    // Vertical edges: tile frame 2 between the corners
+    // (right edge flipped so the line hugs the right side)
+    for (let r = y + ch; r < y + h - ch; r += T) {
+      const th = Math.min(T, y + h - ch - r);
+      frame.add(tile(ox, r, 2, cw, th));
+      frame.add(tile(rx, r, 2, cw, th).setFlipX(true));
+    }
+    return frame;
+  }
+
   private createCharacterScreen(): void {
     const W = this.cameras.main.width;
     const H = this.cameras.main.height;
@@ -4165,10 +4231,10 @@ export class GameScene extends Phaser.Scene {
     // ---- Panel background ----
     const panelBg = this.add.graphics().setScrollFactor(0);
     panelBg.fillStyle(0x0a0a14, 0.95);
-    panelBg.fillRoundedRect(px, py, PANEL_W, PANEL_H, 12);
-    panelBg.lineStyle(2, 0x4a6a8a, 0.9);
-    panelBg.strokeRoundedRect(px, py, PANEL_W, PANEL_H, 12);
+    panelBg.fillRect(px, py, PANEL_W, PANEL_H);
     this.charScreen.add(panelBg);
+    // Sprite outline border
+    this.charScreen.add(this.buildOutlineFrame(px, py, PANEL_W, PANEL_H).setDepth(1));
 
     // ---- Title ----
     const titleText = this.add
@@ -5692,9 +5758,15 @@ export class GameScene extends Phaser.Scene {
     const boxH = 220;
     const box = this.add
       .rectangle(cx, cy, boxW, boxH, 0x3d2b1f, 0.95)
-      .setStrokeStyle(4, 0xd4a017, 1) // gold border
       .setScrollFactor(0)
       .setDepth(2001);
+    // Sprite outline border
+    const boxOutline = this.buildOutlineFrame(
+      cx - boxW / 2,
+      cy - boxH / 2,
+      boxW,
+      boxH,
+    ).setDepth(2005);
 
     // "YOU DIED" title
     const title = this.add
@@ -5712,10 +5784,11 @@ export class GameScene extends Phaser.Scene {
     // Respawn button
     const respawnBtn = this.add
       .rectangle(cx, cy + 10, 180, 44, 0x2d4a2b, 0.9)
-      .setStrokeStyle(2, 0xd4a017, 0.8)
       .setScrollFactor(0)
       .setDepth(2002)
       .setInteractive({ useHandCursor: true });
+    // Sprite outline border
+    const respawnOutline = this.buildOutlineFrame(cx - 90, cy - 12, 180, 44).setDepth(2005);
     const respawnText = this.add
       .text(cx, cy + 10, "Respawn", {
         fontFamily: "Georgia, serif",
@@ -5729,10 +5802,11 @@ export class GameScene extends Phaser.Scene {
     // Quit button
     const quitBtn = this.add
       .rectangle(cx, cy + 64, 180, 44, 0x4a2b2b, 0.9)
-      .setStrokeStyle(2, 0xd4a017, 0.8)
       .setScrollFactor(0)
       .setDepth(2002)
       .setInteractive({ useHandCursor: true });
+    // Sprite outline border
+    const quitOutline = this.buildOutlineFrame(cx - 90, cy + 42, 180, 44).setDepth(2005);
     const quitText = this.add
       .text(cx, cy + 64, "Quit", {
         fontFamily: "Georgia, serif",
@@ -5798,10 +5872,13 @@ export class GameScene extends Phaser.Scene {
       .container(0, 0, [
         bg,
         box,
+        boxOutline,
         title,
         respawnBtn,
+        respawnOutline,
         respawnText,
         quitBtn,
+        quitOutline,
         quitText,
       ])
       .setScrollFactor(0)

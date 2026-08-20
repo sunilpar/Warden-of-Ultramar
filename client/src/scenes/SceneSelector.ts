@@ -159,6 +159,14 @@ export class SceneSelector extends Phaser.Scene {
 
     // ---- Map info button icon ----
     this.load.image("map_info_icon", "assets/40k icon2.png");
+
+    // ---- UI outline border tiles ----
+    // 3 rows of 64x64: row 0 = corner (top-left), row 1 = horizontal edge,
+    // row 2 = vertical edge. Other corners are flipped versions of row 0.
+    this.load.spritesheet("ui_outline", "assets/outlinev1spritesheet.png", {
+      frameWidth: 64,
+      frameHeight: 64,
+    });
   }
   create() {
     // Draw the menu background stretched to fill the screen
