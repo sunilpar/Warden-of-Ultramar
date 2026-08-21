@@ -455,7 +455,7 @@ export class GameScene extends Phaser.Scene {
     card: any,
     entity: Phaser.GameObjects.Container,
   ): void {
-    if (!this.room || this.dragCard) return;
+    if (!this.room || this.dragCard || this.invDrag) return;
     // Range gate (same 96px reach rule the server enforces on pickup).
     // Measured against the VISIBLE box (what the player is clicking),
     // which is kept in sync with the schema position by the onChange
@@ -541,6 +541,24 @@ export class GameScene extends Phaser.Scene {
     const g = this.groundGrab;
     if (!g) return;
     this.groundGrab = null;
+    const invIdx = this.invAtPointer(pointer);
+    if (invIdx >= 0 && !this.invCardsData[invIdx]) {
+      // STASH into the shelf: server moves the ground card into the
+      // inventory. Same pending-pickup guard as HUD equipping.
+      this.pendingPickups.add(g.cardId);
+      this.room?.send(17, { cardId: g.cardId, inv: invIdx });
+      g.obj.container.destroy();
+      g.entity.setVisible(true);
+      const grabbedId = g.cardId;
+      this.time.delayedCall(500, () => {
+        if (this.pendingPickups.has(grabbedId)) {
+          this.pendingPickups.delete(grabbedId);
+          this.showPickupFailedToast("PICKUP FAILED - TRY AGAIN");
+        }
+      });
+      this.updatePlusHints();
+      return;
+    }
     const slotIdx = this.slotAtPointer(pointer);
     if (slotIdx >= 0) {
       // EQUIP into the released-over slot. The server places the card in
@@ -681,6 +699,25 @@ export class GameScene extends Phaser.Scene {
   private skillPointBadgeText!: Phaser.GameObjects.Text;
   // Confirmation popup (reused)
   private confirmPopup!: Phaser.GameObjects.Container;
+
+  // ---- Inventory screen (toggle with I) ----
+  private invScreen!: Phaser.GameObjects.Container;
+  private invScreenVisible: boolean = false;
+  private invScreenKey!: Phaser.Input.Keyboard.Key;
+  /** Tooltip shown when hovering a stored inventory card. */
+  private invCardTooltip: Phaser.GameObjects.Container | null = null;
+  /** Screen rects of the 20 shelf slots (drop targets + layout). */
+  private invSlotRects: Phaser.GameObjects.Rectangle[] = [];
+  /** Live inventory card objects, indexed 0..19 (null = empty). */
+  private invCards: (HudCardObj | null)[] = Array(20).fill(null);
+  /** Client mirror of the server's inventorySlots. */
+  private invCardsData: (SlotCard | null)[] = Array(20).fill(null);
+  /** Inventory drag state (dragging a stored card). */
+  private invDrag: {
+    obj: HudCardObj;
+    fromInv: number;
+    hoverInv: number;
+  } | null = null;
 
   // ---- Aim / firing ----
   private aimAngle: number = 0;
@@ -913,6 +950,7 @@ export class GameScene extends Phaser.Scene {
       if (!this.currentPlayer || !this.room) return;
       // While a card is grabbed, clicks only manage the drag.
       if (this.dragCard) return;
+      if (this.invDrag) return;
       // Never cast while grabbing a ground card (or clicking one).
       if (this.groundGrab) return;
       if (this.pointerOverGroundCard(pointer)) return;
@@ -932,10 +970,12 @@ export class GameScene extends Phaser.Scene {
     // Card drag release (mouse up anywhere).
     this.input.on("pointerup", (pointer: Phaser.Input.Pointer) => {
       if (this.dragCard) this.endCardDrag(pointer);
+      else if (this.invDrag) this.endInvCardDrag(pointer);
       else if (this.groundGrab) this.endGroundGrab(pointer);
     });
     this.input.on("pointerupoutside", (pointer: Phaser.Input.Pointer) => {
       if (this.dragCard) this.endCardDrag(pointer);
+      else if (this.invDrag) this.endInvCardDrag(pointer);
       else if (this.groundGrab) this.endGroundGrab(pointer);
     });
     // Stop the browser context menu over HUD cards (right-click grabs).
@@ -1026,6 +1066,7 @@ export class GameScene extends Phaser.Scene {
     this.createMapInfoButton();
     // ---- Character stats screen (press C) ----
     this.createCharacterScreen();
+    this.createInventoryScreen();
     // Slot-based card HUD (5 slots, default layout).
     this.initSlotCards();
 
@@ -1125,6 +1166,8 @@ export class GameScene extends Phaser.Scene {
             this.syncSkillLevel(player, "shield");
             // Mirror the server's equipped card slots into the HUD.
             this.syncSlotsFromServer(false);
+            // Mirror the server's inventory slots into the I-tab.
+            this.syncInventoryFromServer(false);
             this.currentPlayer.setData("attack", player.attack ?? 100);
             // Per-slot cooldowns + heal charges (each slot independent).
             this.currentPlayer.setData(
@@ -2678,6 +2721,23 @@ export class GameScene extends Phaser.Scene {
     if (!this.dragCard) return;
     const d = this.dragCard;
     const dropSlot = this.slotAtPointer(pointer);
+    // Released over an INVENTORY slot: store it there (msg 14/19).
+    const invDrop = this.invAtPointer(pointer);
+    if (invDrop >= 0) {
+      d.obj.container.destroy();
+      this.hudCards[d.fromSlot] = null;
+      this.dragCard = null;
+      const invEmpty = !this.invCardsData[invDrop];
+      if (invEmpty) {
+        this.room?.send(14, { slot: d.fromSlot, inv: invDrop });
+      } else {
+        this.room?.send(19, { slot: d.fromSlot, inv: invDrop });
+      }
+      this.syncSlotsFromServer(true);
+      this.syncInventoryFromServer(true);
+      this.updatePlusHints();
+      return;
+    }
     // Release OUTSIDE the HUD row: drop that slot's card to the ground.
     if (dropSlot < 0) {
       this.dropCardToGround(d.fromSlot, pointer);
@@ -4203,12 +4263,399 @@ export class GameScene extends Phaser.Scene {
     return frame;
   }
 
+  // ============================================================
+  // INVENTORY SCREEN (press I to toggle; slides in from the right)
+  // ============================================================
+
+  /** Inventory layout constants (derived from the HUD card size so
+   *  shelf slots keep the same aspect ratio as the cards). */
+  private static readonly INV_COLS = 5;
+  private static readonly INV_ROWS = 4;
+  private static readonly INV_SLOT_GAP = 10;
+
+  /** Create the inventory tab: docked right, 5x4 wood-ish shelf with
+   *  the same outline ring as the character tab. */
+  private createInventoryScreen(): void {
+    const W = this.cameras.main.width;
+    const H = this.cameras.main.height;
+
+    // Shelf slot size: same aspect ratio as HUD cards (128x200).
+    const slotW = 64;
+    const slotH = 100;
+    const cols = GameScene.INV_COLS;
+    const rows = GameScene.INV_ROWS;
+    const gap = GameScene.INV_SLOT_GAP;
+    const gridW = cols * slotW + (cols - 1) * gap;
+    const gridH = rows * slotH + (rows - 1) * gap;
+    const PANEL_W = gridW + 40; // padding around the grid
+    const PANEL_H = gridH + 80; // + header space
+    // Docked to the RIGHT edge (mirror of the C tab on the left).
+    const px = W - PANEL_W - 24;
+    const py = Math.round((H - PANEL_H) / 2);
+
+    this.invScreen = this.add
+      .container(0, 0)
+      .setDepth(400)
+      .setVisible(false)
+      .setScrollFactor(0);
+
+    // ---- Dim overlay (standalone; fades in after the slide) ----
+    // Purely visual: NOT interactive. The inventory stays open while
+    // the player drags cards in from the HUD or the ground; it only
+    // closes via [I], ESC, or the X button.
+    const overlay = this.add
+      .rectangle(0, 0, W, H, 0x000000, 0)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(399)
+      .setVisible(false);
+    (this.invScreen as any)._overlay = overlay;
+
+    // ---- Panel background ----
+    const panelBg = this.add.graphics().setScrollFactor(0);
+    panelBg.fillStyle(0x0a0a14, 0.95);
+    panelBg.fillRect(px, py, PANEL_W, PANEL_H);
+    this.invScreen.add(panelBg);
+    this.invScreen.add(this.buildOutlineFrame(px, py, PANEL_W, PANEL_H).setDepth(1));
+
+    // ---- Title + close hint ----
+    this.invScreen.add(
+      this.add
+        .text(px + PANEL_W / 2, py + 14, "INVENTORY", {
+          color: "#ffd700",
+          fontSize: "20px",
+          fontFamily: "monospace",
+          fontStyle: "bold",
+          stroke: "#000000",
+          strokeThickness: 4,
+        })
+        .setOrigin(0.5, 0)
+        .setScrollFactor(0),
+    );
+    this.invScreen.add(
+      this.add
+        .text(px + PANEL_W - 12, py + 10, "[I] Close", {
+          color: "#888888",
+          fontSize: "11px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(1, 0)
+        .setScrollFactor(0),
+    );
+
+    // ---- Wood-like shelf: 5 cols x 4 rows of card-sized cells ----
+    const cellG = this.add.graphics().setScrollFactor(0);
+    const shelfTop = py + 50;
+    this.invSlotRects = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const i = r * cols + c;
+        const x = px + 20 + c * (slotW + gap);
+        const y = shelfTop + r * (slotH + gap);
+        // Shelf plank behind each cell (wood tones)
+        cellG.fillStyle(0x3a2a1a, 0.9);
+        cellG.fillRect(x, y, slotW, slotH);
+        cellG.fillStyle(0x57422a, 0.75);
+        cellG.fillRect(x + 3, y + 3, slotW - 6, slotH - 6);
+        // Invisible drop-target rect (same pattern as cardSlots)
+        const rect = this.add
+          .rectangle(x, y, slotW, slotH)
+          .setOrigin(0, 0)
+          .setScrollFactor(0);
+        this.invSlotRects.push(rect);
+        this.invScreen.add(rect);
+      }
+    }
+    this.invScreen.add(cellG);
+    // Re-add the rects above the planks so hit tests are stable.
+    for (const r of this.invSlotRects) this.invScreen.add(r);
+    this.invScreen.bringToTop(cellG);
+
+    // Store layout constants for later use.
+    (this.invScreen as any)._px = px;
+    (this.invScreen as any)._py = py;
+    (this.invScreen as any)._panelW = PANEL_W;
+    (this.invScreen as any)._panelH = PANEL_H;
+    (this.invScreen as any)._slotW = slotW;
+    (this.invScreen as any)._slotH = slotH;
+
+    // ---- I key to toggle ----
+    this.invScreenKey = this.input.keyboard.addKey(
+      Phaser.Input.Keyboard.KeyCodes.I,
+    );
+    this.invScreenKey.on("down", () => {
+      this.toggleInventoryScreen();
+    });
+
+    // ESC also closes the inventory.
+    const escKey = this.input.keyboard.addKey(
+      Phaser.Input.Keyboard.KeyCodes.ESC,
+    );
+    escKey.on("down", () => {
+      if (this.invScreenVisible) this.toggleInventoryScreen();
+    });
+  }
+
+  /** Slide the inventory tab in/out from the right edge. */
+  private toggleInventoryScreen(): void {
+    this.invScreenVisible = !this.invScreenVisible;
+    this.tweens.killTweensOf(this.invScreen);
+    const overlay: Phaser.GameObjects.Rectangle = (this.invScreen as any)
+      ._overlay;
+    this.tweens.killTweensOf(overlay);
+    // Fully off-screen right (panel + outline + margin).
+    const offX = (this.invScreen as any)._panelW + 60;
+    if (this.invScreenVisible) {
+      this.invScreen.setPosition(offX, 0).setVisible(true);
+      this.tweens.add({
+        targets: this.invScreen,
+        x: 0,
+        duration: 250,
+        ease: "Cubic.Out",
+        onComplete: () => {
+          // Card visuals live in world space: create them only now so
+          // they appear exactly when the panel lands.
+          this.updateInventoryCards();
+          overlay.setVisible(true).setAlpha(0);
+          this.tweens.add({
+            targets: overlay,
+            alpha: 0.6,
+            duration: 200,
+          });
+        },
+      });
+    } else {
+      // Card visuals are world-space: kill them as the panel leaves.
+      for (const c of this.invCards) c?.container.destroy();
+      this.invCards = Array(20).fill(null);
+      this.hideInvCardTooltip();
+      this.tweens.add({
+        targets: this.invScreen,
+        x: offX,
+        duration: 200,
+        ease: "Cubic.In",
+        onComplete: () => this.invScreen.setVisible(false),
+      });
+      this.tweens.add({
+        targets: overlay,
+        alpha: 0,
+        duration: 200,
+        onComplete: () => overlay.setVisible(false),
+      });
+    }
+  }
+
+  /** Screen-space center of inventory slot i. */
+  private invSlotCenter(i: number): { x: number; y: number } {
+    const r = this.invSlotRects[i];
+    // The invScreen container itself slides; slot centers must be
+    // reported in WORLD space (screen + container offset).
+    const cx = r.x + r.width / 2 + this.invScreen.x;
+    const cy = r.y + r.height / 2 + this.invScreen.y;
+    return { x: cx, y: cy };
+  }
+
+  /** Which inventory slot the pointer is over (-1 when outside). */
+  private invAtPointer(pointer: Phaser.Input.Pointer): number {
+    for (let i = 0; i < this.invSlotRects.length; i++) {
+      const s = this.invSlotRects[i];
+      // Slot rects move with the container: account for invScreen.x.
+      const x = s.x + this.invScreen.x;
+      const y = s.y + this.invScreen.y;
+      if (
+        pointer.x >= x &&
+        pointer.x <= x + s.width &&
+        pointer.y >= y - 10 &&
+        pointer.y <= y + s.height + 10
+      ) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Pull the local player's inventorySlots from the synced state and
+   * rebuild the shelf when it differs from the local mirror.
+   */
+  private syncInventoryFromServer(rebuildAlways: boolean): void {
+    const p = this.currentPlayerState;
+    if (!p || !(p as any).inventorySlots) return;
+    const arr = (p as any).inventorySlots;
+    const slots: (SlotCard | null)[] = Array(20).fill(null);
+    for (let i = 0; i < 20; i++) {
+      const c = arr[i];
+      if (c && c.skill) {
+        slots[i] = {
+          skill: c.skill as SkillId,
+          level: c.level ?? 1,
+          rarity: asRarity(c.rarity),
+          modIds: c.modIds ? Array.from(c.modIds) : [],
+          modValues: c.modValues ? Array.from(c.modValues as number[]) : [],
+        };
+      }
+    }
+    const same =
+      !rebuildAlways &&
+      slots.every((s, i) => {
+        const cur = this.invCardsData[i];
+        if (!s && !cur) return true;
+        if (!s || !cur) return false;
+        return (
+          s.skill === cur.skill &&
+          s.level === cur.level &&
+          s.rarity === cur.rarity
+        );
+      });
+    if (!same) {
+      this.invCardsData = slots;
+      // Visuals exist only while the tab is open (world-space cards).
+      if (this.invScreenVisible) this.updateInventoryCards();
+    }
+  }
+  /** Destroy + recreate every inventory card visual from the mirror. */
+  private updateInventoryCards(): void {
+    for (const c of this.invCards) c?.container.destroy();
+    this.invCards = Array(20).fill(null);
+    for (let i = 0; i < 20; i++) {
+      const sc = this.invCardsData[i];
+      if (!sc) continue;
+      this.invCards[i] = this.createInvCardObj(sc, i);
+    }
+  }
+
+  /** Build one inventory card visual (smaller version of a HUD card). */
+  private createInvCardObj(sc: SlotCard, i: number): HudCardObj {
+    const slotW = (this.invScreen as any)._slotW;
+    const slotH = (this.invScreen as any)._slotH;
+    const c = this.invSlotCenter(i);
+    const inset = slotW * CARD_ART_INSET_RATIO;
+    const base = this.add
+      .image(0, 0, "card_sheet", rarityBaseFrame(sc.rarity))
+      .setDisplaySize(slotW, slotH);
+    const img = this.add
+      .image(0, 0, "card_sheet", cardFrameForLevel(sc.skill, sc.level))
+      .setDisplaySize(slotW - inset * 2, slotH - inset * 2)
+      .setAlpha(CARD_ART_ALPHA);
+    const cdFill = this.add
+      .rectangle(0, 0, slotW, slotH, 0xffffff, 0.45)
+      .setOrigin(0, 0)
+      .setVisible(false);
+    const container = this.add
+      .container(c.x, c.y, [base, img, cdFill])
+      .setScrollFactor(0)
+      .setDepth(402);
+    container.setSize(slotW, slotH);
+    container.setInteractive(
+      new Phaser.Geom.Rectangle(
+        -slotW / 2 - 6,
+        -slotH / 2 - 6,
+        slotW + 12,
+        slotH + 12,
+      ),
+      Phaser.Geom.Rectangle.Contains,
+    );
+    container.on("pointerdown", (_pointer: Phaser.Input.Pointer) => {
+      this.beginInvCardDrag(i);
+    });
+    container.on("pointerover", () => {
+      if (!this.invDrag && !this.dragCard && !this.groundGrab) {
+        this.showInvCardTooltip(sc, c.x, c.y);
+      }
+    });
+    container.on("pointerout", () => this.hideInvCardTooltip());
+    return {
+      skill: sc.skill,
+      container,
+      base,
+      img,
+      cdFill,
+      targetSlot: -1,
+      rarity: sc.rarity,
+      modIds: sc.modIds,
+      modValues: sc.modValues,
+    };
+  }
+
+  /** Tooltip for a stored inventory card. */
+  private showInvCardTooltip(sc: SlotCard, x: number, y: number): void {
+    this.hideInvCardTooltip();
+    const tt = this.buildCardTooltipPanel({
+      skill: sc.skill,
+      level: sc.level,
+      rarity: sc.rarity,
+      modIds: sc.modIds,
+      modValues: sc.modValues ?? [],
+    });
+    tt.setDepth(450).setScrollFactor(0);
+    // Keep the panel on-screen (it is 220 wide / up to 172 tall).
+    const cam = this.cameras.main;
+    const tx = Math.max(6, Math.min(cam.width - 226, x + 20));
+    const ty = Math.max(6, Math.min(cam.height - 180, y + 10));
+    tt.setPosition(tx, ty);
+    this.invCardTooltip = tt;
+  }
+
+  private hideInvCardTooltip(): void {
+    if (this.invCardTooltip) {
+      this.invCardTooltip.destroy();
+      this.invCardTooltip = null;
+    }
+  }
+
+  /** Start dragging a stored inventory card. */
+  private beginInvCardDrag(i: number): void {
+    if (this.invDrag || this.dragCard || this.groundGrab) return;
+    const obj = this.invCards[i];
+    if (!obj) return;
+    this.hideInvCardTooltip();
+    this.invDrag = { obj, fromInv: i, hoverInv: i };
+    obj.container.setDepth(2000);
+    obj.container.setScale(1.08);
+  }
+
+  /** Live drag update for inventory cards. */
+  private updateInvCardDrag(pointer: Phaser.Input.Pointer): void {
+    if (!this.invDrag) return;
+    const d = this.invDrag;
+    d.obj.container.setPosition(pointer.x, pointer.y);
+    d.hoverInv = this.invAtPointer(pointer);
+  }
+
+  /** Finish an inventory card drag:
+   *  - over another inventory slot -> server reorder/swap (18)
+   *  - over a HUD slot -> equip / swap (15)
+   *  - elsewhere -> drop to the ground (16) */
+  private endInvCardDrag(pointer: Phaser.Input.Pointer): void {
+    if (!this.invDrag) return;
+    const d = this.invDrag;
+    this.invDrag = null;
+    const hudSlot = this.slotAtPointer(pointer);
+    const invSlot = this.invAtPointer(pointer);
+    if (invSlot >= 0 && invSlot !== d.fromInv) {
+      this.room?.send(18, { from: d.fromInv, to: invSlot });
+    } else if (hudSlot >= 0) {
+      this.room?.send(15, { inv: d.fromInv, slot: hudSlot });
+    } else {
+      this.room?.send(16, { inv: d.fromInv });
+    }
+    // Server state sync rebuilds both grids authoritatively.
+    d.obj.container.setScale(1);
+    d.obj.container.setDepth(402);
+    this.syncSlotsFromServer(true);
+    this.syncInventoryFromServer(true);
+  }
+
   private createCharacterScreen(): void {
     const W = this.cameras.main.width;
     const H = this.cameras.main.height;
     const PANEL_W = 520;
     const PANEL_H = Math.min(H - 60, 600);
-    const px = Math.round((W - PANEL_W) / 2);
+    // Dock the panel to the LEFT edge
+    // (margin leaves room for the outline ring around the panel)
+    const px = 24;
     const py = Math.round((H - PANEL_H) / 2);
 
     this.charScreen = this.add
@@ -4218,15 +4665,19 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0);
 
     // ---- Dim overlay ----
+    // Standalone (NOT a child of charScreen) so it stays full-screen
+    // while the panel slides. Fades in only after the slide completes.
     const overlay = this.add
-      .rectangle(0, 0, W, H, 0x000000, 0.6)
+      .rectangle(0, 0, W, H, 0x000000, 0)
       .setOrigin(0, 0)
-      .setScrollFactor(0);
+      .setScrollFactor(0)
+      .setDepth(399)
+      .setVisible(false);
     overlay.setInteractive(); // block clicks going through
     overlay.on("pointerdown", () => {
       if (this.charScreenVisible) this.toggleCharacterScreen();
     });
-    this.charScreen.add(overlay);
+    (this.charScreen as any)._overlay = overlay;
 
     // ---- Panel background ----
     const panelBg = this.add.graphics().setScrollFactor(0);
@@ -4437,18 +4888,55 @@ export class GameScene extends Phaser.Scene {
 
   private toggleCharacterScreen(): void {
     this.charScreenVisible = !this.charScreenVisible;
+    this.tweens.killTweensOf(this.charScreen);
+    const overlay: Phaser.GameObjects.Rectangle = (this.charScreen as any)
+      ._overlay;
+    this.tweens.killTweensOf(overlay);
+    // Off-screen position fully left of the window (panel + outline)
+    const offX = -((this.charScreen as any)._panelW + 60);
     if (this.charScreenVisible) {
       // Hide map tooltip if open
       this.mapInfoTooltip.setVisible(false);
       this.updateCharacterScreen();
+      // Slide in from the left edge; dim the screen only once it lands
+      this.charScreen.setPosition(offX, 0).setVisible(true);
+      this.tweens.add({
+        targets: this.charScreen,
+        x: 0,
+        duration: 250,
+        ease: "Cubic.Out",
+        onComplete: () => {
+          overlay.setVisible(true).setAlpha(0);
+          this.tweens.add({
+            targets: overlay,
+            alpha: 0.6,
+            duration: 200,
+          });
+        },
+      });
     } else {
-      // Clean up dynamic children
-      const dyn: Phaser.GameObjects.GameObject[] =
-        (this.charScreen as any)._dynChildren ?? [];
-      for (const d of dyn) d.destroy();
-      (this.charScreen as any)._dynChildren = [];
+      // Fade the dim out while the panel slides away
+      this.tweens.add({
+        targets: overlay,
+        alpha: 0,
+        duration: 200,
+        onComplete: () => overlay.setVisible(false),
+      });
+      // Slide out to the left, then hide and clean up
+      this.tweens.add({
+        targets: this.charScreen,
+        x: offX,
+        duration: 200,
+        ease: "Cubic.In",
+        onComplete: () => {
+          const dyn: Phaser.GameObjects.GameObject[] =
+            (this.charScreen as any)._dynChildren ?? [];
+          for (const d of dyn) d.destroy();
+          (this.charScreen as any)._dynChildren = [];
+          this.charScreen.setVisible(false);
+        },
+      });
     }
-    this.charScreen.setVisible(this.charScreenVisible);
   }
 
   /** Destroy all dynamic children of the char screen. */
@@ -5454,6 +5942,7 @@ export class GameScene extends Phaser.Scene {
     // ---- Slot card cooldown fills + drag update ----
     this.updateSlotCooldowns();
     if (this.dragCard) this.updateCardDrag(this.input.activePointer);
+    else if (this.invDrag) this.updateInvCardDrag(this.input.activePointer);
     else if (this.groundGrab) this.updateGroundGrab(this.input.activePointer);
     // ---- Spawn-grace countdown toast (map-entry safety window) ----
     this.updateSpawnCountdown();
@@ -5978,6 +6467,19 @@ export class GameScene extends Phaser.Scene {
             modValues: (sc.modValues as number[] | undefined) ?? [],
           };
         }
+        // Preserve the inventory (I-tab backpack) across the map change.
+        const inventory: any[] = Array(20).fill(null);
+        for (let i = 0; i < 20; i++) {
+          const ic = this.invCardsData[i];
+          if (!ic) continue;
+          inventory[i] = {
+            skill: ic.skill,
+            level: ic.level,
+            rarity: ic.rarity,
+            modIds: ic.modIds,
+            modValues: (ic.modValues as number[] | undefined) ?? [],
+          };
+        }
         // Apply map transition XP bonus directly to the serialized state
         const TRANSITION_XP = this.sys.settings.key === "game2" ? 1000 : 500;
         let txp = (p.currentXp ?? 0) + TRANSITION_XP;
@@ -6006,6 +6508,7 @@ export class GameScene extends Phaser.Scene {
           skillLevels,
           skillPoints: tSkillPoints,
           equippedSlots,
+          inventory,
         };
       }
 

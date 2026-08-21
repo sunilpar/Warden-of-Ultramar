@@ -36,7 +36,12 @@ import { RoomState } from "../schema/RoomState";
 import { GroundCard } from "../schema/GroundCard";
 import { CardInstance } from "../schema/CardInstance";
 import { LootSystem } from "../systems/LootSystem";
-import { Player, InputData, NUM_CARD_SLOTS } from "../schema/Player";
+import {
+  Player,
+  InputData,
+  NUM_CARD_SLOTS,
+  NUM_INVENTORY_SLOTS,
+} from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
 import { MapSystem } from "../systems/MapSystem";
 import { PlayerSystem } from "../systems/PlayerSystem";
@@ -800,6 +805,122 @@ export class GameRoom extends Room {
       if (from === to) return;
       player.moveSlotCard(from, to);
     },
+    // ---- Store the HUD card of slot X into inventory slot Y ----
+    // msg: { slot: number, inv: number }
+    14: (client: Client, msg: { slot: number; inv: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+      const slot = msg?.slot | 0;
+      const inv = msg?.inv | 0;
+      if (slot < 0 || slot >= NUM_CARD_SLOTS) return;
+      if (inv < 0 || inv >= NUM_INVENTORY_SLOTS) return;
+      const card = player.slotCard(slot);
+      if (!card) return;
+      // Target inventory slot occupied: refuse (no silent card loss).
+      if (player.hasInventoryCard(inv)) return;
+      player.setInventoryCard(inv, player.clearSlotCard(slot)!);
+    },
+
+    // ---- Take a card from inventory slot X into HUD slot Y ----
+    // msg: { inv: number, slot: number }
+    15: (client: Client, msg: { inv: number; slot: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+      const inv = msg?.inv | 0;
+      const slot = msg?.slot | 0;
+      if (inv < 0 || inv >= NUM_INVENTORY_SLOTS) return;
+      if (slot < 0 || slot >= NUM_CARD_SLOTS) return;
+      const card = player.inventoryCard(inv);
+      if (!card) return;
+      // Equip into that HUD slot; the displaced HUD card (if any)
+      // lands in the freed inventory slot - no card is ever lost.
+      const displaced = player.setSlotCard(slot, card);
+      player.clearInventoryCard(inv);
+      if (displaced) player.setInventoryCard(inv, displaced);
+      console.log(
+        `[INVENTORY] ${client.sessionId} equipped ${card.skill} L${card.level} from inv ${inv} into slot ${slot}`,
+      );
+    },
+
+    // ---- Drop an inventory card to the ground ----
+    // msg: { inv: number }
+    16: (client: Client, msg: { inv: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+      const inv = msg?.inv | 0;
+      if (inv < 0 || inv >= NUM_INVENTORY_SLOTS) return;
+      const card = player.clearInventoryCard(inv);
+      if (!card) return;
+      this.dropCardToGround(player, card);
+      console.log(
+        `[INVENTORY] ${client.sessionId} dropped ${card.skill} L${card.level} from inv ${inv}`,
+      );
+    },
+
+    // ---- Pick a ground card up into the inventory ----
+    // msg: { cardId: string, inv: number }
+    17: (client: Client, msg: { cardId: string; inv: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+      const gc = this.state.groundCards.get(msg?.cardId ?? "");
+      if (!gc) return;
+      if (Date.now() < gc.pickupLockUntil) return;
+      const inv = msg?.inv | 0;
+      if (inv < 0 || inv >= NUM_INVENTORY_SLOTS) return;
+      // Same 96px reach rule as HUD pickup (msg 11).
+      const dx = gc.x - player.x;
+      const dy = gc.y - player.y;
+      if (dx * dx + dy * dy > 96 * 96) return;
+      const card = gc.card;
+      if (!card || !card.skill) return;
+      // Target inventory slot must be empty (no silent overwrite).
+      if (player.hasInventoryCard(inv)) return;
+      player.setInventoryCard(inv, card);
+      this.state.groundCards.delete(msg.cardId);
+      console.log(
+        `[INVENTORY] ${client.sessionId} stashed ${card.skill} L${card.level} into inv ${inv}`,
+      );
+    },
+
+    // ---- Reorder inside the inventory ----
+    // msg: { from: number, to: number } (insert-shift into empty,
+    // swap when both slots hold cards)
+    18: (client: Client, msg: { from: number; to: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+      const from = msg?.from | 0;
+      const to = msg?.to | 0;
+      if (from === to) return;
+      if (from < 0 || to < 0) return;
+      if (from >= NUM_INVENTORY_SLOTS || to >= NUM_INVENTORY_SLOTS) return;
+      if (player.hasInventoryCard(to) && player.hasInventoryCard(from)) {
+        player.swapInventoryCards(from, to);
+      } else {
+        player.moveInventoryCard(from, to);
+      }
+    },
+
+    // ---- Swap HUD slot card <-> inventory slot card ----
+    // msg: { slot: number, inv: number }
+    19: (client: Client, msg: { slot: number; inv: number }) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.isDead) return;
+      const slot = msg?.slot | 0;
+      const inv = msg?.inv | 0;
+      if (slot < 0 || slot >= NUM_CARD_SLOTS) return;
+      if (inv < 0 || inv >= NUM_INVENTORY_SLOTS) return;
+      const invCard = player.inventoryCard(inv);
+      const hudCard = player.slotCard(slot);
+      // Nothing to swap: plain take-out / put-in handled by 14/15.
+      if (!invCard && !hudCard) return;
+      if (invCard && hudCard) {
+        player.setInventoryCard(inv, player.setSlotCard(slot, invCard)!);
+      } else if (invCard && !hudCard) {
+        player.setSlotCard(slot, player.clearInventoryCard(inv)!);
+      } else if (!invCard && hudCard) {
+        player.setInventoryCard(inv, player.clearSlotCard(slot)!);
+      }
+    },
   };
 
   // ============================================================
@@ -855,6 +976,30 @@ export class GameRoom extends Room {
         }
         player.recomputeSkillLevels();
         player.recomputeShield();
+      }
+      // Restore the carried inventory (I-tab backpack) from the
+      // previous map. Same sentinel convention as equippedSlots.
+      const carriedInv = ps.inventory;
+      if (Array.isArray(carriedInv)) {
+        for (let i = 0; i < NUM_INVENTORY_SLOTS; i++) {
+          const c = carriedInv[i];
+          if (!c || typeof c.skill !== "string" || !c.skill) continue;
+          const card = new CardInstance();
+          card.skill = c.skill;
+          card.level = Math.max(1, c.level | 0);
+          card.rarity = typeof c.rarity === "string" ? c.rarity : "common";
+          if (Array.isArray(c.modIds)) {
+            for (const m of c.modIds) {
+              if (typeof m === "string") card.modIds.push(m);
+            }
+          }
+          if (Array.isArray(c.modValues)) {
+            for (const v of c.modValues) {
+              if (typeof v === "number") card.modValues.push(v);
+            }
+          }
+          player.inventorySlots[i] = card;
+        }
       }
     } else {
       // Fresh player: starter cards fill all 5 slots.

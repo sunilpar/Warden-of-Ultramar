@@ -56,6 +56,9 @@ export interface InputData {
 /** Number of HUD card slots (input bindings: LMB, RMB, SPC, 1, 2). */
 export const NUM_CARD_SLOTS = 5;
 
+/** Number of backpack inventory slots (the I-tab shelf: 5 cols x 4 rows). */
+export const NUM_INVENTORY_SLOTS = 20;
+
 export class Player extends Schema {
   // ---- Position (synced) ----
   @type("number") x: number = 0;
@@ -181,6 +184,13 @@ export class Player extends Schema {
    * allowed; each slot is independent.
    */
   @type([CardInstance]) equippedSlots = new ArraySchema<CardInstance>();
+  /**
+   * THE INVENTORY (I-tab). Synced array of exactly NUM_INVENTORY_SLOTS
+   * entries. Same sentinel convention as equippedSlots: an EMPTY entry
+   * is a CardInstance with skill === "". Pure storage - cards here are
+   * never cast; drag them to a HUD slot to equip.
+   */
+  @type([CardInstance]) inventorySlots = new ArraySchema<CardInstance>();
   /** Shield CARD/SLOT level (controls recovery delay). Lower delay per level.
    *  Upgraded via the C-tab / message 6 (stat === "shield"). */
   @type("number") shieldCardLevel: number = 1;
@@ -200,6 +210,9 @@ export class Player extends Schema {
       this.equippedSlots.push(new CardInstance());
       this.slotCooldownEndsAt.push(0);
       this.slotHealKills.push(0);
+    }
+    for (let i = 0; i < NUM_INVENTORY_SLOTS; i++) {
+      this.inventorySlots.push(new CardInstance());
     }
   }
 
@@ -736,6 +749,82 @@ export class Player extends Schema {
     this.slotCooldownEndsAt[to] = cdFrom;
     this.slotHealKills[to] = killsFrom;
     this.onSlotsChanged();
+    return true;
+  }
+
+  // ============================================================
+  // INVENTORY (I-tab backpack, 20 slots)
+  // ============================================================
+
+  /** The card stored in inventory slot i (null when empty). */
+  inventoryCard(i: number): CardInstance | null {
+    const c = this.inventorySlots[i];
+    return c && c.skill ? c : null;
+  }
+
+  /** True if inventory slot i holds a card. */
+  hasInventoryCard(i: number): boolean {
+    return this.inventoryCard(i) !== null;
+  }
+
+  /** First empty inventory index (-1 when the backpack is full). */
+  firstEmptyInventory(): number {
+    for (let i = 0; i < NUM_INVENTORY_SLOTS; i++) {
+      if (!this.hasInventoryCard(i)) return i;
+    }
+    return -1;
+  }
+
+  /**
+   * Place a card into inventory slot i. Any card already there is
+   * OVERWRITTEN and returned (caller decides what happens to it).
+   * On an invalid index the card is returned unchanged.
+   */
+  setInventoryCard(i: number, card: CardInstance): CardInstance | null {
+    if (i < 0 || i >= NUM_INVENTORY_SLOTS) return card;
+    const old = this.inventoryCard(i);
+    this.inventorySlots[i] = card;
+    return old;
+  }
+
+  /** Remove + return the card in inventory slot i (null when empty). */
+  clearInventoryCard(i: number): CardInstance | null {
+    if (i < 0 || i >= NUM_INVENTORY_SLOTS) return null;
+    const old = this.inventoryCard(i);
+    if (!old) return null;
+    this.inventorySlots[i] = new CardInstance();
+    return old;
+  }
+
+  /** Move a stored card from inventory slot from -> to (insert-shift
+   *  semantics, mirroring moveSlotCard for HUD reordering). */
+  moveInventoryCard(from: number, to: number): boolean {
+    if (from === to) return false;
+    if (from < 0 || from >= NUM_INVENTORY_SLOTS) return false;
+    if (to < 0 || to >= NUM_INVENTORY_SLOTS) return false;
+    const card = this.inventoryCard(from);
+    if (!card) return false;
+    if (from < to) {
+      for (let i = from; i < to; i++) {
+        this.inventorySlots[i] = this.inventorySlots[i + 1];
+      }
+    } else {
+      for (let i = from; i > to; i--) {
+        this.inventorySlots[i] = this.inventorySlots[i - 1];
+      }
+    }
+    this.inventorySlots[to] = card;
+    return true;
+  }
+
+  /** Swap two inventory slots (used when both hold cards and the
+   *  player drags one onto the other). */
+  swapInventoryCards(a: number, b: number): boolean {
+    if (a === b || a < 0 || b < 0) return false;
+    if (a >= NUM_INVENTORY_SLOTS || b >= NUM_INVENTORY_SLOTS) return false;
+    const tmp = this.inventorySlots[a];
+    this.inventorySlots[a] = this.inventorySlots[b];
+    this.inventorySlots[b] = tmp;
     return true;
   }
 
