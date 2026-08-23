@@ -4288,10 +4288,11 @@ export class GameScene extends Phaser.Scene {
     const gridW = cols * slotW + (cols - 1) * gap;
     const gridH = rows * slotH + (rows - 1) * gap;
     const PANEL_W = gridW + 40; // padding around the grid
-    const PANEL_H = gridH + 80; // + header space
-    // Docked to the RIGHT edge (mirror of the C tab on the left).
+    // Full window height: the space below the grid holds the
+    // quick-action icon bar (character / reload / inventory).
+    const PANEL_H = H;
     const px = W - PANEL_W - 24;
-    const py = Math.round((H - PANEL_H) / 2);
+    const py = 0;
 
     this.invScreen = this.add
       .container(0, 0)
@@ -4369,6 +4370,82 @@ export class GameScene extends Phaser.Scene {
       }
     }
     this.invScreen.add(cellG);
+
+    // ---- Quick-action icon bar (below the shelf) ----
+    // character -> open the C tab; reload -> full page reload;
+    // inventory -> no-op (this IS the inventory).
+    const iconSize = 44;
+    const iconY = py + 50 + gridH + 40; // below the grid
+    const barCx = px + PANEL_W / 2;
+    const iconSpacing = iconSize + 24;
+    const defs: Array<{
+      key: string;
+      label: string;
+      tint: number;
+      onClick: () => void;
+    }> = [
+      {
+        key: "char",
+        label: "C",
+        tint: 0xffd700,
+        onClick: () => {
+          if (this.charScreenVisible) return;
+          this.toggleCharacterScreen();
+        },
+      },
+      {
+        key: "reload",
+        label: "R",
+        tint: 0x66ccff,
+        onClick: () => {
+          window.location.reload();
+        },
+      },
+      {
+        key: "inv",
+        label: "I",
+        tint: 0x9aa5b1,
+        onClick: () => {
+          // no-op: this tab IS the inventory
+        },
+      },
+    ];
+    defs.forEach((d, idx) => {
+      const bx = barCx + (idx - (defs.length - 1) / 2) * iconSpacing;
+      const icon = this.add
+        .container(bx, iconY)
+        .setScrollFactor(0);
+      const bg = this.add
+        .rectangle(0, 0, iconSize, iconSize, 0x11131a, 0.95)
+        .setStrokeStyle(2, d.tint);
+      const label = this.add
+        .text(0, 0, d.label, {
+          color: "#" + d.tint.toString(16).padStart(6, "0"),
+          fontSize: "18px",
+          fontFamily: "monospace",
+          fontStyle: "bold",
+        })
+        .setOrigin(0.5);
+      icon.add([bg, label]);
+      icon.setSize(iconSize, iconSize);
+      icon.setInteractive(
+        new Phaser.Geom.Rectangle(
+          -iconSize / 2,
+          -iconSize / 2,
+          iconSize,
+          iconSize,
+        ),
+        Phaser.Geom.Rectangle.Contains,
+      );
+      icon.on("pointerover", () => {
+        bg.setStrokeStyle(2, 0xffffff);
+      });
+      icon.on("pointerout", () => {
+        bg.setStrokeStyle(2, d.tint);
+      });
+      icon.on("pointerdown", () => d.onClick());
+      this.invScreen.add(icon);
+    });
     // Re-add the rects above the planks so hit tests are stable.
     for (const r of this.invSlotRects) this.invScreen.add(r);
     this.invScreen.bringToTop(cellG);
