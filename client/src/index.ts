@@ -3,7 +3,8 @@
  * =======================
  * Creates the Phaser game with two scenes:
  *   - SceneSelector: the start screen with "Start Game" button
- *   - GameScene: the main game where you control a character on map1
+ *   - GameScene: the main game (maps rotate INSIDE the room; the scene
+ *     re-renders in place when the server broadcasts "mapTransition")
  */
 
 import Phaser from "phaser";
@@ -29,11 +30,7 @@ const config: Phaser.Types.Core.GameConfig = {
   },
   pixelArt: true,
   disableContextMenu: true,
-  scene: [
-    SceneSelector,
-    new GameScene({ key: "game" }),
-    new GameScene({ key: "game2" }),
-  ],
+  scene: [SceneSelector, new GameScene({ key: "game" })],
 };
 
 const game = new Phaser.Game(config);

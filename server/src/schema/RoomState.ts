@@ -5,7 +5,6 @@
  * Colyseus automatically detects changes to @type fields and
  * sends only the changed values to clients (bandwidth optimization).
  */
-
 import { Schema, type, MapSchema } from "@colyseus/schema";
 import { Player } from "./Player";
 import { Enemy } from "./Enemy";
@@ -26,12 +25,18 @@ export class RoomState extends Schema {
   @type({ map: Vortex }) vortexes = new MapSchema<Vortex>();
   /** Cards dropped onto the map ground (loot-ready). */
   @type({ map: GroundCard }) groundCards = new MapSchema<GroundCard>();
+  /**
+   * The map this room is currently running ("map1" | "map2" | ...).
+   * One room = one game session; maps swap INSIDE the room (no room
+   * change). Clients watch this field to rebuild their tilemap.
+   */
+  @type("string") mapId: string = "map1";
   /** Server timestamp (ms) until which enemy spawning is disabled
-   *  (grace period after room creation). 0 = spawning allowed. */
+   *  (grace period after map start). 0 = spawning allowed. */
   @type("number") spawnGraceUntil: number = 0;
   /**
    * Exit gate: false until this map's ELITE enemy has been killed.
-   * Clients must not transition to the next map while this is false.
+   * The exit transition is fully server-authoritative.
    */
   @type("boolean") exitUnlocked: boolean = false;
   /** True while this map's elite enemy is alive (client boss HUD). */

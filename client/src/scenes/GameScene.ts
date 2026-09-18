@@ -809,33 +809,30 @@ export class GameScene extends Phaser.Scene {
   private hitboxToggleButton!: Phaser.GameObjects.Text;
 
   /**
-   * Per-scene config: which Colyseus room to join, which map to render,
-   * and (optionally) which scene to switch to when the player reaches the
-   * exit tile of this map.
+   * Per-map render data keyed by the SERVER's mapId (state.mapId).
+   * One scene, one room: when the server broadcasts "mapTransition",
+   * this scene swaps its map render in place — no reconnect.
    */
-  static readonly CONFIGS: Record<
+  static readonly MAP_CONFIGS: Record<
     string,
     {
-      roomName: string;
       mapData: LayeredMapData;
-      nextSceneKey?: string;
+      mapInfoKey: string; // key into MAP_INFO (display)
     }
   > = {
-    game: {
-      roomName: "game_room",
+    map1: {
       mapData: LAYERED_MAP,
-      nextSceneKey: "game2",
+      mapInfoKey: "game_room",
     },
-    game2: {
-      roomName: "game_room_2",
+    map2: {
       mapData: LAYERED_MAP_2,
-      nextSceneKey: "game", // Map2 exit goes back to Map1
+      mapInfoKey: "game_room_2",
     },
   };
 
   private mapData!: LayeredMapData;
-  private roomName: string = "game_room";
-  private nextSceneKey?: string;
+  /** Server mapId of the map currently rendered ("map1" | "map2"). */
+  private mapId: string = "map1";
   private transitioning: boolean = false;
 
   constructor(config: Phaser.Types.Scenes.SettingsConfig) {
@@ -1012,17 +1009,15 @@ export class GameScene extends Phaser.Scene {
 
 
     // ---- Resolve this scene's map + room config from its scene key ----
-    const cfg =
-      GameScene.CONFIGS[this.sys.settings.key] ?? GameScene.CONFIGS["game"];
-    this.mapData = cfg.mapData;
-    this.roomName = cfg.roomName;
-    this.nextSceneKey = cfg.nextSceneKey;
+    // The map comes from the SERVER (state.mapId) — one room rotates maps
+    // in place. On first boot the room always starts on map1.
+    this.mapId = "map1";
+    this.mapData = GameScene.MAP_CONFIGS["map1"].mapData;
     this.transitioning = false;
 
-    // ---- Transition intro: if launched with { fadeIn }, this scene is
-    //      the destination of a map transition. Cover the screen with a
-    //      black rectangle + the loading image while the room connects,
-    //      then fade them out to reveal the loaded map. ----
+    // ---- Run restart intro: if launched with { fadeIn } (death on a
+    //      later map restarts the run), cover the screen with a black
+    //      rectangle + loading image while the room connects. ----
     const startData = this.sys.settings.data as
       | { fadeIn?: boolean }
       | undefined;
@@ -1085,6 +1080,43 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    // ---- Late-joiner correction: the room may already be past map1
+    //      (one room rotates maps; matchmaking can drop you into a
+    //      session mid-run). If so, re-render the correct map BEFORE
+    //      the reveal so the player never sees the wrong map. ----
+    {
+      const serverMapId: string =
+        (this.room as any)?.state?.mapId ?? "map1";
+      const cfgLate = GameScene.MAP_CONFIGS[serverMapId];
+      if (cfgLate && serverMapId !== this.mapId) {
+        this.children.list
+          .filter(
+            (obj) =>
+              (obj as any).texture &&
+              ((obj as any).texture.key === "layered_baselayer" ||
+                (obj as any).texture.key === "layered_interactive"),
+          )
+          .forEach((obj) => obj.destroy());
+        if (this.debugHitboxes) {
+          this.debugHitboxes.destroy();
+          this.debugHitboxes = null;
+        }
+        this.mapId = serverMapId;
+        this.mapData = cfgLate.mapData;
+        this.renderLayeredMap();
+        this.renderDebugHitboxes();
+        if (this.debugHitboxes) {
+          this.debugHitboxes.setVisible(this.showHitboxes);
+        }
+        this.cameras.main.setBounds(
+          0,
+          0,
+          this.mapData.widthPx,
+          this.mapData.heightPx,
+        );
+      }
+    }
+
     // ---- If this was a map transition, fade the black cover + loading
     //      image out to reveal the freshly loaded map. ----
     if (isFadeIn && cover && loadingImg) {
@@ -1100,6 +1132,11 @@ export class GameScene extends Phaser.Scene {
         },
       });
     }
+
+    // ---- Server-authoritative map transition (same room, new map) ----
+    this.room.onMessage("mapTransition", (msg: { from: string; to: string }) => {
+      this.performMapSwap(msg.to);
+    });
 
     // ============================================================
     // COLYSEUS STATE LISTENERS (v0.17 API — use Callbacks.get())
@@ -1909,20 +1946,15 @@ export class GameScene extends Phaser.Scene {
   // ============================================================
 
   async connect() {
-    // Read playerState from previous scene (passed via scene.launch)
-    const data = this.sys.settings.data as any;
-    const playerState = data?.playerState ?? null;
     console.log(
-      `[CONNECT] Scene "${this.sys.settings.key}" connecting to room "${this.roomName}" with playerState=${playerState ? "yes" : "no"}`,
+      `[CONNECT] Scene "${this.sys.settings.key}" connecting to room "game_room"`,
     );
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
-      // When carrying playerState (a map transition), always CREATE a fresh
-      // room instance so enemies spawn correctly. Otherwise joinOrCreate
-      // might rejoin a stale room that has all spawn zones exhausted.
-      const roomPromise = playerState
-        ? this.client.create(this.roomName, { playerState })
-        : this.client.joinOrCreate(this.roomName, { playerState });
+      // One room type = one game session. Progression (cards/XP/inventory)
+      // lives server-side and survives map transitions — nothing is passed
+      // from the client on join.
+      const roomPromise = this.client.joinOrCreate("game_room", {});
       // Add a timeout so we don't hang on the loading screen forever
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutId = setTimeout(
@@ -1932,7 +1964,7 @@ export class GameScene extends Phaser.Scene {
       });
       this.room = await Promise.race([roomPromise, timeoutPromise]);
       console.log(
-        `[CONNECT] Connected to room "${this.roomName}" successfully`,
+        `[CONNECT] Connected to room "game_room" successfully`,
       );
     } catch (e) {
       console.error("Failed to connect:", e);
@@ -4073,8 +4105,9 @@ export class GameScene extends Phaser.Scene {
     const padding = 12;
     let tooltipY = padding;
 
-    const roomName = this.roomName ?? "game_room";
-    const mapInfo = MAP_INFO[roomName] ?? { name: roomName, description: "" };
+    const infoKey =
+      GameScene.MAP_CONFIGS[this.mapId]?.mapInfoKey ?? "game_room";
+    const mapInfo = MAP_INFO[infoKey] ?? { name: infoKey, description: "" };
 
     const nameText = this.add
       .text(padding, tooltipY, mapInfo.name, {
@@ -5755,25 +5788,17 @@ export class GameScene extends Phaser.Scene {
     this.currentPlayer.x = resolved.x;
     this.currentPlayer.y = resolved.y;
 
-    // ---- Map exit transition ----
-    // When the player steps onto this map's exit tile, move them to the
-    // next room/scene. `transitioning` guards against re-entry.
-    // Extra guard: ensure the player sprite is active and positioned
-    // (not stale from the previous scene before server state arrives).
+    // ---- Map exit ----
+    // Fully server-authoritative now: the server checks ALL players'
+    // positions against the exit zone and broadcasts "mapTransition".
+    // The client only shows the "exit locked" toast while standing on
+    // the exit before the elite is dead.
     const onExit =
-      !this.transitioning &&
-      this.nextSceneKey &&
       this.currentPlayer &&
       this.currentPlayer.active &&
       (this.currentPlayer.x !== 0 || this.currentPlayer.y !== 0) &&
       this.isOnExitTile();
-    if (onExit) {
-      // ELITE GATE: the exit only works once this map's elite is dead.
-      if ((this.room as any)?.state?.exitUnlocked) {
-        this.updateExitLockedToast(false);
-        this.transitionToScene(this.nextSceneKey);
-        return;
-      }
+    if (onExit && !(this.room as any)?.state?.exitUnlocked) {
       this.updateExitLockedToast(true);
     } else {
       this.updateExitLockedToast(false);
@@ -6285,7 +6310,7 @@ export class GameScene extends Phaser.Scene {
       this.currentPlayer.y <= ex.y + ex.height;
     if (inside) {
       console.log(
-        `[EXIT] Player at (${this.currentPlayer.x}, ${this.currentPlayer.y}) inside exit zone (${ex.x},${ex.y},${ex.width},${ex.height}), nextScene=${this.nextSceneKey}, transitioning=${this.transitioning}`,
+        `[EXIT] Player at (${this.currentPlayer.x}, ${this.currentPlayer.y}) inside exit zone (${ex.x},${ex.y},${ex.width},${ex.height}) (server-authoritative)`,
       );
     }
     return inside;
@@ -6385,10 +6410,11 @@ export class GameScene extends Phaser.Scene {
 
     // Button actions
     respawnBtn.on("pointerdown", () => {
-      // If dead in map2 (game2), transition back to map1 with fresh state.
-      if (this.sys.settings.key === "game2") {
+      // Dying on any map >1 (map2+) restarts the RUN: leave the room and
+      // boot a fresh scene (new room = new session = fresh player).
+      // Dying on map1 respawns in place (server message 4).
+      if (this.mapId !== "map1") {
         this.hideDeathScreen();
-        // Leave the room and start a fresh map1 scene (no playerState = fresh player)
         try {
           this.room?.leave();
         } catch (_e) {
@@ -6412,9 +6438,10 @@ export class GameScene extends Phaser.Scene {
           this.clawEntities[id]?.destroy();
           delete this.clawEntities[id];
         }
-        // Launch a fresh game scene (no playerState = base stats)
-        this.scene.launch("game", { playerState: null, fadeIn: true });
-        this.scene.stop();
+        // Restart this scene: create() re-runs, connects to a NEW room
+        // (fresh run). scene.restart() handles stop+start of the SAME
+        // scene safely.
+        this.scene.restart({ fadeIn: true });
         return;
       }
       // Normal respawn (same map): reset HUD cards to the default layout.
@@ -6464,141 +6491,246 @@ export class GameScene extends Phaser.Scene {
   // MAP TRANSITION
   // ============================================================
 
-  private transitionToScene(sceneKey: string): void {
+  // ============================================================
+  // IN-PLACE MAP SWAP (server-authoritative transition)
+  // ============================================================
+
+  /**
+   * Swap to a new map WITHOUT leaving the room or reconnecting.
+   * The server has already: cleared per-map entities, repositioned the
+   * player at the new spawn, and awarded transition XP. The client just
+   * needs to: fade out, destroy all world sprites + old map render,
+   * rebuild the tilemap for the new map, update camera bounds, fade in.
+   * HUD (cards/XP/inventory) is untouched — it syncs from the live
+   * room state as usual.
+   */
+  private performMapSwap(nextMapId: string): void {
     if (this.transitioning) return;
+    const cfg = GameScene.MAP_CONFIGS[nextMapId];
+    if (!cfg) {
+      console.warn(`[TRANSITION] Unknown mapId "${nextMapId}" — ignoring`);
+      return;
+    }
     this.transitioning = true;
     console.log(
-      `[TRANSITION] Starting transition from "${this.sys.settings.key}" to "${sceneKey}"`,
+      `[TRANSITION] Swapping map in place: ${this.mapId} -> ${nextMapId}`,
     );
 
     const cam = this.cameras.main;
-    // Duration of each fade half (ms). Total dark time ~= 2 * FADE_MS
-    // plus the room-connect wait in the destination scene.
     const FADE_MS = 400;
 
-    // Once the camera has fully faded to black, swap scenes.
     cam.once("camerafadeoutcomplete", () => {
-      // Leave the old room (it auto-disposes when empty).
-      // Transition XP is applied in the serialized playerState below.
-      try {
-        this.room?.send(5, {});
-      } catch (_e) {
-        // ignore
+      // ---- 1) Destroy ALL world entities (server already cleared them,
+      //         but local sprites must go too). ----
+      const destroyMap = (entities: Record<string, any>) => {
+        for (const id in entities) {
+          entities[id]?.destroy?.();
+          delete entities[id];
+        }
+      };
+      // NOTE: playerEntities are intentionally NOT destroyed here — the
+      // players stay in the room across maps, and their onChange
+      // closures animate these exact sprites. They are snapped to the
+      // new spawn below, after the map rebuild.
+      destroyMap(this.enemyEntities);
+      destroyMap(this.projectileEntities);
+      destroyMap(this.clawEntities);
+      destroyMap(this.slamEntities);
+      destroyMap(this.vortexEntities);
+      for (const [id, bar] of Object.entries(this.enemyHpBars)) {
+        bar?.destroy?.();
+        delete this.enemyHpBars[id];
       }
-      try {
-        this.room?.leave();
-      } catch (_e) {
-        // ignore
+      this.enemyLastPos = {};
+      this.projLastPos = {};
+      this.entityHitSeqs = {};
+      // Ground cards (Map<string, Container>)
+      for (const [cardId, entity] of this.groundCardEntities) {
+        entity?.destroy?.();
+        this.groundCardEntities.delete(cardId);
       }
-      this.room = null;
+      this.cancelGroundCardTooltip();
+      this.pendingPickups.clear();
+      this.pendingPickupSlots.clear();
+      this.groundGrab = null;
+      this.dragCard = null;
 
-      // Tear down local entity sprites.
+      // (Player sprites survive the swap; nothing to rebind.)
+
+      // ---- 2) Destroy the old map render (baselayer + interactive
+      //         canvases) so the new map draws on a clean slate. ----
+      this.children.list
+        .filter(
+          (obj) =>
+            (obj as any).texture &&
+            ((obj as any).texture.key === "layered_baselayer" ||
+              (obj as any).texture.key === "layered_interactive"),
+        )
+        .forEach((obj) => obj.destroy());
+      if (this.debugHitboxes) {
+        this.debugHitboxes.destroy();
+        this.debugHitboxes = null;
+      }
+
+      // ---- 3) Swap map data + rebuild ----
+      this.mapId = nextMapId;
+      this.mapData = cfg.mapData;
+      this.renderLayeredMap();
+      this.renderDebugHitboxes();
+      // Keep F3 overlay state consistent with the freshly drawn overlay.
+      if (this.debugHitboxes) {
+        this.debugHitboxes.setVisible(this.showHitboxes);
+      }
+
+      // ---- 4) Snap surviving player sprites to the new map's spawn
+      //         (the server already repositioned the authoritative
+      //         positions there; this keeps prediction + interpolation
+      //         resuming from a sane point). ----
+      const spawn = this.mapData.spawnPoint;
       for (const id in this.playerEntities) {
-        const e = this.playerEntities[id];
-        if (e) e.destroy();
-        delete this.playerEntities[id];
-      }
-      this.playerEntities = {};
-
-      for (const id in this.enemyEntities) {
-        const e = this.enemyEntities[id];
-        if (e) e.destroy();
-        delete this.enemyEntities[id];
-      }
-      this.enemyEntities = {};
-
-      for (const id in this.projectileEntities) {
-        const e = this.projectileEntities[id];
-        if (e) e.destroy();
-        delete this.projectileEntities[id];
-      }
-      this.projectileEntities = {};
-
-      for (const id in this.clawEntities) {
-        const e = this.clawEntities[id];
-        if (e) e.destroy();
-        delete this.clawEntities[id];
-      }
-      this.clawEntities = {};
-
-      // Serialize player state for the next map
-      let playerState: any = null;
-      if (this.currentPlayerState) {
-        const p = this.currentPlayerState;
-        const skillLevels: Record<string, number> = {};
-        if (p.skillLevels && p.skillLevels.forEach) {
-          p.skillLevels.forEach((lvl: number, skill: string) => {
-            skillLevels[skill] = lvl;
-          });
+        const s = this.playerEntities[id];
+        if (s?.active) {
+          s.x = spawn.x;
+          s.y = spawn.y;
+          s.setData("serverX", spawn.x);
+          s.setData("serverY", spawn.y);
         }
-        // Preserve the HUD card slots (mods/rarity) across the map change.
-        const equippedSlots: any[] = Array(5).fill(null);
-        for (let i = 0; i < 5; i++) {
-          const sc = this.slotCards[i];
-          if (!sc) continue;
-          equippedSlots[i] = {
-            skill: sc.skill,
-            level: sc.level,
-            rarity: sc.rarity,
-            modIds: sc.modIds,
-            modValues: (sc.modValues as number[] | undefined) ?? [],
-          };
-        }
-        // Preserve the inventory (I-tab backpack) across the map change.
-        const inventory: any[] = Array(20).fill(null);
-        for (let i = 0; i < 20; i++) {
-          const ic = this.invCardsData[i];
-          if (!ic) continue;
-          inventory[i] = {
-            skill: ic.skill,
-            level: ic.level,
-            rarity: ic.rarity,
-            modIds: ic.modIds,
-            modValues: (ic.modValues as number[] | undefined) ?? [],
-          };
-        }
-        // Apply map transition XP bonus directly to the serialized state
-        const TRANSITION_XP = this.sys.settings.key === "game2" ? 1000 : 500;
-        let txp = (p.currentXp ?? 0) + TRANSITION_XP;
-        let tLevel = p.level ?? 1;
-        let tXpToLevel = p.xpToLevelUp ?? 1000;
-        let tSkillPoints = p.skillPoints ?? 0;
-        while (txp >= tXpToLevel) {
-          txp -= tXpToLevel;
-          tLevel += 1;
-          tSkillPoints += 1;
-          tXpToLevel = Math.round(tXpToLevel * 1.5);
-        }
-        playerState = {
-          level: tLevel,
-          currentXp: txp,
-          xpToLevelUp: tXpToLevel,
-          maxHealth: p.maxHealth,
-          currentHealth: p.currentHealth, // carry actual HP, not full
-          attack: p.attack,
-          defence: p.defence ?? 0,
-          critRate: p.critRate,
-          critDamage: p.critDamage,
-          baseMoveSpeed: p.baseMoveSpeed,
-          speedMultiplier: p.speedMultiplier ?? 1.0,
-          moveSpeed: p.moveSpeed,
-          skillLevels,
-          skillPoints: tSkillPoints,
-          equippedSlots,
-          inventory,
-        };
       }
+      if (this.currentPlayer) {
+        this.currentPlayer.x = spawn.x;
+        this.currentPlayer.y = spawn.y;
+      }
+      this.cameras.main.centerOn(spawn.x, spawn.y);
 
-      // Start the destination scene under a black cover so the player
-      // never sees the unloaded map.
-      console.log(
-        `[TRANSITION] Launching "${sceneKey}" with playerState, fadeIn: true`,
+      // ---- 5) Update camera bounds to the new map size + re-follow. ----
+      this.cameras.main.setBounds(
+        0,
+        0,
+        this.mapData.widthPx,
+        this.mapData.heightPx,
       );
-      this.scene.launch(sceneKey, { playerState, fadeIn: true });
-      this.scene.stop();
+
+      // ---- 6) Refresh map info tooltip (name/description/modifiers). ----
+      this.rebuildMapInfoTooltip();
+
+      cam.fadeIn(FADE_MS, 0, 0, 0);
+      this.transitioning = false;
+      console.log(
+        `[TRANSITION] Map swap complete: now on "${nextMapId}"`,
+      );
     });
 
     cam.fadeOut(FADE_MS, 0, 0, 0);
+  }
+
+  /**
+   * Rebuild the map-info tooltip contents for the current mapId.
+   * (The tooltip is created once in create(); a map swap changes the
+   * name/description/modifiers without recreating the button.)
+   */
+  private rebuildMapInfoTooltip(): void {
+    if (this.mapInfoTooltip) {
+      this.mapInfoTooltip.destroy();
+      this.mapInfoTooltip = this.add
+        .container(0, 0)
+        .setDepth(300)
+        .setVisible(false)
+        .setScrollFactor(0);
+    }
+    if (this.mapInfoButton) {
+      // Re-run the tooltip builder by toggling visibility state.
+      // Simplest robust approach: destroy + rebuild via createMapInfoButton
+      // is risky mid-game; instead re-populate below.
+    }
+    const info = GameScene.MAP_CONFIGS[this.mapId];
+    if (!info || !this.mapInfoTooltip) return;
+    const padding = 12;
+    let tooltipY = padding;
+    const mapInfo =
+      MAP_INFO[info.mapInfoKey] ?? { name: info.mapInfoKey, description: "" };
+    const nameText = this.add
+      .text(padding, tooltipY, mapInfo.name, {
+        color: "#ffd700",
+        fontSize: "16px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
+    this.mapInfoTooltip.add(nameText);
+    tooltipY += nameText.height + 6;
+    if (mapInfo.description) {
+      const descText = this.add
+        .text(padding, tooltipY, mapInfo.description, {
+          color: "#cccccc",
+          fontSize: "12px",
+          fontFamily: "monospace",
+          wordWrap: { width: 320 - padding * 2 },
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      this.mapInfoTooltip.add(descText);
+      tooltipY += descText.height + 6;
+    }
+    const mods = (this.room?.metadata?.modifiers as any[]) ?? [];
+    const modHeader = this.add
+      .text(padding, tooltipY, "Active Modifiers", {
+        color: "#ffffff",
+        fontSize: "12px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 2,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
+    this.mapInfoTooltip.add(modHeader);
+    tooltipY += modHeader.height + 4;
+    if (mods.length === 0) {
+      const noneText = this.add
+        .text(padding, tooltipY, "None", {
+          color: "#888888",
+          fontSize: "11px",
+          fontFamily: "monospace",
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      this.mapInfoTooltip.add(noneText);
+      tooltipY += noneText.height + 4;
+    } else {
+      for (const m of mods) {
+        const t = this.add
+          .text(
+            padding,
+            tooltipY,
+            `${m.title ?? m.id}${m.description ? ` — ${m.description}` : ""}`,
+            {
+              color: "#88ff88",
+              fontSize: "11px",
+              fontFamily: "monospace",
+              wordWrap: { width: 320 - padding * 2 },
+            },
+          )
+          .setOrigin(0, 0)
+          .setScrollFactor(0);
+        this.mapInfoTooltip.add(t);
+        tooltipY += t.height + 2;
+      }
+    }
+
+    // Background panel sized to content (mirrors createMapInfoButton).
+    const tooltipH = tooltipY + padding;
+    this.mapInfoTooltipBg = this.add.graphics();
+    this.mapInfoTooltipBg.fillStyle(0x0a0a14, 0.92);
+    this.mapInfoTooltipBg.fillRoundedRect(0, 0, 320, tooltipH, 8);
+    this.mapInfoTooltipBg.lineStyle(2, 0x4a6a8a, 0.8);
+    this.mapInfoTooltipBg.strokeRoundedRect(0, 0, 320, tooltipH, 8);
+    this.mapInfoTooltip.add(this.mapInfoTooltipBg);
+    this.mapInfoTooltip.sendToBack(this.mapInfoTooltipBg);
   }
 
   // ============================================================

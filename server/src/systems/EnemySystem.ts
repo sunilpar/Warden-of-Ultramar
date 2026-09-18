@@ -27,7 +27,7 @@ import type { ShockSystem } from "./ShockSystem";
 import type { VortexSystem } from "./VortexSystem";
 import type { PulseSystem } from "./PulseSystem";
 
-/** Collision resolver signature (shared by MapSystem / MapSystem2). */
+/** Collision resolver signature (implemented by MapSystem). */
 export interface CollisionResolver {
   resolveTileCollision(
     x: number,

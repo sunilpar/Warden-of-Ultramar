@@ -1,7 +1,13 @@
 /**
  * Game Room
  * =========
- * The authoritative server room. Handles:
+ * The authoritative server room. ONE ROOM = ONE GAME SESSION (one party
+ * of players). Maps are DATA (config/mapRegistry.ts): when this map's
+ * elite is dead and ALL alive players reach the exit, the SAME room
+ * swaps to the next map in place — connections and Player objects
+ * (cards/XP/inventory) are never torn down. Rotation: map1 -> map2 -> map1...
+ *
+ * Handles:
  *   - Player join/leave
  *   - Movement input (message type 0)
  *   - Skill cast by HUD SLOT (message type 1)
@@ -54,7 +60,7 @@ import { PulseSystem } from "../systems/PulseSystem";
 import { ShockSystem } from "../systems/ShockSystem";
 import { DashSystem } from "../systems/DashSystem";
 import { VortexSystem } from "../systems/VortexSystem";
-import { LAYERED_MAP } from "../config/layeredMap";
+import { MAPS, DEFAULT_MAP, type MapId } from "../config/mapRegistry";
 import {
   SKILL_DEFS,
   MAX_SKILL_LEVEL,
@@ -65,8 +71,7 @@ import {
   type SkillId,
 } from "../config/skillDefs";
 import {
-  MAP_MODIFIERS,
-  MAP_INFO,
+  MODIFIER_DEFS,
   applyPlayerModifiers,
   applyEnemyModifiers,
   type ModifierId,
@@ -103,7 +108,10 @@ export class GameRoom extends Room {
   private enemiesKilled: number = 0;
   /** True once this map's single elite enemy has spawned. */
   private eliteSpawned: boolean = false;
-  private activeModifiers: ModifierId[] = MAP_MODIFIERS["game_room"] ?? [];
+  private mapId: MapId = DEFAULT_MAP;
+  private activeModifiers: ModifierId[] = [];
+  /** True while a map transition is in progress (blocks re-trigger). */
+  private transitioning: boolean = false;
   /** Last reported viewport (world rect) per player session. */
   private viewports = new Map<
     string,
@@ -111,7 +119,34 @@ export class GameRoom extends Room {
   >();
 
   onCreate(_options: any) {
-    this.mapSystem = new MapSystem();
+    this.initMap(DEFAULT_MAP);
+    this.startSimulation();
+  }
+
+  /** Fixed timestep simulation loop (started once, on room create). */
+  startSimulation() {
+    let elapsedTime = 0;
+    this.setSimulationInterval((deltaTime) => {
+      elapsedTime += deltaTime;
+      while (elapsedTime >= this.fixedTimeStep) {
+        elapsedTime -= this.fixedTimeStep;
+        this.fixedTick(this.fixedTimeStep);
+      }
+    });
+  }
+
+  /**
+   * (Re)initialize everything that is PER-MAP. Player objects are NEVER
+   * touched here — cards, XP, skill points and inventory carry over.
+   * Called on room creation (first map) and on every map transition.
+   */
+  private initMap(mapId: MapId): void {
+    this.mapId = mapId;
+    const def = MAPS[mapId];
+    this.activeModifiers = def.modifiers;
+
+    // ---- Per-map systems (fresh instances = zero stale state) ----
+    this.mapSystem = new MapSystem(def.data);
     this.playerSystem = new PlayerSystem(this.state, this.mapSystem);
     this.enemySystem = new EnemySystem(this.state, this.mapSystem);
     this.lootSystem = new LootSystem(this.state);
@@ -132,61 +167,48 @@ export class GameRoom extends Room {
     this.enemySystem.setDashSystem(this.dashSystem);
     this.enemySystem.setVortexSystem(this.vortexSystem);
     this.enemySystem.setPulseSystem(this.pulseSystem);
-    // Enemy spawn grace period: no spawns for the first 5 seconds after
-    // the room is created (gives arriving players a safe window).
+
+    // ---- Per-map bookkeeping + synced state reset ----
+    this.spawnedZones.clear();
+    this.enemiesKilled = 0;
+    this.eliteSpawned = false;
+    this.transitioning = false;
+    this.state.mapId = mapId;
+    this.state.enemies.clear();
+    this.state.projectiles.clear();
+    this.state.skillCasts.clear();
+    this.state.slams.clear();
+    this.state.shockCasts.clear();
+    this.state.vortexes.clear();
+    this.state.groundCards.clear();
+    this.state.eliteAlive = false;
+    this.state.exitUnlocked = false;
+    // Enemy spawn grace: no spawns for the first 5 seconds after the map
+    // loads (gives arriving players a safe window).
     this.state.spawnGraceUntil = Date.now() + 5000;
 
-    // Fixed timestep simulation loop
-    let elapsedTime = 0;
-    this.setSimulationInterval((deltaTime) => {
-      elapsedTime += deltaTime;
-      while (elapsedTime >= this.fixedTimeStep) {
-        elapsedTime -= this.fixedTimeStep;
-        this.fixedTick(this.fixedTimeStep);
-      }
+    // ---- Reposition existing players at the new map's spawn ----
+    const spawn = this.mapSystem.getSpawnPoint();
+    this.state.players.forEach((p) => {
+      p.x = spawn.x;
+      p.y = spawn.y;
+      p.inputQueue.length = 0;
     });
 
     // ---- Map metadata for client display ----
     this.setMetadata({
-      mapName: MAP_INFO["game_room"]?.name ?? "Unknown",
-      mapDescription: MAP_INFO["game_room"]?.description ?? "",
+      mapName: def.info.name,
+      mapDescription: def.info.description,
       modifiers: this.activeModifiers.map((id) => {
-        const defs: Record<
-          string,
-          { id: string; title: string; description: string }
-        > = {
-          swift_movement: {
-            id,
-            title: "Swift Movement",
-            description: "All entities move 30% faster.",
-          },
-          veteran_enemies: {
-            id,
-            title: "Veteran Enemies",
-            description: "Enemies have +50% HP and +25% ATK.",
-          },
-          rich_loot: {
-            id,
-            title: "Rich Loot",
-            description: "Double XP, improved loot rarity.",
-          },
-          glass_cannon: {
-            id,
-            title: "Glass Cannon",
-            description: "2x damage, 50% less health.",
-          },
-          regeneration: {
-            id,
-            title: "Regeneration",
-            description: "Regenerate 5 HP/sec.",
-          },
-        };
-        return defs[id] ?? { id, title: id, description: "" };
+        const d = MODIFIER_DEFS[id];
+        return d
+          ? { id, title: d.title, description: d.description }
+          : { id, title: id, description: "" };
       }),
     });
     console.log(
-      "GameRoom created with layered map:",
-      `${LAYERED_MAP.cols}x${LAYERED_MAP.rows} tiles`,
+      `[MAP] Map "${mapId}" initialized: ${def.data.cols}x${def.data.rows} tiles, ` +
+        `${this.state.players.size} player(s) repositioned`,
     );
   }
 
@@ -216,6 +238,8 @@ export class GameRoom extends Room {
     this.cleanupDeadEnemies();
     // Viewport-activated spawning
     this.checkSpawnZones();
+    // Server-authoritative map exit check
+    this.checkMapExit();
   }
 
   /**
@@ -273,13 +297,61 @@ export class GameRoom extends Room {
   }
 
   /**
+   * SERVER-AUTHORITATIVE MAP EXIT.
+   * When this map's elite is dead (exitUnlocked) and ALL alive players
+   * stand inside the exit zone, transition the whole room to the next
+   * map in place: clear per-map state, re-init systems, respawn players
+   * at the new spawn, award transition XP. No disconnect ever happens.
+   */
+  private checkMapExit(): void {
+    if (this.transitioning) return;
+    if (!this.state.exitUnlocked) return;
+    const def = MAPS[this.mapId];
+    const ex = def.data.exitPoint;
+    let alive = 0;
+    let onExit = 0;
+    this.state.players.forEach((p) => {
+      if (p.isDead) return;
+      alive++;
+      const inside =
+        p.x >= ex.x &&
+        p.x <= ex.x + ex.width &&
+        p.y >= ex.y &&
+        p.y <= ex.y + ex.height;
+      if (inside) onExit++;
+    });
+    if (alive === 0) return;
+    if (onExit < alive) return;
+
+    // ---- Everyone is on the exit: transition now ----
+    this.transitioning = true;
+    const nextMapId = def.next;
+    console.log(
+      `[MAP] All ${alive} players on exit — transitioning ${this.mapId} -> ${nextMapId}`,
+    );
+
+    // Transition XP reward (was client-driven message 5). map2 -> map1
+    // awards 1000 XP, map1 -> map2 awards 500 XP (previous behavior).
+    const transitionXp = this.mapId === "map2" ? 1000 : 500;
+    this.state.players.forEach((p) => {
+      if (!p.isDead) p.addXp(transitionXp);
+    });
+
+    // Tell clients to swap maps (they rebuild tilemap + entities locally).
+    this.broadcast("mapTransition", { from: this.mapId, to: nextMapId });
+
+    // Swap all per-map state + systems (initMap resets `transitioning`).
+    this.initMap(nextMapId);
+  }
+
+  /**
    * Spawn one enemy at the center of each spawn zone the FIRST time any
    * player's viewport touches it. Each zone spawns exactly once.
    */
   private checkSpawnZones(): void {
     // Spawn grace: block all zone spawning during the grace period.
     if (Date.now() < this.state.spawnGraceUntil) return;
-    const zones = LAYERED_MAP.enemySpawnZones;
+    const zones = MAPS[this.mapId].data.enemySpawnZones;
     if (zones.length === 0 || this.viewports.size === 0) return;
     const enemyLevel = this.getHighestPlayerLevel();
     for (let i = 0; i < zones.length; i++) {
@@ -431,7 +503,7 @@ export class GameRoom extends Room {
     ) {
       return;
     }
-    const zones = LAYERED_MAP.enemySpawnZones;
+    const zones = MAPS[this.mapId].data.enemySpawnZones;
     if (zones.length === 0) return;
     const zone = zones[Math.floor(Math.random() * zones.length)];
     const eliteLevel =
@@ -638,15 +710,8 @@ export class GameRoom extends Room {
       player.y = spawn.y;
     },
 
-    // Map transition XP reward (map1 -> map2: +500 XP).
-    5: (client: Client, _msg: any) => {
-      const player = this.state.players.get(client.sessionId);
-      if (!player) return;
-      player.addXp(500);
-      console.log(
-        `Player ${client.sessionId} earned 500 XP for map transition (map1 -> map2)`,
-      );
-    },
+    // (5 was "map transition XP" — transitions are now fully
+    // server-authoritative; see checkMapExit(). Number reserved.)
 
     // ---- Spend skill point on a stat upgrade ----
     6: (client: Client, msg: { stat: string }) => {
@@ -786,7 +851,7 @@ export class GameRoom extends Room {
       const dy = msg.y - player.y;
       if (dx * dx + dy * dy > 160 * 160) return;
       // Clamp to map bounds so the card never leaves the map.
-      const map = LAYERED_MAP;
+      const map = MAPS[this.mapId].data;
       card.x = Math.max(16, Math.min(map.widthPx - 16, msg.x));
       card.y = Math.max(16, Math.min(map.heightPx - 16, msg.y));
       card.pickupLockUntil = Date.now() + 500; // re-arm pickup grace
@@ -926,94 +991,24 @@ export class GameRoom extends Room {
   // CONNECTION LIFECYCLE
   // ============================================================
 
-  onJoin(client: Client, options: any) {
+  onJoin(client: Client, _options: any) {
     console.log("Player joined GameRoom:", client.sessionId);
 
     const player = new Player();
-
-    // Check if this is a player transferring from another map
-    const ps = options?.playerState;
-    if (ps) {
-      // Restore player state from previous map
-      player.level = ps.level ?? 1;
-      player.currentXp = ps.currentXp ?? 0;
-      player.xpToLevelUp = ps.xpToLevelUp ?? 1000;
-      player.maxHealth = ps.maxHealth ?? 1000;
-      player.currentHealth = ps.currentHealth ?? player.maxHealth;
-      player.attack = ps.attack ?? 100;
-      player.defence = ps.defence ?? 0;
-      player.critRate = ps.critRate ?? 0.1;
-      player.critDamage = ps.critDamage ?? 1.5;
-      player.baseMoveSpeed = ps.baseMoveSpeed ?? 120;
-      // Use the speedMultiplier directly from the serialized state.
-      player.speedMultiplier = ps.speedMultiplier ?? 1.0;
-      player.skillPoints = ps.skillPoints ?? 0;
-      // Restore the HUD slots (cards + mods + rarity). skillLevels are
-      // re-derived from the cards by recomputeSkillLevels().
-      const carried = ps.equippedSlots;
-      if (Array.isArray(carried)) {
-        for (let i = 0; i < NUM_CARD_SLOTS; i++) {
-          const c = carried[i];
-          // Empty carried slot: the constructor's sentinel stays in place.
-          if (!c || typeof c.skill !== "string" || !c.skill) continue;
-          const card = new CardInstance();
-          card.skill = c.skill;
-          card.level = Math.max(1, c.level | 0);
-          card.rarity = typeof c.rarity === "string" ? c.rarity : "common";
-          if (Array.isArray(c.modIds)) {
-            for (const m of c.modIds) {
-              if (typeof m === "string") card.modIds.push(m);
-            }
-          }
-          // Tier-rolled per-mod values (parallel to modIds).
-          if (Array.isArray(c.modValues)) {
-            for (const v of c.modValues) {
-              if (typeof v === "number") card.modValues.push(v);
-            }
-          }
-          player.equippedSlots[i] = card;
-        }
-        player.recomputeSkillLevels();
-        player.recomputeShield();
-      }
-      // Restore the carried inventory (I-tab backpack) from the
-      // previous map. Same sentinel convention as equippedSlots.
-      const carriedInv = ps.inventory;
-      if (Array.isArray(carriedInv)) {
-        for (let i = 0; i < NUM_INVENTORY_SLOTS; i++) {
-          const c = carriedInv[i];
-          if (!c || typeof c.skill !== "string" || !c.skill) continue;
-          const card = new CardInstance();
-          card.skill = c.skill;
-          card.level = Math.max(1, c.level | 0);
-          card.rarity = typeof c.rarity === "string" ? c.rarity : "common";
-          if (Array.isArray(c.modIds)) {
-            for (const m of c.modIds) {
-              if (typeof m === "string") card.modIds.push(m);
-            }
-          }
-          if (Array.isArray(c.modValues)) {
-            for (const v of c.modValues) {
-              if (typeof v === "number") card.modValues.push(v);
-            }
-          }
-          player.inventorySlots[i] = card;
-        }
-      }
-    } else {
-      // Fresh player: starter cards fill all 5 slots.
-      player.initBaseStats();
-      for (let i = 0; i < NUM_CARD_SLOTS && i < STARTER_CARDS.length; i++) {
-        const sc = STARTER_CARDS[i];
-        const card = new CardInstance();
-        card.skill = sc.skill;
-        card.level = sc.level;
-        card.rarity = "common";
-        player.equippedSlots[i] = card;
-      }
-      player.recomputeSkillLevels();
-      player.recomputeShield();
+    // Fresh player: starter cards fill all 5 slots. (There is no longer
+    // any client-supplied playerState to restore — progression lives in
+    // the room and survives map transitions server-side.)
+    player.initBaseStats();
+    for (let i = 0; i < NUM_CARD_SLOTS && i < STARTER_CARDS.length; i++) {
+      const sc = STARTER_CARDS[i];
+      const card = new CardInstance();
+      card.skill = sc.skill;
+      card.level = sc.level;
+      card.rarity = "common";
+      player.equippedSlots[i] = card;
     }
+    player.recomputeSkillLevels();
+    player.recomputeShield();
     applyPlayerModifiers(player, this.activeModifiers);
     const spawn = this.mapSystem.getSpawnPoint();
     player.x = spawn.x;
@@ -1024,6 +1019,7 @@ export class GameRoom extends Room {
   onLeave(client: Client, _code: number) {
     console.log("Player left:", client.sessionId);
     this.state.players.delete(client.sessionId);
+    this.viewports.delete(client.sessionId);
   }
 
   onDispose() {

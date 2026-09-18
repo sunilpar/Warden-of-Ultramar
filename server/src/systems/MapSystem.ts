@@ -1,7 +1,10 @@
 /**
  * Map System (Layered / Grid-Based)
  * ==================================
- * Authoritative collision against the layered Tiled map.
+ * Authoritative collision against a layered Tiled map. DATA-DRIVEN:
+ * takes its map data (from config/mapRegistry.ts) in the constructor,
+ * so ONE class serves every map. On a map transition the room simply
+ * constructs a fresh MapSystem with the next map's data.
  *
  * Collision is O(1): the player circle (radius < tileSize/2) overlaps at most
  * 4 grid cells, so we check a 3×3 neighborhood around the player's cell.
@@ -9,23 +12,36 @@
  * MUST match the client's resolveTileCollision() exactly.
  */
 
-import { LAYERED_MAP } from "../config/layeredMap";
+import type { LayeredMapData } from "../config/mapRegistry";
 
 export class MapSystem {
-  private tileSize = LAYERED_MAP.tileSize;
-  private cols = LAYERED_MAP.cols;
-  private rows = LAYERED_MAP.rows;
-  private grid = LAYERED_MAP.collisionGrid;
+  private tileSize: number;
+  private cols: number;
+  private rows: number;
+  private grid: Uint8Array;
+  private data: LayeredMapData;
+
+  constructor(data: LayeredMapData) {
+    this.data = data;
+    this.tileSize = data.tileSize;
+    this.cols = data.cols;
+    this.rows = data.rows;
+    this.grid = data.collisionGrid;
+  }
 
   get width(): number {
-    return LAYERED_MAP.widthPx;
+    return this.data.widthPx;
   }
   get height(): number {
-    return LAYERED_MAP.heightPx;
+    return this.data.heightPx;
   }
 
   getSpawnPoint(): { x: number; y: number } {
-    return { ...LAYERED_MAP.spawnPoint };
+    return { ...this.data.spawnPoint };
+  }
+
+  getExitPoint(): { x: number; y: number; width: number; height: number } {
+    return { ...this.data.exitPoint };
   }
 
   /**
@@ -77,7 +93,6 @@ export class MapSystem {
         }
       }
     }
-
     return { x, y };
   }
 
