@@ -25,7 +25,6 @@
  *  12: Move ground card{ cardId, x, y }
  *
  * CARD MODEL
- * ----------
  * The player HUD is `player.equippedSlots` — a synced array of 5 card
  * slots (null = empty). Each slot is a pure skill TRIGGER: message 1 names
  * the SLOT, and the card in that slot casts its skill with ITS OWN mods.
