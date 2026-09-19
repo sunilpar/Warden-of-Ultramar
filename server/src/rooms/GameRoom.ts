@@ -256,6 +256,30 @@ export class GameRoom extends Room {
   }
 
   /**
+   * Highest `dropRate` stat across all connected players. The room's
+   * LootSystem uses this to scale the SPAWN_WITH_CARD gate (so a player
+   * stacking increased drop rate makes the whole party see more cards).
+   */
+  private getHighestPlayerDropRate(): number {
+    let max = 0;
+    this.state.players.forEach((p) => {
+      if (p.dropRate > max) max = p.dropRate;
+    });
+    return max;
+  }
+
+  /**
+   * Push the current room-level loot context (drop rate + per-rarity
+   * bias) into LootSystem. Called before each enemy card roll and after
+   * any player stat change.
+   */
+  private refreshLootContext(): void {
+    this.lootSystem.setLootContext({
+      dropRate: this.getHighestPlayerDropRate(),
+    });
+  }
+
+  /**
    * Total enemies this map should host: 20 base + 1 per 2 player levels
    * (highest player level in the room).
    */
@@ -287,7 +311,12 @@ export class GameRoom extends Room {
    * Pick an enemy type by spawn ratio: 40% tyranid / 30% mechanicus /
    * 20% tau / 10% orck.
    */
-  private pickEnemyType(): "tyranid" | "orck" | "tau" | "mechanicus" | "caster" {
+  private pickEnemyType():
+    | "tyranid"
+    | "orck"
+    | "tau"
+    | "mechanicus"
+    | "caster" {
     const r = Math.random();
     if (r < 0.4) return "tyranid";
     if (r < 0.55) return "mechanicus"; // halved 30% -> 15%, rest moved to caster
@@ -387,6 +416,7 @@ export class GameRoom extends Room {
         if (spawnedEnemy) {
           applyEnemyModifiers(spawnedEnemy, this.activeModifiers);
           // Loot roll: may attach a modded card to this enemy.
+          this.refreshLootContext();
           const card = this.lootSystem.rollEnemyCard(spawnedEnemy);
           if (card) spawnedEnemy.card = card;
         }
@@ -516,7 +546,8 @@ export class GameRoom extends Room {
     );
     const elite = this.state.enemies.get(spawnId);
     if (!elite) return;
-    // Elites always carry a card (no 50% gate).
+    // Elites always carry a card (no spawn-with-card gate).
+    this.refreshLootContext();
     const eliteCard = this.lootSystem.rollEnemyCardForced(elite);
     if (eliteCard) elite.card = eliteCard;
     elite.makeElite(

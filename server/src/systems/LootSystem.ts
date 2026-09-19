@@ -21,6 +21,7 @@ import {
   UNIQUE_POOL,
   rarityForModCount,
   CARD_DROP,
+  DROP_RATE,
   type Rarity,
 } from "../config/loot";
 import { type SkillId } from "../config/skillDefs";
@@ -46,17 +47,48 @@ export const NO_CARD_STATS: CardStats = {
  * Per-mod effect functions. Each returns the delta it adds to the cast
  * stats for the skill it is rolled on. The signature is (tier) so tiers
  * can scale values later without touching call sites.
+ *
+ * NOTE: These formulas are kept as a FALLBACK for when a card has no
+ * rolled `modValues` yet (e.g. legacy/test cards). The runtime path in
+ * Player/Enemy reads `card.modValues[i]` directly, which already encodes
+ * the tier-scaled value rolled at spawn time. `applyCardMods` below
+ * prefers those rolled values; these formulas are only used as a fallback
+ * so a freshly-built card without modValues still applies sane stats.
  */
-export const MOD_EFFECTS: Record<string, (tier: number) => Partial<CardStats>> = {
-  inc_crit_rate: (t) => ({ critRate: 0.1 * t }),
-  inc_crit_damage: (t) => ({ critDamage: 0.2 * t }),
-  inc_atk_damage: (t) => ({ damageMult: 1 + 0.1 * t }),
-  wide_sweep: () => ({ radiusMult: 2.0, damageMult: 0.5 }),
-  inc_shield_amount: () => ({}), // applied in Player.cardShieldBonus()
-};
+export const MOD_EFFECTS: Record<string, (tier: number) => Partial<CardStats>> =
+  {
+    inc_crit_rate: (t) => ({ critRate: 0.1 * t }),
+    inc_crit_damage: (t) => ({ critDamage: 0.2 * t }),
+    inc_atk_damage: (t) => ({ damageMult: 1 + 0.1 * t }),
+    wide_sweep: () => ({ radiusMult: 2.0, damageMult: 0.5 }),
+    inc_shield_amount: () => ({}), // applied in Player.cardShieldBonus()
+  };
 
 export class LootSystem {
   constructor(private state: RoomState) {}
+
+  /**
+   * Room-supplied loot context. The room passes the highest player's
+   * `dropRate` stat (0 by default) plus a per-rarity additive bias map
+   * (for future "increased X rarity drop rate" mods).
+   */
+  setLootContext(ctx: {
+    dropRate?: number;
+    rarityBias?: Partial<Record<Rarity, number>>;
+  }) {
+    this.ctx = {
+      dropRate: Math.max(
+        0,
+        Math.min(DROP_RATE.MAX, ctx.dropRate ?? DROP_RATE.DEFAULT),
+      ),
+      rarityBias: ctx.rarityBias ?? {},
+    };
+  }
+
+  private ctx: {
+    dropRate: number;
+    rarityBias: Partial<Record<Rarity, number>>;
+  } = { dropRate: DROP_RATE.DEFAULT, rarityBias: {} };
 
   /**
    * Roll and attach per-mod values for a freshly built card. The tier is
@@ -85,32 +117,35 @@ export class LootSystem {
   rollEnemyCard(enemy: Enemy): CardInstance | null {
     return this.rollEnemyCardInner(enemy, true);
   }
-
   /**
-   * Elite/boss spawn: always attach a card (skip the 50% gate) rolled
+   * Elite/boss spawn: always attach a card (skip the spawn gate) rolled
    * from the same rarity table. Unique fails -> falls back to legendary.
    */
   rollEnemyCardForced(enemy: Enemy): CardInstance | null {
     return this.rollEnemyCardInner(enemy, false);
   }
-
   /**
-   * Shared roll body. `gate` = apply the 50% spawn-with-card chance.
-   * Unique rarity forces the card's skill to pulse/vortex when the enemy
-   * can cast either (mechanicus); enemies with neither fall back to a
-   * legendary mod roll instead of dropping nothing.
+   * Shared roll body. `gate` = apply the spawn-with-card chance (room
+   * drop rate scales the gate). Unique rarity forces the card's skill to
+   * pulse/vortex when the enemy can cast either (mechanicus); enemies
+   * with neither fall back to a legendary mod roll instead of dropping
+   * nothing.
    */
   private rollEnemyCardInner(enemy: Enemy, gate: boolean): CardInstance | null {
-    // 50% of enemies spawn with no card.
-    if (gate && Math.random() > CARD_DROP.SPAWN_WITH_CARD) return null;
+    // Spawn-with-card gate (scaled by room drop rate).
+    if (gate) {
+      const effective = CARD_DROP.SPAWN_WITH_CARD * (1 + this.ctx.dropRate);
+      const capped = Math.max(0, Math.min(1, effective));
+      if (Math.random() > capped) return null;
+    }
 
     // Skill = random skill from the enemy's unlocked pool (castable ones).
     const castable = enemy.skillPool.filter((s) => s !== "shield");
     if (castable.length === 0) return null;
     const skill = castable[Math.floor(Math.random() * castable.length)];
 
-    // Rarity roll.
-    const rarity = this.rollRarity();
+    // Rarity roll (uses level bonus, global bias, room rarity bias).
+    const rarity = this.rollRarity(enemy.level);
 
     if (rarity === "unique") {
       // Unique: pulse/vortex only, ONE unique mod, nothing else. If the
@@ -123,6 +158,7 @@ export class LootSystem {
         card.level = enemy.skillLevels.get(skill) ?? 1;
         card.modIds = new ArraySchema<string>(allowed[0].id);
         card.rarity = "unique";
+        this.assignRollMode(card);
         this.attachModValues(card, enemy.level);
         return card;
       }
@@ -136,6 +172,7 @@ export class LootSystem {
         card.level = enemy.skillLevels.get(uniSkill) ?? 1;
         card.modIds = new ArraySchema<string>(uni.id);
         card.rarity = "unique";
+        this.assignRollMode(card);
         this.attachModValues(card, enemy.level);
         return card;
       }
@@ -145,7 +182,13 @@ export class LootSystem {
 
     // Mod count from rarity: uncommon 1, rare 2, epic 3, legendary 4.
     const modCount =
-      rarity === "uncommon" ? 1 : rarity === "rare" ? 2 : rarity === "epic" ? 3 : 4;
+      rarity === "uncommon"
+        ? 1
+        : rarity === "rare"
+          ? 2
+          : rarity === "epic"
+            ? 3
+            : 4;
     return this.rollModdedCard(enemy, skill, modCount);
   }
 
@@ -187,22 +230,66 @@ export class LootSystem {
     }
     card.modIds = new ArraySchema<string>(...mods);
     card.rarity = rarityForModCount(prefixes, suffixes, false);
+    this.assignRollMode(card);
     this.attachModValues(card, enemy.level);
     return card;
   }
 
-  /** Rarity roll using the configured weights. */
-  private rollRarity(): Rarity {
+  /**
+   * Rarity roll pipeline.
+   *
+   * finalWeight(r) = base + (RARITY_LEVEL_BONUS * max(0, level-1))
+   *                + GLOBAL_RARITY_BIAS[r]
+   *                + ctx.rarityBias[r]
+   * Floored at 0 so a strong bias on one bucket cannot make negatives on
+   * another (rare with no bias against still gets the level/global bonus).
+   */
+  private rollRarity(level: number): Rarity {
     const w = CARD_DROP.RARITY_WEIGHTS;
-    const total =
-      w.common + w.uncommon + w.rare + w.epic + w.legendary + w.unique;
+    const levelBonus = CARD_DROP.RARITY_LEVEL_BONUS * Math.max(0, level - 1);
+    const bias = CARD_DROP.GLOBAL_RARITY_BIAS;
+    const order: Rarity[] = [
+      "unique",
+      "legendary",
+      "epic",
+      "rare",
+      "uncommon",
+      "common",
+    ];
+    const weights: Record<Rarity, number> = {
+      unique: 0,
+      legendary: 0,
+      epic: 0,
+      rare: 0,
+      uncommon: 0,
+      common: 0,
+    };
+    let total = 0;
+    for (const k of order) {
+      const v =
+        w[k] + levelBonus + (bias[k] ?? 0) + (this.ctx.rarityBias[k] ?? 0);
+      weights[k] = Math.max(0, v);
+      total += weights[k];
+    }
+    if (total <= 0) return "common";
     let r = Math.random() * total;
-    for (const key of ["unique", "legendary", "epic", "rare", "uncommon", "common"] as Rarity[]) {
-      const weight = (w as any)[key];
-      r -= weight;
-      if (r <= 0) return key;
+    for (const k of order) {
+      r -= weights[k];
+      if (r <= 0) return k;
     }
     return "common";
+  }
+
+  /**
+   * Assign a roll mode (advantage / disadvantage / normal) to a freshly
+   * built card. For now the mode is randomly assigned — see CARD_DROP
+   * docs. Future work: drive this from card mods / map affixes.
+   */
+  private assignRollMode(card: CardInstance): void {
+    const pick = Math.random();
+    if (pick < 0.1) card.rollsWith = "advantage";
+    else if (pick < 0.2) card.rollsWith = "disadvantage";
+    else card.rollsWith = "normal";
   }
 
   // ============================================================
@@ -212,19 +299,74 @@ export class LootSystem {
   /**
    * Convert a card's mod ids into cast stat deltas. `skill` must match
    * the card's skill - mods only apply to the card's own skill.
+   *
+   * Tier handling: we PREFER `card.modValues[i]` (rolled at spawn time
+   * inside the tier's range — e.g. tier-3 inc_crit_rate lands 10-20%).
+   * That is the same source Player/Enemy use at cast time, so a single
+   * card produces consistent numbers everywhere. If a card has no
+   * modValues (legacy / test-built), we fall back to MOD_EFFECTS at
+   * tier 1 (weak baseline) instead of returning zeros.
+   *
+   * Per-mod mapping (rolled value -> stat):
+   *   inc_crit_rate    -> critRate    += v
+   *   inc_crit_damage  -> critDamage  += v
+   *   inc_atk_damage   -> damageMult  *= (1 + v)
+   *   inc_cooldown     -> ignored here (handled in Player.cardCooldownReduction)
+   *   wide_sweep       -> fixed unique: radiusMult *= 2, damageMult *= 0.5
    */
   applyCardMods(card: CardInstance | null, skill: SkillId): CardStats {
     if (!card || card.skill !== skill) return { ...NO_CARD_STATS };
     const stats: CardStats = { ...NO_CARD_STATS };
     stats.damageMult = 1;
-    for (const id of card.modIds) {
-      const fn = MOD_EFFECTS[id];
-      if (!fn) continue;
-      const delta = fn(1); // tier 1 for now
-      if (delta.critRate) stats.critRate += delta.critRate;
-      if (delta.critDamage) stats.critDamage += delta.critDamage;
-      if (delta.damageMult) stats.damageMult *= delta.damageMult;
-      if (delta.radiusMult) stats.radiusMult *= delta.radiusMult;
+    for (let i = 0; i < card.modIds.length; i++) {
+      const id = card.modIds[i];
+      const rolled = card.modValues[i];
+      switch (id) {
+        case "inc_crit_rate":
+          if (typeof rolled === "number" && rolled > 0)
+            stats.critRate += rolled;
+          else {
+            const d = MOD_EFFECTS.inc_crit_rate(1);
+            stats.critRate += d.critRate ?? 0;
+          }
+          break;
+        case "inc_crit_damage":
+          if (typeof rolled === "number" && rolled > 0)
+            stats.critDamage += rolled;
+          else {
+            const d = MOD_EFFECTS.inc_crit_damage(1);
+            stats.critDamage += d.critDamage ?? 0;
+          }
+          break;
+        case "inc_atk_damage":
+          if (typeof rolled === "number" && rolled > 0)
+            stats.damageMult *= 1 + rolled;
+          else {
+            const d = MOD_EFFECTS.inc_atk_damage(1);
+            stats.damageMult *= d.damageMult ?? 1;
+          }
+          break;
+        case "wide_sweep":
+          // Unique: fixed effect, tier-independent by design.
+          stats.radiusMult *= 2.0;
+          stats.damageMult *= 0.5;
+          break;
+        case "inc_shield_amount":
+        case "inc_cooldown":
+          // Handled by Player.cardShieldBonus / cardCooldownReduction.
+          break;
+        default:
+          // Unknown mod id: try the fallback formula at tier 1.
+          const fn = MOD_EFFECTS[id];
+          if (fn) {
+            const d = fn(1);
+            if (d.critRate) stats.critRate += d.critRate;
+            if (d.critDamage) stats.critDamage += d.critDamage;
+            if (d.damageMult) stats.damageMult *= d.damageMult;
+            if (d.radiusMult) stats.radiusMult *= d.radiusMult;
+          }
+          break;
+      }
     }
     return stats;
   }

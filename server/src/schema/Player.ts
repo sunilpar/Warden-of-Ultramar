@@ -95,6 +95,12 @@ export class Player extends Schema {
   @type("number") critDamage: number = PLAYER_STATS.BASE.CRIT_DAMAGE;
   /** Defence, fraction 0..1 (0.2 = take 20% less damage). Ignored on crits. */
   @type("number") defence: number = PLAYER_STATS.BASE.DEFENCE;
+  /**
+   * Increased drop rate (0 = baseline, 0.5 = +50% cards). Sourced from
+   * gear/skills and read by GameRoom to set the room's LootSystem drop
+   * context (room uses the HIGHEST player's dropRate).
+   */
+  @type("number") dropRate: number = 0;
 
   // ---- Shock status (synced) ----
   /** Server timestamp (ms) until which the player is shocked (takes more damage, slowed). */

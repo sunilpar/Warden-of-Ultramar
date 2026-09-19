@@ -136,19 +136,83 @@ export const MOD_VALUES = {
 /**
  * Drop rules for card loot.
  * Values are per-enemy-spawn chances (not per-kill).
+ *
+ * RARITY ROLL PIPELINE (LootSystem.rollRarity)
+ *   finalWeight(r) = max(0, baseWeight(r) + levelBonus + rarityBias(r) + dropRateBias(r))
+ *   - baseWeight(r):   normalized base weights below (sum to 100)
+ *   - levelBonus:      +2 per enemy level, applied to EVERY rarity equally
+ *   - rarityBias(r):   per-rarity additive bonus from the enemy's profile
+ *                      (e.g. +20 to epic for "all enemies get +20% epic")
+ *   - dropRateBias(r): per-rarity additive bonus from the room's drop rate
+ *                      (e.g. a +10% epic drop-rate mod adds +10 to epic)
+ *   Result is then re-normalized and rolled.
+ *
+ * DROP RATE STAT (room-level)
+ *   The room carries a `dropRate` value sourced from the highest player's
+ *   "increased drop rate" stat. It multiplies the SPAWN_WITH_CARD gate
+ *   (so a player with +50% drop rate sees 50% more cards spawn).
+ *
+ * ADVANTAGE / DISADVANTAGE (TODO — wiring reserved)
+ *   CardInstance.rollsWith stores whether the card was rolled with
+ *   advantage ("roll twice, take highest") or disadvantage ("roll twice,
+ *   take lowest"). For now it is assigned randomly at roll time; later
+ *   it will be driven by card mods / map affixes. The damage numeric
+ *   on each mod will be the (highest|lowest) of two modValue rolls.
  */
 export const CARD_DROP = {
   /** Chance an enemy spawns WITH a card in its skill pool. */
   SPAWN_WITH_CARD: 0.5,
-  /** Rarity weights (spawn-time roll, only when a card is rolled). */
+  /**
+   * Normalized base rarity weights (sum to 100). Tuned so cards are
+   * actually rare: rare+epic+legendary+unique = 70, common+uncommon = 55
+   * before the +2/level bonus shifts the curve upward.
+   */
   RARITY_WEIGHTS: {
-    common: 43, // remainder (100 - 20 - 10 - 5 - 2 - 20)
-    uncommon: 20,
-    rare: 10,
-    epic: 5,
-    legendary: 2,
-    unique: 20, // pulse/vortex unique drops (mechanicus re-points the skill)
+    common: 30,
+    uncommon: 25,
+    rare: 20,
+    epic: 15,
+    legendary: 10,
+    unique: 25,
   },
   /** Drop on death: only uncommon+ cards drop (common cards stay hidden). */
   DROP_ONLY_UNCOMMON_PLUS: true,
+  /**
+   * Absolute additive bonus to EVERY rarity weight per enemy level.
+   * Level 10 -> each rarity gets +20 absolute weight on top of the base.
+   */
+  RARITY_LEVEL_BONUS: 2,
+  /**
+   * Per-rarity additive bias applied to ALL enemies. Currently every
+   * enemy gets +20 to epic (so epic feels reachable without trivializing
+   * it). Adjust per-design needs.
+   */
+  GLOBAL_RARITY_BIAS: {
+    common: 0,
+    uncommon: 0,
+    rare: 0,
+    epic: 20,
+    legendary: 0,
+    unique: 0,
+  },
+} as const;
+
+/**
+ * DROP_RATE constant (room stat)
+ * ===============================
+ * Players carry a `dropRate` stat (added by items/skills later). The
+ * room tracks the HIGHEST player's drop rate and uses it as a scalar
+ * on the SPAWN_WITH_CARD gate:
+ *
+ *   effectiveSpawnChance = clamp(SPAWN_WITH_CARD * (1 + roomDropRate), 0, 1)
+ *
+ * Also exposed as a per-rarity additive bias (`dropRateBias`) so future
+ * "increased X rarity drop rate" mods can add weight to one bucket
+ * specifically (e.g. +10% epic chance -> +10 to epic weight).
+ */
+export const DROP_RATE = {
+  /** Default room drop rate when no player has the stat. */
+  DEFAULT: 0,
+  /** Hard ceiling on the room drop rate scalar. */
+  MAX: 2.0, // 200% -> SPAWN_WITH_CARD can max out at 1.0
 } as const;
