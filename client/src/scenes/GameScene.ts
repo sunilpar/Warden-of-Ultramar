@@ -1,36 +1,18 @@
 /**
- * Game Scene — Client-Side Rendering
- * ==================================
+ * Game Scene - Core Orchestrator
+ * ==============================
  *
- * ARCHITECTURE: Server-Authoritative Multiplayer
- *   - The SERVER owns all game state (position, collision)
- *   - The CLIENT only:
- *       1. Renders what the server tells it
- *       2. Sends player input to the server
- *       3. Predicts local player movement for responsiveness
- *       4. Interpolates remote players for smooth visuals
+ * Thin orchestrator. All concerns live in dedicated modules:
+ *   ui/        - card tooltip, HUD, screens, toasts, damage numbers
+ *   vfx/       - per-skill animations + effects
+ *   systems/   - input, ground-card pickup
+ *   config/    - skill/card mod definitions
  *
- * CLIENT-SIDE PREDICTION:
- *   For the LOCAL player, we apply movement immediately (before the server
- *   confirms). If the server's position differs significantly, we snap to it.
- *   This hides network latency and makes movement feel instant.
- *
- * LAYERED MAP (layerbasedMap1.json — the source of truth):
- *   - "baselayer"    → floor tiles, always drawn (depth 0)
- *   - "interactive"  → walls / decor / spawn / exit markers; 0 = skip (depth 1)
- *   - "ememy spawn"  → object layer; rectangles where enemies will spawn
- *   Collision is O(1) tile-grid lookup (see resolveTileCollision).
- *
- * CHARACTER SPRITE SHEET (CharacterSpriteSheet64.png):
- *   4x4 grid, each frame 64x64 pixels.
- *   Row 0: walk RIGHT (frames  0,  1,  2,  3)
- *   Row 1: walk LEFT  (frames  4,  5,  6,  7)
- *   Row 2: walk UP    (frames  8,  9, 10, 11)
- *   Row 3: walk DOWN  (frames 12, 13, 14, 15)
+ * Edit the matching module - this file only wires them up and runs the
+ * per-tick loop.
  */
-
 import Phaser from "phaser";
-import { Client, Callbacks } from "@colyseus/sdk";
+import { Client } from "@colyseus/sdk";
 import { BACKEND_URL } from "../backend";
 
 import { LAYERED_MAP, resolveTileCollision } from "../maps/layeredMapData";
@@ -38,818 +20,187 @@ import type { LayeredMapData } from "../maps/layeredMapData";
 import { LAYERED_MAP_2 } from "../maps/layeredMap2Data";
 import {
   type SkillId,
-  SKILL_CARDS,
-  cardFrameForLevel,
-  rarityBaseFrame,
   asRarity,
-  CARD_ART_ALPHA,
-  CARD_ART_INSET_RATIO,
-  type Rarity,
+  cardFrameForLevel,
   BOLTER_COLORS,
   bolterColorTier,
   bolterBulletFrameForLevel,
-  BOLTER_MUZZLE_FRAMES,
-  clawRowStartFrame,
-  CLAW_FRAMES_PER_ROW,
-  type ClawTier,
-  skillMods,
-  vortexColorTier,
-  VORTEX_COLORS,
 } from "../config/skillDefs";
-import { MAP_INFO, MODIFIER_DISPLAY } from "../config/modifiers";
+import { spawnDamageNumber } from "../ui/damageNumbers";
 
-// ============================================================
-// Game Scene
-// ============================================================
+import { buildCardTooltipPanel } from "../ui/cardTooltip";
+import {
+  showCooldownToast,
+  showLevelUpToast,
+  showSpawnCountdownToast,
+  announce,
+} from "../ui/toasts";
+import {
+  createStatsHud,
+  slotCenter,
+  createSlotCardObj,
+  updateStatsHud,
+  updateVignettes,
+  updateSlotCooldowns,
+  type StatsHudRefs,
+  type HudCardObj,
+  type SlotCard,
+} from "../ui/hud/statsHud";
+import {
+  createXpBar,
+  setLevelClickHandler,
+  updateXpBar,
+  type XpBarRefs,
+} from "../ui/hud/xpBar";
+import {
+  createMapInfoButton,
+  rebuildMapInfoTooltip,
+  type MapInfoRefs,
+} from "../ui/hud/mapInfoButton";
+import { createConfirmPopup } from "../ui/confirmPopup";
+import {
+  showDeathScreen,
+  hideDeathScreen,
+  type DeathScreenRefs,
+} from "../ui/screens/deathScreen";
+import { createCharacterScreen } from "../ui/screens/characterScreen";
+import { createInventoryScreen } from "../ui/screens/inventoryScreen";
 
-// Alias for skill card lookup in character screen
-const SKILL_CARDS_LOOKUP = SKILL_CARDS;
+import {
+  createCharacterAnimations,
+  createEnemyAnimations,
+  createBolterAnimations,
+  createPulseAnimations,
+  createClawAnimations,
+} from "../vfx/animations";
+import { drawLightningBolt } from "../vfx/shock";
+import { spawnVortex, showVortexExplosion } from "../vfx/vortex";
+import { spawnMuzzleFlash, spawnBulletHitVfx } from "../vfx/bolter";
+import { spawnBloodSplat } from "../vfx/blood";
+import {
+  spawnClawVfx,
+  spawnPulseVfx,
+  spawnHealVfx,
+  spawnDashVfx,
+  spawnDashIceBlastVfx,
+  spawnSlamSprite,
+  updateSlamFrame,
+} from "../vfx/castVfx";
 
-/** One HUD card game object. A slot-trigger visual: rarity base under
- *  skill art (reduced opacity) + cooldown fill. */
-interface HudCardObj {
-  skill: SkillId;
-  container: Phaser.GameObjects.Container;
-  /** Rarity base layer (row 1 frame; full opacity; rounded edges). */
-  base: Phaser.GameObjects.Image;
-  /** Skill art layer (row 2/3 frame; reduced opacity). */
-  img: Phaser.GameObjects.Image;
-  cdFill: Phaser.GameObjects.Rectangle;
-  /** Slot index this card is tweening toward (-1 = dragging). */
-  targetSlot: number;
-  /** Card rarity (drives the base layer). */
-  rarity: Rarity;
-  /** Rolled mod ids on this card. */
-  modIds: string[];
-  /** Tier-rolled per-mod values (parallel to modIds). */
-  modValues?: number[];
-}
-
-/** A card equipped in one HUD slot (mirror of the server's CardInstance). */
-interface SlotCard {
-  skill: SkillId;
-  level: number;
-  rarity: Rarity;
-  modIds: string[];
-  /** Tier-rolled per-mod values (parallel to modIds; tier system). */
-  modValues?: number[];
-}
-
-/** Approximate full cooldown (ms) per skill, for the HUD fill animation. */
-const SLOT_CD_MS: Partial<Record<SkillId, number>> = {
-  shock: 700,
-  slam: 3000,
-  claw: 500,
-  vortex: 8000,
-  pulse: 5000,
-  dash: 5000,
-  bolter: 500,
-};
-
-/** Rarity colors (drop boxes + tooltips). Mirrors server loot config. */
-const RARITY_COLORS: Record<string, number> = {
-  common: 0x9e9e9e,
-  uncommon: 0x00c853,
-  rare: 0x2979ff,
-  epic: 0xaa00ff,
-  legendary: 0xffd700,
-  unique: 0x00e5ff,
-};
-
-/** Rarity names shown in tooltips. */
-const RARITY_NAMES: Record<string, string> = {
-  common: "Common",
-  uncommon: "Uncommon",
-  rare: "Rare",
-  epic: "Epic",
-  legendary: "Legendary",
-  unique: "Unique",
-};
-
-/**
- * Mod display labels. Percent values are formatted from the card's
- * ROLLED per-mod values (tier system); shield shows flat points.
- * Fallback values approximate tier-1 rolls for legacy cards.
- */
-const MOD_LABELS: Record<string, string> = {
-  inc_crit_rate: "Crit Rate",
-  inc_crit_damage: "Crit Damage",
-  inc_atk_damage: "Damage",
-  inc_cooldown: "Cooldown Reduction",
-  inc_shield_amount: "Shield",
-  wide_sweep: "2x Radius, 1/2 Damage",
-};
-
-/** Format a mod line with its rolled value (value comes from the
- *  server-synced modValues array; parallel to modIds). */
-function formatModLine(id: string, value: number | undefined): string {
-  const label = MOD_LABELS[id] ?? id;
-  if (id === "wide_sweep") return label;
-  if (id === "inc_shield_amount") {
-    const v = typeof value === "number" && value > 0 ? value : 60;
-    return "+" + Math.round(v) + " " + label;
-  }
-  const fallback = id === "inc_crit_damage" ? 0.3 : 0.03;
-  const v = typeof value === "number" && value > 0 ? value : fallback;
-  return "+" + Math.round(v * 100) + "% " + label;
-}
-
-/** Back-compat alias used by tooltips that only have the id. */
-const MOD_NAMES: Record<string, string> = {
-  inc_crit_rate: "+3% Crit Rate",
-  inc_crit_damage: "+30% Crit Damage",
-  inc_atk_damage: "+3% Damage",
-  inc_cooldown: "+3% Cooldown Reduction",
-  inc_shield_amount: "+60 Shield",
-  wide_sweep: "2x Radius, 1/2 Damage",
-};
-
-/** Cooldown fill tint per skill. */
-const CARD_CD_COLORS: Partial<Record<SkillId, number>> = {
-  shock: 0x4da6ff,
-  pulse: 0xb266ff,
-  dash: 0x66ccff,
-  heal: 0x00ff00,
-  vortex: 0x999999,
-  claw: 0xff9955,
-  slam: 0xffcc44,
-  bolter: 0xffee88,
-};
-
-/**
- * Format large numbers with suffixes: k, mil, bil, tril, quadr, etc.
- * Below 100,000 the raw number is shown. Above that, suffixes apply.
- */
-function formatNumber(n: number): string {
-  if (n < 100_000) return Math.floor(n).toString();
-  const tiers: [number, string][] = [
-    [1e15, "quadr"],
-    [1e12, "tril"],
-    [1e9, "bil"],
-    [1e6, "mil"],
-    [1e3, "k"],
-  ];
-  for (const [threshold, suffix] of tiers) {
-    if (n >= threshold) {
-      const val = n / threshold;
-      return (
-        (val >= 100
-          ? val.toFixed(0)
-          : val >= 10
-            ? val.toFixed(1)
-            : val.toFixed(2)) +
-        " " +
-        suffix
-      );
-    }
-  }
-  return Math.floor(n).toString();
-}
+import {
+  bindKeyboard,
+  updateAimAngle,
+  slotIndexForPointer,
+} from "../systems/input";
+import {
+  createGroundCards,
+  createGroundCardEntity,
+  updateGroundGrab,
+  endGroundGrab,
+  pointerOverGroundCard,
+  resetGroundCards,
+  type GroundCardsState,
+  type GroundCardCallbacks,
+} from "../systems/groundCards";
 
 export class GameScene extends Phaser.Scene {
   client = new Client(BACKEND_URL);
   room: any = null;
 
-  // ---- Entity tracking ----
   currentPlayer!: Phaser.GameObjects.Sprite;
-  /** The local player's state object (for reading HP/XP/level). */
   currentPlayerState: any = null;
   playerEntities: { [sessionId: string]: Phaser.GameObjects.Sprite } = {};
-  // Enemy sprites keyed by enemy id (from server state.enemies)
   enemyEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
-  private enemyAnimationsCreated: boolean = false;
-  private bolterMuzzleAnimCreated: boolean = false;
-
-  // ---- Projectiles (bolter bullets etc.) keyed by projectile id ----
-  projectileEntities: { [id: string]: Phaser.GameObjects.Arc } = {};
-  /** Claw VFX sprites keyed by skillCast id. */
+  projectileEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
   clawEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
-  private clawAnimCreated: boolean = false;
-  private pulseAnimCreated: boolean = false;
-  /** Slam VFX sprites keyed by slam id. */
   slamEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
-  private slamAnimCreated: boolean = false;
-  /** Vortex VFX containers keyed by vortex id. */
   vortexEntities: { [id: string]: Phaser.GameObjects.Container } = {};
-  private shockAnimCreated: boolean = false;
-  /** Death screen overlay container (null when hidden). */
-  private deathOverlay: Phaser.GameObjects.Container | null = null;
-  private wasDead: boolean = false;
-
-  // ---- Enemy HP bars + last-known positions (for VFX on despawn) ----
   enemyHpBars: { [id: string]: Phaser.GameObjects.Container } = {};
   enemyLastPos: { [id: string]: { x: number; y: number } } = {};
   projLastPos: { [id: string]: { x: number; y: number } } = {};
 
-  // ---- Upgrade toast ----
-  private upgradeToast!: Phaser.GameObjects.Text;
+  private statsHud!: StatsHudRefs;
+  private xpBar!: XpBarRefs;
+  private mapInfo!: MapInfoRefs;
+  private groundCards!: GroundCardsState;
+  private groundCardCallbacks!: GroundCardCallbacks;
+  private deathScreen: DeathScreenRefs = { container: null };
+  private invScreen: any = null;
+  private charScreen: any = null;
 
-  /** Hover tooltip for the card in the hovered slot. */
-  private bolterTooltip: Phaser.GameObjects.Container | null = null;
-
-  // ============================================================
-  // GROUND CARDS (dropped card pickups)
-  // ============================================================
-
-  /**
-   * Create the world-space entity for a dropped card: a simple box with
-   * the skill name inside. When loot rarity lands later, restyle here.
-   */
-  private createGroundCardEntity(card: any, cardId: string): void {
-    const skill = card.skill as SkillId;
-    const def = SKILL_CARDS[skill];
-    const W = 84;
-    const H = 20;
-    const rarity = (card.card?.rarity as string) ?? "common";
-    const rarityColor = RARITY_COLORS[rarity] ?? RARITY_COLORS.common;
-    const box = this.add
-      .rectangle(0, 0, W, H, 0x1c1c1c, 0.92)
-      .setStrokeStyle(2, rarityColor, 1);
-    const label = this.add
-      .text(0, 0, def ? def.title : skill, {
-        color: "#" + rarityColor.toString(16).padStart(6, "0"),
-        fontSize: "11px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 2,
-      })
-      .setOrigin(0.5);
-    const container = this.add
-      .container(card.x, card.y, [box, label])
-      .setDepth(2);
-    container.setSize(W, H);
-    const GPAD = 14; // generous hover/grab padding
-    container.setInteractive(
-      new Phaser.Geom.Rectangle(
-        -W / 2 - GPAD,
-        -H / 2 - GPAD,
-        W + GPAD * 2,
-        H + GPAD * 2,
-      ),
-      Phaser.Geom.Rectangle.Contains,
-    );
-    container.on("pointerover", () => {
-      container.setAlpha(0.9);
-      this.scheduleGroundCardTooltip(card, container);
-    });
-    container.on("pointerout", () => {
-      container.setAlpha(1);
-      this.cancelGroundCardTooltip();
-    });
-    container.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
-      // Left-click grabs the card (right-click stays a cast).
-      if (pointer.rightButtonDown()) return;
-      if (this.dragCard) return;
-      this.beginGroundCardGrab(cardId, card, container);
-    });
-    this.groundCardEntities.set(cardId, container);
-  }
-
-  /**
-   * Hover tooltip above a ground card: name, description and the card
-   * sprite on the right of the box.
-   */
-  /**
-   * Show the loot tooltip only after the pointer DWELLS on the card for
-   * a moment (~350ms). A quick pass-over (combat aiming, shooting past a
-   * drop) no longer pops the panel into view; moving away cancels it.
-   */
-  private scheduleGroundCardTooltip(
-    card: any,
-    entity: Phaser.GameObjects.Container,
-  ): void {
-    this.cancelGroundCardTooltip();
-    this.groundTooltipTimer = this.time.delayedCall(350, () => {
-      this.groundTooltipTimer = null;
-      this.showGroundCardTooltip(card, entity);
-    });
-  }
-
-  /** Cancel any pending dwell timer and hide a shown tooltip. */
-  private cancelGroundCardTooltip(): void {
-    if (this.groundTooltipTimer) {
-      this.groundTooltipTimer.remove(false);
-      this.groundTooltipTimer = null;
-    }
-    this.hideGroundCardTooltip();
-  }
-
-  private showGroundCardTooltip(
-    card: any,
-    entity: Phaser.GameObjects.Container,
-  ): void {
-    this.hideGroundCardTooltip();
-    const panel = this.buildCardTooltipPanel({
-      skill: card.skill as SkillId,
-      level: card.level ?? 1,
-      rarity: asRarity(card.card?.rarity ?? "common"),
-      modIds: (card.card?.modIds as string[]) ?? [],
-      modValues: (card.card?.modValues as number[]) ?? [],
-    });
-    this.groundCardTooltip = panel;
-    panel.setPosition(entity.x, entity.y - panel.height / 2 - 28);
-    panel.setDepth(100);
-  }
-
-  /**
-   * Build the styled card hover panel (title, rarity, description,
-   * rolled mod lines, card art preview) used by ground drops, the HUD
-   * slots and the character screen alike. Position it yourself.
-   */
-  private buildCardTooltipPanel(info: {
-    skill: SkillId;
-    level: number;
-    rarity: Rarity;
-    modIds: string[];
-    modValues: number[];
-  }): Phaser.GameObjects.Container {
-    const { skill, level, rarity } = info;
-    const def = SKILL_CARDS[skill];
-    const title = def ? def.title : skill;
-    const description = def ? def.description : "";
-    const W = 220;
-    const rarityColor = RARITY_COLORS[rarity] ?? RARITY_COLORS.common;
-    const rarityHex = "#" + rarityColor.toString(16).padStart(6, "0");
-    const modLines = info.modIds.map((m, idx) =>
-      "* " + formatModLine(m, info.modValues[idx]),
-    );
-    // Height grows with mod count (base 116 + 14 per mod, capped).
-    const H = 116 + Math.min(4, modLines.length) * 14;
-    const bg = this.add
-      .rectangle(0, 0, W, H, 0x000000, 0.88)
-      .setStrokeStyle(2, rarityColor, 0.95);
-    const nameText = this.add
-      .text(-W / 2 + 10, -H / 2 + 10, title + "  L" + level, {
-        color: rarityHex,
-        fontSize: "14px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 2,
-      })
-      .setOrigin(0, 0);
-    const rarityText = this.add
-      .text(-W / 2 + 10, -H / 2 + 26, RARITY_NAMES[rarity] ?? "Common", {
-        color: rarityHex,
-        fontSize: "10px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 2,
-      })
-      .setOrigin(0, 0);
-    const descText = this.add
-      .text(-W / 2 + 10, -H / 2 + 42, description, {
-        color: "#dddddd",
-        fontSize: "11px",
-        fontFamily: "monospace",
-        wordWrap: { width: W - 74 },
-        align: "left",
-      })
-      .setOrigin(0, 0);
-    const modsText = this.add
-      .text(-W / 2 + 10, -H / 2 + 58, modLines.join("\n"), {
-        color: "#88ff88",
-        fontSize: "11px",
-        fontFamily: "monospace",
-        wordWrap: { width: W - 74 },
-        align: "left",
-      })
-      .setOrigin(0, 0);
-    // Card preview: rarity base at full opacity + skill art over it.
-    const sprBase = this.add
-      .image(W / 2 - 32, 0, "card_sheet", rarityBaseFrame(rarity))
-      .setDisplaySize(48, 64);
-    const ttInset = 48 * CARD_ART_INSET_RATIO;
-    const sprArt = this.add
-      .image(W / 2 - 32, 0, "card_sheet", cardFrameForLevel(skill, level))
-      .setDisplaySize(48 - ttInset * 2, 64 - ttInset * 2)
-      .setAlpha(1);
-    return this.add.container(0, 0, [
-      bg,
-      nameText,
-      rarityText,
-      descText,
-      modsText,
-      sprBase,
-      sprArt,
-    ]);
-  }
-
-  /** Hide (destroy) the ground card hover tooltip. */
-  private hideGroundCardTooltip(): void {
-    if (this.groundCardTooltip) {
-      this.groundCardTooltip.destroy();
-      this.groundCardTooltip = null;
-    }
-  }
-
-  /**
-   * Grab a ground card: the box disappears from the map and follows the
-   * cursor as a held card. Releasing on a HUD slot equips it (server
-   * grants the skill); releasing on the map re-drops it at that spot.
-   */
-  private beginGroundCardGrab(
-    cardId: string,
-    card: any,
-    entity: Phaser.GameObjects.Container,
-  ): void {
-    if (!this.room || this.dragCard || this.invDrag) return;
-    // Range gate (same 96px reach rule the server enforces on pickup).
-    // Measured against the VISIBLE box (what the player is clicking),
-    // which is kept in sync with the schema position by the onChange
-    // listener — never a stale copy.
-    const p = this.currentPlayer;
-    if (!p) return;
-    const ex = entity.x;
-    const ey = entity.y;
-    if (Math.hypot(card.x - p.x, card.y - p.y) > 96 && Math.hypot(ex - p.x, ey - p.y) > 96) {
-      this.showPickupFailedToast("TOO FAR TO GRAB");
-      return;
-    }
-    this.cancelGroundCardTooltip();
-    // Build a held-card visual from the ground box (base + art layers).
-    const skill = ((card.card?.skill as SkillId) ?? card.skill) as SkillId;
-    const slot0 = this.cardSlots[0];
-    const gRarity = asRarity(card.card?.rarity);
-    const gInset = slot0.width * CARD_ART_INSET_RATIO;
-    const base = this.add
-      .image(0, 0, "card_sheet", rarityBaseFrame(gRarity))
-      .setDisplaySize(slot0.width, slot0.height);
-    const img = this.add
-      .image(0, 0, "card_sheet", cardFrameForLevel(skill, card.level ?? 1))
-      .setDisplaySize(slot0.width - gInset * 2, slot0.height - gInset * 2)
-      .setAlpha(1);
-    const cdFill = this.add
-      .rectangle(
-        0,
-        0,
-        slot0.width,
-        slot0.height,
-        CARD_CD_COLORS[skill] ?? 0xffffff,
-        0.45,
-      )
-      .setOrigin(0, 0)
-      .setVisible(false);
-    cdFill.setData("baseH", slot0.height);
-    cdFill.setData("baseW", slot0.width);
-    cdFill.x = -slot0.width / 2; // align fill with the card hitbox (origin 0,0)
-    const container = this.add
-      .container(this.input.activePointer.x, this.input.activePointer.y, [
-        base,
-        img,
-        cdFill,
-      ])
-      .setScrollFactor(0)
-      .setDepth(2000);
-    container.setScale(1.08);
-    const obj: HudCardObj = {
-      skill,
-      container,
-      base,
-      img,
-      cdFill,
-      targetSlot: -1,
-      rarity: gRarity,
-      modIds: card.card?.modIds ? Array.from(card.card.modIds) : [],
-      modValues: card.card?.modValues
-        ? Array.from(card.card.modValues as number[])
-        : [],
-    };
-    // Take the card off the ground visually (server state untouched).
-    entity.setVisible(false);
-    this.groundGrab = { cardId, card, entity, obj };
-    this.updatePlusHints();
-  }
-
-  /** Held ground card drag; ends by equipping to a slot or re-dropping. */
-  private updateGroundGrab(pointer: Phaser.Input.Pointer): void {
-    const g = this.groundGrab;
-    if (!g) return;
-    g.obj.container.setPosition(pointer.x, pointer.y);
-  }
-
-  /**
-   * Finish a ground grab:
-   *  - over a HUD slot  -> pickup (equip): server grants the skill and
-   *    the card is placed in that slot.
-   *  - anywhere else    -> re-drop the card at the cursor's world pos.
-   *  - too far / dead   -> card snaps back to its ground position.
-   */
-  private endGroundGrab(pointer: Phaser.Input.Pointer): void {
-    const g = this.groundGrab;
-    if (!g) return;
-    this.groundGrab = null;
-    const invIdx = this.invAtPointer(pointer);
-    if (invIdx >= 0 && !this.invCardsData[invIdx]) {
-      // STASH into the shelf: server moves the ground card into the
-      // inventory. Same pending-pickup guard as HUD equipping.
-      this.pendingPickups.add(g.cardId);
-      this.room?.send(17, { cardId: g.cardId, inv: invIdx });
-      g.obj.container.destroy();
-      g.entity.setVisible(true);
-      const grabbedId = g.cardId;
-      this.time.delayedCall(500, () => {
-        if (this.pendingPickups.has(grabbedId)) {
-          this.pendingPickups.delete(grabbedId);
-          this.showPickupFailedToast("PICKUP FAILED - TRY AGAIN");
-        }
-      });
-      this.updatePlusHints();
-      return;
-    }
-    const slotIdx = this.slotAtPointer(pointer);
-    if (slotIdx >= 0) {
-      // EQUIP into the released-over slot. The server places the card in
-      // that slot; if the slot was occupied, the old card drops to the
-      // ground at the player's feet. No other slot is touched.
-      this.pendingPickups.add(g.cardId);
-      this.pendingPickupSlots.set(g.cardId, slotIdx);
-      this.room?.send(11, { cardId: g.cardId, slot: slotIdx });
-      g.obj.container.destroy();
-      g.entity.setVisible(true);
-      // If the server rejects (just-dropped lock), surface it.
-      const grabbedId = g.cardId;
-      this.time.delayedCall(500, () => {
-        if (this.pendingPickups.has(grabbedId)) {
-          this.pendingPickups.delete(grabbedId);
-          this.pendingPickupSlots.delete(grabbedId);
-          this.showPickupFailedToast("PICKUP FAILED - TRY AGAIN");
-        }
-      });
-    } else {
-      // RE-DROP at the cursor's world position (server validates reach).
-      this.room?.send(12, {
-        cardId: g.cardId,
-        x: pointer.worldX,
-        y: pointer.worldY,
-      });
-      g.obj.container.destroy();
-      g.entity.setVisible(true);
-    }
-    this.updatePlusHints();
-  }
-
-  // ============================================================
-  // SLOT-BASED CARD SYSTEM
-  // ============================================================
-  /** Client mirror of the server's 5 equipped card slots. */
-  private slotCards: (SlotCard | null)[] = [
-    null,
-    null,
-    null,
-    null,
-    null,
-  ];
-  /** Live card objects indexed by slot (null = empty). */
-  private hudCards: (HudCardObj | null)[] = [null, null, null, null, null];
-  /** Input binding per slot (never changes): LMB, RMB, SPACE, 1, 2. */
-  private static readonly SLOT_INPUTS: string[] = [
-    "LMB",
-    "RMB",
-    "SPC",
-    "1",
-    "2",
-  ];
-  /** Skill level cache (mirrors synced skillLevels for card art). */
+  private slotCards: (SlotCard | null)[] = Array(5).fill(null);
+  private hudCards: (HudCardObj | null)[] = Array(5).fill(null);
   private skillLevelCache: Partial<Record<SkillId, number>> = {};
-  /** Input hint labels under each slot. */
-  private slotInputLabels: Phaser.GameObjects.Text[] = [];
-  /** "+" hints shown on empty slots while dragging. */
-  private slotPlusHints: Phaser.GameObjects.Text[] = [];
-  /** Drag state. Null while no card is grabbed. */
-  private dragCard: {
-    obj: HudCardObj;
-    fromSlot: number;
-    hoverSlot: number;
-  } | null = null;
-  /** True once the first server slot sync has been applied. */
-  private slotsSyncedOnce: boolean = false;
-  // ---- Skill-on-cooldown toast (shown above the HUD in light grey) ----
-  private cooldownToast!: Phaser.GameObjects.Text;
-
-  // ---- XP bar (top-center): thin blue bar + level badge + gain popups ----
-  private xpBarBack!: Phaser.GameObjects.Rectangle;
-  private xpBarFill!: Phaser.GameObjects.Rectangle;
-  /** White overlay that shows the XP gained portion; fades to reveal blue. */
-  private xpBarGain!: Phaser.GameObjects.Rectangle;
-  /** Small pill/badge in front of the XP bar showing current level. */
-  private levelBadge!: Phaser.GameObjects.Container;
-  private levelBadgeText!: Phaser.GameObjects.Text;
-  /** Numeric text overlay inside the XP bar ("120 / 1000"). */
-  private xpBarText!: Phaser.GameObjects.Text;
-  /** Last synced XP/level values used to detect gains. */
-  private lastKnownXp: number = -1;
-  private lastKnownLevel: number = -1;
-  /** Reusable "+N xp" floating text objects (pooled to avoid per-gain alloc). */
-  private xpGainPopups: Phaser.GameObjects.Text[] = [];
-  /** Pooled floating damage number texts (world-space). */
-  private damageTexts: Phaser.GameObjects.Text[] = [];
-  /** Per-entity last seen hitSeq (to detect new damage events). */
-  private entityHitSeqs: Record<string, number> = {};
-  /** Reusable level-up celebration toast. */
-  private levelUpToast!: Phaser.GameObjects.Text;
-  /** Spawn-grace countdown toast ("enemies will spawn in N"). */
-  private spawnCountdownToast: Phaser.GameObjects.Text | null = null;
-  /** Last rendered countdown second (avoids re-setting the text every frame). */
-  private spawnCountdownLastSec: number = -1;
-  /** Enemy id of this map's ELITE (null while none has been seen). */
-  private eliteEnemyId: string | null = null;
-  /** Last known state.eliteAlive (edge detection for announce toasts). */
-  private lastEliteAlive: boolean = false;
-  /** Toast shown while standing on a still-locked exit tile. */
-  private exitLockedToast: Phaser.GameObjects.Text | null = null;
-  /** Ground card entities by synced groundCards key. */
-  private groundCardEntities: Map<string, Phaser.GameObjects.Container> =
-    new Map();
-  /** Hover tooltip for ground cards (name / description / sprite). */
-  private groundCardTooltip: Phaser.GameObjects.Container | null = null;
-  /** Pending dwell timer for the ground-card hover tooltip. */
-  private groundTooltipTimer: Phaser.Time.TimerEvent | null = null;
-  /** Ground card ids we asked to pick up (awaiting server confirm). */
-  private pendingPickups: Set<string> = new Set();
-  /** Slot index a pending pickup should land in (cardId -> slot). */
-  private pendingPickupSlots: Map<string, number> = new Map();
-  /** Ground card currently grabbed by the cursor. */
-  private groundGrab: {
-    cardId: string;
-    card: any;
-    entity: Phaser.GameObjects.Container;
-    obj: HudCardObj;
-  } | null = null;
-  /** Full unscaled width of the XP bar (px). */
-  private xpBarFullWidth: number = 0;
-  /** Screen-space Y of the XP bar (px). */
-  private xpBarY: number = 0;
-
-  // ---- Map info button (top-right corner) + hover tooltip ----
-  private mapInfoButton!: Phaser.GameObjects.Image;
-  private mapInfoTooltip!: Phaser.GameObjects.Container;
-  private mapInfoTooltipBg!: Phaser.GameObjects.Graphics;
-
-  // ---- Character stats screen (toggle with C) ----
-  private charScreen!: Phaser.GameObjects.Container;
-  private charScreenVisible: boolean = false;
-  private charScreenKey!: Phaser.Input.Keyboard.Key;
-  private testSkillPointKey!: Phaser.Input.Keyboard.Key;
-  // Skill point badge (blinking) on the XP bar level text
-  private skillPointBadge!: Phaser.GameObjects.Container;
-  private skillPointBadgePulse: Phaser.Tweens.Tween | null = null;
-  private skillPointBadgeText!: Phaser.GameObjects.Text;
-  // Confirmation popup (reused)
-  private confirmPopup!: Phaser.GameObjects.Container;
-
-  // ---- Inventory screen (toggle with I) ----
-  private invScreen!: Phaser.GameObjects.Container;
-  private invScreenVisible: boolean = false;
-  private invScreenKey!: Phaser.Input.Keyboard.Key;
-  /** Tooltip shown when hovering a stored inventory card. */
-  private invCardTooltip: Phaser.GameObjects.Container | null = null;
-  /** Screen rects of the 20 shelf slots (drop targets + layout). */
-  private invSlotRects: Phaser.GameObjects.Rectangle[] = [];
-  /** Live inventory card objects, indexed 0..19 (null = empty). */
-  private invCards: (HudCardObj | null)[] = Array(20).fill(null);
-  /** Client mirror of the server's inventorySlots. */
   private invCardsData: (SlotCard | null)[] = Array(20).fill(null);
-  /** Inventory drag state (dragging a stored card). */
-  private invDrag: {
-    obj: HudCardObj;
-    fromInv: number;
-    hoverInv: number;
-  } | null = null;
 
-  // ---- Aim / firing ----
-  private aimAngle: number = 0;
-  // ---- Input ----
-  wasdKeys!: {
+  private dragCard: { obj: HudCardObj; fromSlot: number; hoverSlot: number } | null = null;
+  private invDrag: { obj: HudCardObj; fromInv: number; hoverInv: number } | null = null;
+
+  private levelUpToast!: Phaser.GameObjects.Text;
+  private spawnCountdownToast: Phaser.GameObjects.Text | null = null;
+  private spawnCountdownLastSec = -1;
+  private eliteEnemyId: string | null = null;
+  private lastEliteAlive = false;
+  private wasDead = false;
+  private slotsSyncedOnce = false;
+  private lastKnownXp = -1;
+  private lastKnownLevel = -1;
+
+  private damageTexts: Phaser.GameObjects.Text[] = [];
+  private entityHitSeqs: Record<string, number> = {};
+
+  private mapData!: LayeredMapData;
+  private mapId = "map1";
+  private transitioning = false;
+  private aimAngle = 0;
+  private debugHitboxes: Phaser.GameObjects.Graphics | null = null;
+  private debugEntityHitboxes: Phaser.GameObjects.Graphics | null = null;
+  private showHitboxes = false;
+  private hitboxToggleKey!: Phaser.Input.Keyboard.Key;
+  private hitboxToggleButton!: Phaser.GameObjects.Text;
+  private debugFPS!: Phaser.GameObjects.Text;
+
+  private wasdKeys!: {
     left: Phaser.Input.Keyboard.Key;
     right: Phaser.Input.Keyboard.Key;
     up: Phaser.Input.Keyboard.Key;
     down: Phaser.Input.Keyboard.Key;
   };
-
-  inputPayload: {
-    left: boolean;
-    right: boolean;
-    up: boolean;
-    down: boolean;
-    tick?: number;
-  } = {
+  private inputPayload = {
     left: false,
     right: false,
     up: false,
     down: false,
-    tick: undefined,
+    tick: undefined as number | undefined,
   };
-
-  // ---- Fixed timestep for client-side prediction ----
-  elapsedTime = 0;
-  fixedTimeStep = 1000 / 60;
-  currentTick: number = 0;
-
-  // ---- Player settings (must match server GAME_CONFIG) ----
-  // moveSpeed is now read from the server-synced Player schema
-  // (effective speed = base * speedMultiplier). Fall back to this
-  // constant until the first state snapshot arrives.
-  private moveSpeed: number = 120;
+  private elapsedTime = 0;
+  private fixedTimeStep = 1000 / 60;
+  private currentTick = 0;
+  private moveSpeed = 120;
   private readonly PLAYER_COLLISION_RADIUS = 10;
 
-  /**
-   * VFX SPAWN GAPS — distance from the caster's center to where the skill's
-   * visual effect spawns, measured along the aim direction.
-   *
-   * TWEAK THESE to adjust how far from the player/enemy center each skill's
-   * animation originates. Higher = spawns further out from the body.
-   *
-   * The gap is added on top of the caster's hitbox radius so the VFX always
-   * starts OUTSIDE the body.
-   */
   private readonly VFX_GAPS = {
-    bolter: 28, // muzzle flash distance from center
-    claw: 12, // claw sprite uses its own edge-based offset
-    pulse: 0, // pulse is centered on the caster (expanding circle)
-    shock: 10, // shock bolt originates at the caster
-    slam: 30, // slam sprite offset from center
-    heal: 0, // heal is centered on the caster
+    bolter: 28,
+    claw: 12,
+    pulse: 0,
+    shock: 10,
+    slam: 30,
+    heal: 0,
   };
 
-  // ---- Stats HUD (bottom-left HUD image + vertical HP bar + cards) ----
-  private hudImage!: Phaser.GameObjects.Image;
-  private hpFill!: Phaser.GameObjects.Rectangle;
-  private hpText!: Phaser.GameObjects.Text;
-  private statsText!: Phaser.GameObjects.Text;
-  private cardSlots: Phaser.GameObjects.Rectangle[] = [];
-  // HUD hitbox overlays (visible when showHitboxes is true)
-  private hudHitboxHP: Phaser.GameObjects.Rectangle | null = null;
-  private hudHitboxCards: Phaser.GameObjects.Rectangle[] = [];
-  // Scaled full-height of the HP bar (set in createStatsHUD)
-  private hpBarFullHeight: number = 0;
-  private hpBarFullWidth: number = 0;
-  // Shield bar (light blue) drawn just above the HP bar.
-  private shieldFill!: Phaser.GameObjects.Rectangle;
-  private shieldText!: Phaser.GameObjects.Text;
-  private shieldBarFullHeight: number = 0;
-  private shieldBarFullWidth: number = 0;
-  // Low-HP / low-shield edge vignettes (local player only).
-  private lowHpVignette: Phaser.GameObjects.Rectangle[] = [];
-  private lowShieldVignette: Phaser.GameObjects.Rectangle[] = [];
+  private bolterTooltip: Phaser.GameObjects.Container | null = null;
+  private slotPlusHints: Phaser.GameObjects.Text[] = [];
 
-  // ---- Character animation state ----
-  private animationsCreated: boolean = false;
-  private lastDirection: string = "left"; // last horizontal facing (left/right)
-
-  // ---- Debug HUD (fixed to screen) ----
-  private debugFPS!: Phaser.GameObjects.Text;
-  private showHitboxes: boolean = false;
-  private debugHitboxes: Phaser.GameObjects.Graphics | null = null;
-  /** Live entity hitbox overlay (player/enemy/projectile/claw circles). */
-  private debugEntityHitboxes: Phaser.GameObjects.Graphics | null = null;
-  private hitboxToggleKey!: Phaser.Input.Keyboard.Key;
-  private hitboxToggleButton!: Phaser.GameObjects.Text;
-
-  /**
-   * Per-map render data keyed by the SERVER's mapId (state.mapId).
-   * One scene, one room: when the server broadcasts "mapTransition",
-   * this scene swaps its map render in place — no reconnect.
-   */
-  static readonly MAP_CONFIGS: Record<
-    string,
-    {
-      mapData: LayeredMapData;
-      mapInfoKey: string; // key into MAP_INFO (display)
-    }
-  > = {
-    map1: {
-      mapData: LAYERED_MAP,
-      mapInfoKey: "game_room",
-    },
-    map2: {
-      mapData: LAYERED_MAP_2,
-      mapInfoKey: "game_room_2",
-    },
+  static readonly MAP_CONFIGS: Record<string, { mapData: LayeredMapData; mapInfoKey: string }> = {
+    map1: { mapData: LAYERED_MAP, mapInfoKey: "game_room" },
+    map2: { mapData: LAYERED_MAP_2, mapInfoKey: "game_room_2" },
   };
-
-  private mapData!: LayeredMapData;
-  /** Server mapId of the map currently rendered ("map1" | "map2"). */
-  private mapId: string = "map1";
-  private transitioning: boolean = false;
 
   constructor(config: Phaser.Types.Scenes.SettingsConfig) {
     super(config);
   }
 
-  // ============================================================
-  // INITIALIZATION
-  // ============================================================
-
   async create() {
-    // ---- Clear ALL stale state from any previous run of this scene ----
-    // When the scene is stopped and relaunched (e.g. map2 -> map1),
-    // Phaser destroys all game objects but the TS class fields still
-    // hold references to them. Using those references crashes.
-    // We must null-out every field that holds a game object or
-    // per-scene mutable state so that create() can build fresh ones.
     this.currentPlayer = null as any;
     this.currentPlayerState = null;
     this.transitioning = false;
@@ -865,456 +216,222 @@ export class GameScene extends Phaser.Scene {
     this.enemyLastPos = {};
     this.projLastPos = {};
     this.entityHitSeqs = {};
-    this.cardSlots = [];
-    this.hudHitboxCards = [];
-    this.xpGainPopups = [];
-    this.damageTexts = [];
-    this.animationsCreated = false;
-    this.enemyAnimationsCreated = false;
-    this.bolterMuzzleAnimCreated = false;
-    this.clawAnimCreated = false;
-    this.pulseAnimCreated = false;
-    this.slamAnimCreated = false;
-    this.shockAnimCreated = false;
-    this.lastKnownXp = -1;
-    this.lastKnownLevel = -1;
-    // Null out game object references so create* methods rebuild them
-    this.slotCards = [null, null, null, null, null];
-    this.hudCards = [null, null, null, null, null];
-    this.skillLevelCache = {};
-    this.slotInputLabels = [];
-    this.slotPlusHints = [];
     this.slotsSyncedOnce = false;
+    this.slotCards = Array(5).fill(null);
+    this.hudCards = Array(5).fill(null);
+    this.skillLevelCache = {};
+    this.slotPlusHints = [];
     this.dragCard = null;
-    this.groundCardEntities = new Map();
-    this.groundCardTooltip = null;
-    this.groundTooltipTimer = null;
-    this.pendingPickups = new Set();
-    this.pendingPickupSlots = new Map();
-    this.groundGrab = null;
-    this.hudImage = null as any;
-    this.hpFill = null as any;
-    this.hpText = null as any;
-    this.statsText = null as any;
-    this.debugFPS = null as any;
-    this.xpBarBack = null as any;
-    this.xpBarFill = null as any;
-    this.xpBarGain = null as any;
-    this.levelBadge = null as any;
-    this.levelBadgeText = null as any;
-    this.xpBarText = null as any;
-    this.levelUpToast = null as any;
+    this.invDrag = null;
     this.spawnCountdownToast = null;
     this.spawnCountdownLastSec = -1;
     this.eliteEnemyId = null;
     this.lastEliteAlive = false;
-    this.exitLockedToast = null;
-    this.mapInfoButton = null as any;
-    this.mapInfoTooltip = null as any;
-    this.mapInfoTooltipBg = null as any;
-    this.charScreen = null as any;
-    this.charScreenVisible = false;
-    this.skillPointBadge = null as any;
-    this.skillPointBadgeText = null as any;
-    this.confirmPopup = null as any;
-    this.upgradeToast = null as any;
-    this.cooldownToast = null as any;
+    this.lastKnownXp = -1;
+    this.lastKnownLevel = -1;
+    this.aimAngle = 0;
     this.debugHitboxes = null;
     this.debugEntityHitboxes = null;
-    this.hitboxToggleButton = null as any;
-    this.deathOverlay = null;
+    this.bolterTooltip = null;
+    this.deathScreen = { container: null };
+    this.groundCards = createGroundCards();
 
-    // ---- Set up keyboard input (WASD) ----
-    this.wasdKeys = this.input.keyboard.addKeys({
-      left: Phaser.Input.Keyboard.KeyCodes.A,
-      right: Phaser.Input.Keyboard.KeyCodes.D,
-      up: Phaser.Input.Keyboard.KeyCodes.W,
-      down: Phaser.Input.Keyboard.KeyCodes.S,
-    }) as any;
+    const bindings = bindKeyboard(this);
+    this.wasdKeys = bindings.wasdKeys;
 
-    // ---- Mouse aim (world-space) + left-click to fire bolter ----
     this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
-      const wx = pointer.worldX;
-      const wy = pointer.worldY;
-      if (this.currentPlayer) {
-        this.aimAngle = Math.atan2(
-          wy - this.currentPlayer.y,
-          wx - this.currentPlayer.x,
-        );
-      }
+      updateAimAngle(pointer, this.currentPlayer, { angle: this.aimAngle });
     });
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       if (!this.currentPlayer || !this.room) return;
-      // While a card is grabbed, clicks only manage the drag.
-      if (this.dragCard) return;
-      if (this.invDrag) return;
-      // Never cast while grabbing a ground card (or clicking one).
-      if (this.groundGrab) return;
-      if (this.pointerOverGroundCard(pointer)) return;
-      // Left-click over a HUD card grabs the card instead of casting.
+      if (this.dragCard || this.invDrag || this.groundCards.grab) return;
+      if (pointerOverGroundCard(this.groundCards, pointer)) return;
       if (this.pointerOverHudCard(pointer)) return;
-      const wx = pointer.worldX;
-      const wy = pointer.worldY;
       const angle = Math.atan2(
-        wy - this.currentPlayer.y,
-        wx - this.currentPlayer.x,
+        pointer.worldY - this.currentPlayer.y,
+        pointer.worldX - this.currentPlayer.x,
       );
-      // Slots 0/1 are mouse buttons (fixed rule).
-      const slotIdx = pointer.rightButtonDown() ? 1 : 0;
+      const slotIdx = slotIndexForPointer(pointer);
       this.castSlot(slotIdx, angle);
     });
-
-    // Card drag release (mouse up anywhere).
     this.input.on("pointerup", (pointer: Phaser.Input.Pointer) => {
       if (this.dragCard) this.endCardDrag(pointer);
       else if (this.invDrag) this.endInvCardDrag(pointer);
-      else if (this.groundGrab) this.endGroundGrab(pointer);
+      else if (this.groundCards.grab) endGroundGrab(this, this.groundCards, this.groundCardCallbacks, pointer);
     });
     this.input.on("pointerupoutside", (pointer: Phaser.Input.Pointer) => {
       if (this.dragCard) this.endCardDrag(pointer);
       else if (this.invDrag) this.endInvCardDrag(pointer);
-      else if (this.groundGrab) this.endGroundGrab(pointer);
+      else if (this.groundCards.grab) endGroundGrab(this, this.groundCards, this.groundCardCallbacks, pointer);
     });
-    // Stop the browser context menu over HUD cards (right-click grabs).
-    this.input.mouse?.disableContextMenu();
 
-    // ---- "0" key levels up the player (debug — test enemy scaling) ----
-    this.input.keyboard
-      ?.addKey(Phaser.Input.Keyboard.KeyCodes.ZERO)
-      ?.on("down", () => {
-        if (!this.room) return;
-        this.room.send(9, {});
-      });
+    this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.ZERO)?.on("down", () => {
+      if (this.room) this.room.send(9, {});
+    });
+    this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)?.on("down", () => {
+      this.castSlot(2, this.aimAngle);
+    });
+    this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.ONE)?.on("down", () => {
+      this.castSlot(3, this.aimAngle);
+    });
+    this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.TWO)?.on("down", () => {
+      this.castSlot(4, this.aimAngle);
+    });
 
-    // ---- Space key casts whatever is in slot 2 ----
-    this.input.keyboard
-      ?.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)
-      ?.on("down", () => {
-        this.castSlot(2, this.aimAngle);
-      });
-
-    // ---- "1" key casts whatever is in slot 3 ----
-    this.input.keyboard
-      ?.addKey(Phaser.Input.Keyboard.KeyCodes.ONE)
-      ?.on("down", () => {
-        this.castSlot(3, this.aimAngle);
-      });
-
-    // ---- "2" key casts whatever is in slot 4 ----
-    this.input.keyboard
-      ?.addKey(Phaser.Input.Keyboard.KeyCodes.TWO)
-      ?.on("down", () => {
-        this.castSlot(4, this.aimAngle);
-      });
-
-
-    // ---- Resolve this scene's map + room config from its scene key ----
-    // The map comes from the SERVER (state.mapId) — one room rotates maps
-    // in place. On first boot the room always starts on map1.
     this.mapId = "map1";
-    this.mapData = GameScene.MAP_CONFIGS["map1"].mapData;
+    this.mapData = (GameScene.MAP_CONFIGS as any)["map1"].mapData;
     this.transitioning = false;
 
-    // ---- Run restart intro: if launched with { fadeIn } (death on a
-    //      later map restarts the run), cover the screen with a black
-    //      rectangle + loading image while the room connects. ----
-    const startData = this.sys.settings.data as
-      | { fadeIn?: boolean }
-      | undefined;
+    const startData = this.sys.settings.data as { fadeIn?: boolean } | undefined;
     const isFadeIn = !!startData?.fadeIn;
-
     let cover: Phaser.GameObjects.Rectangle | null = null;
     let loadingImg: Phaser.GameObjects.Image | null = null;
     if (isFadeIn) {
       const { width, height } = this.scale;
-      cover = this.add
-        .rectangle(0, 0, width, height, 0x000000)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setDepth(1000);
-      loadingImg = this.add
-        .image(
-          this.cameras.main.centerX,
-          this.cameras.main.centerY,
-          "loading_screen",
-        )
-        .setScrollFactor(0)
-        .setDepth(1001);
+      cover = this.add.rectangle(0, 0, width, height, 0x000000).setOrigin(0, 0).setScrollFactor(0).setDepth(1000);
+      loadingImg = this.add.image(this.cameras.main.centerX, this.cameras.main.centerY, "loading_screen").setScrollFactor(0).setDepth(1001);
     }
 
-    // ---- Render the layered map (baselayer + interactive + zones) ----
     this.renderLayeredMap();
     this.renderDebugHitboxes();
-
-    // Live entity hitbox overlay (redrawn each frame)
     this.debugEntityHitboxes = this.add.graphics().setDepth(11);
     this.debugEntityHitboxes.setVisible(false);
 
-    // ---- Debug HUD (FPS + hitbox toggle button) ----
     this.createDebugHUD();
-
-    // ---- Stats HUD (health / level / xp / attack / crit) ----
-    this.createStatsHUD();
-    // ---- XP bar (top-center) ----
-    this.createXpBar();
-    // ---- Map info button (top-right) ----
-    this.createMapInfoButton();
-    // ---- Character stats screen (press C) ----
-    this.createCharacterScreen();
-    this.createInventoryScreen();
-    // Slot-based card HUD (5 slots, default layout).
+    this.statsHud = createStatsHud(this, { initialShowHitboxes: false });
+    this.xpBar = createXpBar(this);
+    this.mapInfo = createMapInfoButton(
+      this,
+      () => GameScene.MAP_CONFIGS[this.mapId]?.mapInfoKey ?? "game_room",
+      () => (this.room?.metadata?.modifiers as any[]) ?? [],
+    );
+    const confirmPopup = createConfirmPopup(this);
+    this.charScreen = createCharacterScreen({
+      scene: this,
+      confirmPopup,
+      getPlayer: () => this.currentPlayerState,
+      sendStatSpend: (stat: string) => this.room?.send(6, { stat }),
+      sendCardUpgrade: (slot: number) => this.room?.send(7, { slot }),
+    });
+    this.charScreen.setHideMapInfoTooltip(() => {
+      if (this.mapInfo?.tooltip) this.mapInfo.tooltip.setVisible(false);
+    });
+    setLevelClickHandler(this.xpBar, () => {
+      if (!this.charScreen.isVisible()) this.charScreen.toggle();
+    });
+    this.invScreen = createInventoryScreen({
+      scene: this,
+      slotW: this.statsHud.cardSlots[0].width,
+      slotH: this.statsHud.cardSlots[0].height,
+      pullState: () => this.pullInventoryState(),
+      sendSlotToInv: (slot, inv, empty) => this.room?.send(empty ? 14 : 19, { slot, inv }),
+      sendInvSwap: (from, to) => this.room?.send(18, { from, to }),
+      sendInvToSlot: (inv, slot) => this.room?.send(15, { inv, slot }),
+      sendInvDrop: (inv) => this.room?.send(16, { inv }),
+      isDragFree: () => !this.dragCard && !this.invDrag && !this.groundCards.grab,
+      onDragStart: (i: number) => this.beginInvCardDrag(i),
+    });
     this.initSlotCards();
 
-    // ---- F3 to toggle hitbox overlay ----
-    this.hitboxToggleKey = this.input.keyboard.addKey(
-      Phaser.Input.Keyboard.KeyCodes.F3,
-    );
+    this.hitboxToggleKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F3);
 
-    // ---- Connect to the Colyseus server ----
+    this.groundCardCallbacks = {
+      canGrab: () => !this.dragCard && !this.invDrag,
+      getPlayer: () => this.currentPlayer as any,
+      getSlotTemplate: () => this.hudCards[0],
+      sendPickupToSlot: (cardId, slot) => this.room?.send(11, { cardId, slot }),
+      sendPickupToInventory: (cardId, inv) => this.room?.send(17, { cardId, inv }),
+      sendRedrop: (cardId, x, y) => this.room?.send(12, { cardId, x, y }),
+      invAtPointer: (p) => this.invScreen ? this.invScreen.slotAtPointer(p) : -1,
+      slotAtPointer: (p) => this.slotAtPointer(p),
+      refreshHud: () => {
+        this.syncSlotsFromServer(true);
+        this.syncInventoryFromServer(true);
+      },
+      updatePlusHints: () => this.updatePlusHints(),
+      getCardCdColor: () => undefined,
+    };
+
     await this.connect();
-
     if (!this.room) {
-      // Connection failed — still drop the cover so the player isn't stuck.
       if (cover) cover.destroy();
       if (loadingImg) loadingImg.destroy();
       return;
     }
 
-    // ---- Late-joiner correction: the room may already be past map1
-    //      (one room rotates maps; matchmaking can drop you into a
-    //      session mid-run). If so, re-render the correct map BEFORE
-    //      the reveal so the player never sees the wrong map. ----
-    {
-      const serverMapId: string =
-        (this.room as any)?.state?.mapId ?? "map1";
-      const cfgLate = GameScene.MAP_CONFIGS[serverMapId];
-      if (cfgLate && serverMapId !== this.mapId) {
-        this.children.list
-          .filter(
-            (obj) =>
-              (obj as any).texture &&
-              ((obj as any).texture.key === "layered_baselayer" ||
-                (obj as any).texture.key === "layered_interactive"),
-          )
-          .forEach((obj) => obj.destroy());
-        if (this.debugHitboxes) {
-          this.debugHitboxes.destroy();
-          this.debugHitboxes = null;
-        }
-        this.mapId = serverMapId;
-        this.mapData = cfgLate.mapData;
-        this.renderLayeredMap();
-        this.renderDebugHitboxes();
-        if (this.debugHitboxes) {
-          this.debugHitboxes.setVisible(this.showHitboxes);
-        }
-        this.cameras.main.setBounds(
-          0,
-          0,
-          this.mapData.widthPx,
-          this.mapData.heightPx,
-        );
+    const serverMapId: string = (this.room as any)?.state?.mapId ?? "map1";
+    const cfgLate = (GameScene.MAP_CONFIGS as any)[serverMapId];
+    if (cfgLate && serverMapId !== this.mapId) {
+      this.children.list.filter((obj) =>
+        (obj as any).texture &&
+        ((obj as any).texture.key === "layered_baselayer" ||
+          (obj as any).texture.key === "layered_interactive")
+      ).forEach((obj) => obj.destroy());
+      if (this.debugHitboxes) {
+        this.debugHitboxes.destroy();
+        this.debugHitboxes = null;
       }
+      this.mapId = serverMapId;
+      this.mapData = cfgLate.mapData;
+      this.renderLayeredMap();
+      this.renderDebugHitboxes();
+      if (this.debugHitboxes) this.debugHitboxes.setVisible(this.showHitboxes);
     }
 
-    // ---- If this was a map transition, fade the black cover + loading
-    //      image out to reveal the freshly loaded map. ----
-    if (isFadeIn && cover && loadingImg) {
-      const FADE_MS = 400;
-      this.tweens.add({
-        targets: [cover, loadingImg],
-        alpha: { from: 1, to: 0 },
-        duration: FADE_MS,
-        ease: "Linear",
-        onComplete: () => {
-          cover?.destroy();
-          loadingImg?.destroy();
-        },
+    this.bindRoomStateListeners();
+
+    if (isFadeIn && cover) {
+      this.cameras.main.fadeIn(400, 0, 0, 0);
+      cover.destroy();
+      if (loadingImg) loadingImg.destroy();
+    }
+  }
+
+  async connect() {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const roomPromise = this.client.joinOrCreate("game_room", {});
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error("Room connection timeout")), 10000);
       });
+      this.room = await Promise.race([roomPromise, timeoutPromise]);
+    } catch (e) {
+      console.error("Failed to connect:", e);
+      this.room = null;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
+  }
 
-    // ---- Server-authoritative map transition (same room, new map) ----
-    this.room.onMessage("mapTransition", (msg: { from: string; to: string }) => {
-      this.performMapSwap(msg.to);
-    });
+  bindRoomStateListeners() {
+    const cb = (this.room as any).callbacks as any;
 
-    // ============================================================
-    // COLYSEUS STATE LISTENERS (v0.17 API — use Callbacks.get())
-    // ============================================================
-    const callbacks = Callbacks.get(this.room as any) as any;
-
-    // Player added to the room
-    callbacks.onAdd("players", (player: any, sessionId: string) => {
-      const sprite = this.add
-        .sprite(player.x, player.y, "player_sheet", 0)
-        .setDepth(3);
-
-      // Create player animations once (shared by all sprites)
-      if (!this.animationsCreated) {
-        this.createCharacterAnimations();
-        this.animationsCreated = true;
-      }
-
-      sprite.setFlipX(false); // art faces LEFT by default
-      sprite.anims.play("player_idle");
-      this.playerEntities[sessionId] = sprite;
-
+    cb.onAdd("players", (player: any, sessionId: string) => {
       if (sessionId === this.room.sessionId) {
-        // ---- LOCAL PLAYER ----
-        this.currentPlayer = sprite;
-        this.currentPlayerState = player;
-
-        // Camera follows the local player
-        this.cameras.main.startFollow(sprite, true, 0.1, 0.1);
-        this.cameras.main.setBounds(
-          0,
-          0,
-          this.mapData.widthPx,
-          this.mapData.heightPx,
-        );
-
-        // When the server sends a new position, reconcile if needed
-        callbacks.onChange(player, () => {
-          if (this.currentPlayer) {
-            // Keep our effective move speed synced with the server
-            // (so a slow debuff slows our prediction too).
-            this.moveSpeed = player.moveSpeed;
-
-            const dx = Math.abs(player.x - this.currentPlayer.x);
-            const dy = Math.abs(player.y - this.currentPlayer.y);
-            // Snap to server position if we're far off (teleport, correction)
-            if (dx > 32 || dy > 32) {
-              this.currentPlayer.x = player.x;
-              this.currentPlayer.y = player.y;
-            }
-            // Refresh the stats HUD
-            this.updateStatsHUD(player);
-            // Refresh the XP bar (detects XP gain / level-up)
-            this.updateXpBar(player);
-            // Sync skill levels into the slot-card cache.
-            this.syncSkillLevel(player, "shock");
-            this.syncSkillLevel(player, "claw");
-            this.syncSkillLevel(player, "heal");
-            this.syncSkillLevel(player, "pulse");
-            this.syncSkillLevel(player, "slam");
-            this.syncSkillLevel(player, "dash");
-            this.syncSkillLevel(player, "vortex");
-            this.syncSkillLevel(player, "bolter");
-            this.syncSkillLevel(player, "shield");
-            // Mirror the server's equipped card slots into the HUD.
-            this.syncSlotsFromServer(false);
-            // Mirror the server's inventory slots into the I-tab.
-            this.syncInventoryFromServer(false);
-            this.currentPlayer.setData("attack", player.attack ?? 100);
-            // Per-slot cooldowns + heal charges (each slot independent).
-            this.currentPlayer.setData(
-              "slotCooldownEndsAt",
-              Array.from(player.slotCooldownEndsAt ?? []),
-            );
-            this.currentPlayer.setData(
-              "slotHealKills",
-              Array.from(player.slotHealKills ?? []),
-            );
-            this.currentPlayer.setData(
-              "hitFlashUntil",
-              player.hitFlashUntil ?? 0,
-            );
-            this.currentPlayer.setData("shockUntil", player.shockUntil ?? 0);
-            this.currentPlayer.setData(
-              "invincibleUntil",
-              player.invincibleUntil ?? 0,
-            );
-            this.currentPlayer.setData("hitboxW", player.hitboxW ?? 10);
-            this.currentPlayer.setData("hitboxH", player.hitboxH ?? 10);
-            // Detect damage taken by local player.
-            const pseq = player.hitSeq ?? 0;
-            const pprev = this.entityHitSeqs["__local__"] ?? 0;
-            if (pseq !== pprev) {
-              this.entityHitSeqs["__local__"] = pseq;
-              if (player.lastHitDamage > 0) {
-                this.showDamageNumber(
-                  this.currentPlayer.x,
-                  this.currentPlayer.y,
-                  player.lastHitDamage,
-                  !!player.lastHitCrit,
-                  (player as any).lastShieldDamage,
-                  (player as any).lastHpDamage,
-                );
-              }
-            }
-          }
-        });
+        this.createLocalPlayer(player);
       } else {
-        // ---- REMOTE PLAYER ----
-        // Store server position for interpolation
-        callbacks.onChange(player, () => {
-          sprite.setData("serverX", player.x);
-          sprite.setData("serverY", player.y);
-          sprite.setData("hitFlashUntil", player.hitFlashUntil ?? 0);
-          sprite.setData("hitboxW", player.hitboxW ?? 10);
-          sprite.setData("hitboxH", player.hitboxH ?? 10);
-        });
+        this.createRemotePlayer(player, sessionId);
       }
     });
 
-    // Player removed from the room
-    callbacks.onRemove("players", (_player: any, sessionId: string) => {
+    cb.onRemove("players", (_p: any, sessionId: string) => {
       const entity = this.playerEntities[sessionId];
-      if (entity) {
-        entity.destroy();
-        delete this.playerEntities[sessionId];
-      }
+      if (entity) { entity.destroy(); delete this.playerEntities[sessionId]; }
     });
 
-    // ============================================================
-    // ENEMY STATE LISTENERS
-    // ============================================================
-    callbacks.onAdd("enemies", (enemy: any, enemyId: string) => {
-      // Create enemy animations once (shared by all enemy sprites)
-      if (!this.enemyAnimationsCreated) {
-        this.createEnemyAnimations();
-        this.enemyAnimationsCreated = true;
-      }
-
+    cb.onAdd("enemies", (enemy: any, enemyId: string) => {
+      if (!this.anims.exists("tri_idle")) createEnemyAnimations(this);
       const isOrck = enemy.typeId === "orck";
       const isTau = enemy.typeId === "tau";
       const isMech = enemy.typeId === "mechanicus";
-        const isCaster = enemy.typeId === "caster";
-      const textureKey = isTau
-        ? "tau_sheet"
-        : isMech
-          ? "mechanicus_sheet"
-          : isCaster
-            ? "caster_sheet"
-          : isOrck
-            ? "orck_sheet"
-            : "tyranid_sheet";
-      const idleAnim = isTau
-        ? "tau_idle"
-        : isMech
-          ? "mechanicus_idle"
-          : isCaster
-            ? "caster_idle"
-          : isOrck
-            ? "orck_idle"
-            : "tri_idle";
+      const isCaster = enemy.typeId === "caster";
+      const textureKey = isTau ? "tau_sheet" : isMech ? "mechanicus_sheet" : isCaster ? "caster_sheet" : isOrck ? "orck_sheet" : "tyranid_sheet";
+      const idleAnim = isTau ? "tau_idle" : isMech ? "mechanicus_idle" : isCaster ? "caster_idle" : isOrck ? "orck_idle" : "tri_idle";
       const isElite = !!enemy.isElite;
-      const displaySize = isTau
-          ? 88
-          : isMech
-            ? 88
-            : isCaster
-              ? 88
-              : isOrck
-                ? 80
-                : 64;
+      const displaySize = isTau || isMech || isCaster ? 88 : isOrck ? 80 : 64;
       const eliteSize = Math.round(displaySize * 1.6);
-      const sprite = this.add
-        .sprite(enemy.x, enemy.y, textureKey, 0)
-        .setDisplaySize(
-          isElite ? eliteSize : displaySize,
-          isElite ? eliteSize : displaySize,
-        )
+      const sprite = this.add.sprite(enemy.x, enemy.y, textureKey, 0)
+        .setDisplaySize(isElite ? eliteSize : displaySize, isElite ? eliteSize : displaySize)
         .setDepth(isElite ? 8 : 3);
       sprite.anims.play(idleAnim);
       this.enemyEntities[enemyId] = sprite;
@@ -1322,60 +439,29 @@ export class GameScene extends Phaser.Scene {
       sprite.setData("title", enemy.title ?? "");
       if (isElite) this.eliteEnemyId = enemyId;
 
-      // ---- Enemy HP bar (bg + fill) floating above the sprite ----
       const hpW = isElite ? 64 : 38;
       const hpH = isElite ? 7 : 5;
       const barY = isElite ? -58 : -42;
-      const hpBg = this.add
-        .rectangle(0, barY, hpW, hpH, 0x000000, 0.7)
-        .setStrokeStyle(1, isElite ? 0xffd700 : 0x000000, 0.9);
-      const hpFill = this.add
-        .rectangle(-hpW / 2, barY, hpW, hpH, isElite ? 0xff9900 : 0xff3333)
-        .setOrigin(0, 0.5);
-      // White translucent shield bar overlaid on top of the HP bar.
-      // Visible only when the enemy has a shield (maxShield > 0).
-      const shieldFill = this.add
-        .rectangle(-hpW / 2, barY, hpW, hpH, 0xffffff, 0.6)
-        .setOrigin(0, 0.5)
-        .setVisible(false);
-      // Enemy level text shown in front of (left of) the HP bar
-      const lvText = this.add
-        .text(-hpW / 2 - 4, barY, String(enemy.level ?? 1), {
-          color: isElite ? "#ffd700" : "#ffffff",
-          fontSize: "9px",
-          fontFamily: "monospace",
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(1, 0.5);
-      const barChildren: Phaser.GameObjects.GameObject[] = [
-        hpBg,
-        hpFill,
-        shieldFill,
-        lvText,
-      ];
+      const hpBg = this.add.rectangle(0, barY, hpW, hpH, 0x000000, 0.7).setStrokeStyle(1, isElite ? 0xffd700 : 0x000000, 0.9);
+      const hpFill = this.add.rectangle(-hpW / 2, barY, hpW, hpH, isElite ? 0xff9900 : 0xff3333).setOrigin(0, 0.5);
+      const shieldFill = this.add.rectangle(-hpW / 2, barY, hpW, hpH, 0xffffff, 0.6).setOrigin(0, 0.5).setVisible(false);
+      const lvText = this.add.text(-hpW / 2 - 4, barY, String(enemy.level ?? 1), {
+        color: isElite ? "#ffd700" : "#ffffff",
+        fontSize: "9px",
+        fontFamily: "monospace",
+        stroke: "#000000",
+        strokeThickness: 2,
+      }).setOrigin(1, 0.5);
+      const barChildren: Phaser.GameObjects.GameObject[] = [hpBg, hpFill, shieldFill, lvText];
       if (isElite) {
-        barChildren.push(
-          this.add
-            .text(0, barY - 11, "ELITE", {
-              color: "#ffd700",
-              fontSize: "10px",
-              fontFamily: "monospace",
-              fontStyle: "bold",
-              stroke: "#000000",
-              strokeThickness: 3,
-            })
-            .setOrigin(0.5),
-        );
+        barChildren.push(this.add.text(0, barY - 11, "ELITE", {
+          color: "#ffd700", fontSize: "10px", fontFamily: "monospace", fontStyle: "bold",
+          stroke: "#000000", strokeThickness: 3,
+        }).setOrigin(0.5));
       }
-      const hpBar = this.add
-        .container(enemy.x, enemy.y, barChildren)
-        .setDepth(5);
+      const hpBar = this.add.container(enemy.x, enemy.y, barChildren).setDepth(5);
       this.enemyHpBars[enemyId] = hpBar;
-
       this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
-
-      // Initialize data so render loop works from the first frame.
       sprite.setData("hitFlashUntil", enemy.hitFlashUntil ?? 0);
       sprite.setData("shockUntil", enemy.shockUntil ?? 0);
       sprite.setData("hitboxW", enemy.hitboxW ?? 12);
@@ -1387,7 +473,7 @@ export class GameScene extends Phaser.Scene {
       sprite.setData("level", enemy.level ?? 1);
       sprite.setData("attacking", false);
 
-      callbacks.onChange(enemy, () => {
+      cb.onChange(enemy, () => {
         sprite.setData("serverX", enemy.x);
         sprite.setData("serverY", enemy.y);
         sprite.setData("facingRight", !!enemy.facingRight);
@@ -1403,85 +489,50 @@ export class GameScene extends Phaser.Scene {
         sprite.setData("hitboxH", enemy.hitboxH ?? 12);
         sprite.setData("attacking", !!enemy.attacking);
         this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
-        // Detect new damage events via hitSeq counter.
         const seq = enemy.hitSeq ?? 0;
         const prev = this.entityHitSeqs[enemyId] ?? 0;
         if (seq !== prev) {
           this.entityHitSeqs[enemyId] = seq;
           if (enemy.lastHitDamage > 0) {
-            this.showDamageNumber(
-              enemy.x,
-              enemy.y,
-              enemy.lastHitDamage,
-              !!enemy.lastHitCrit,
-              (enemy as any).lastShieldDamage,
-              (enemy as any).lastHpDamage,
-            );
+            spawnDamageNumber(this, this.damageTexts, enemy.x, enemy.y,
+              enemy.lastHitDamage, !!enemy.lastHitCrit,
+              (enemy as any).lastShieldDamage, (enemy as any).lastHpDamage);
           }
         }
       });
     });
 
-    callbacks.onRemove("enemies", (enemy: any, enemyId: string) => {
-      // Show killing blow damage number (often missed when enemy is one-shot)
+    cb.onRemove("enemies", (enemy: any, enemyId: string) => {
       if (enemy && enemy.lastHitDamage > 0) {
-        this.showDamageNumber(
+        spawnDamageNumber(this, this.damageTexts,
           enemy.x ?? this.enemyLastPos[enemyId]?.x ?? 0,
           enemy.y ?? this.enemyLastPos[enemyId]?.y ?? 0,
-          enemy.lastHitDamage,
-          !!enemy.lastHitCrit,
-          (enemy as any).lastShieldDamage,
-          (enemy as any).lastHpDamage,
-        );
+          enemy.lastHitDamage, !!enemy.lastHitCrit,
+          (enemy as any).lastShieldDamage, (enemy as any).lastHpDamage);
       }
-      // Spawn blood splat VFX at enemy death position
       const dx = enemy?.x ?? this.enemyLastPos[enemyId]?.x ?? 0;
       const dy = enemy?.y ?? this.enemyLastPos[enemyId]?.y ?? 0;
-      this.spawnBloodSplat(dx, dy);
-
-      // Elite cleanup.
+      spawnBloodSplat(this, dx, dy);
       if (enemyId === this.eliteEnemyId) this.eliteEnemyId = null;
-
       const entity = this.enemyEntities[enemyId];
-      if (entity) {
-        entity.destroy();
-        delete this.enemyEntities[enemyId];
-      }
+      if (entity) { entity.destroy(); delete this.enemyEntities[enemyId]; }
       const hpBar = this.enemyHpBars[enemyId];
-      if (hpBar) {
-        hpBar.destroy();
-        delete this.enemyHpBars[enemyId];
-      }
+      if (hpBar) { hpBar.destroy(); delete this.enemyHpBars[enemyId]; }
       delete this.enemyLastPos[enemyId];
       delete this.entityHitSeqs[enemyId];
     });
 
-    // ============================================================
-    // PROJECTILE STATE LISTENERS
-    // ============================================================
-    callbacks.onAdd("projectiles", (proj: any, projId: string) => {
-      // Ensure the muzzle flash animation exists (created once).
-      if (!this.bolterMuzzleAnimCreated) {
-        this.createBolterAnimations();
-        this.bolterMuzzleAnimCreated = true;
-      }
-      // Bolter bullet: a 64x64 art frame, scaled small so the visible bullet
-      // is ~10px (the server-side hitbox stays its own small radius).
+    cb.onAdd("projectiles", (proj: any, projId: string) => {
+      if (!this.anims.exists("bolter_muzzle")) createBolterAnimations(this);
       const tier = bolterColorTier(proj.level);
       const tint = proj.skillId === "bolter" ? BOLTER_COLORS[tier] : 0xffffff;
-      const frame =
-        proj.skillId === "bolter" ? bolterBulletFrameForLevel(proj.level) : 0;
-      const bullet = this.add
-        .sprite(proj.x, proj.y, "bolter_sheet", frame)
-        .setDepth(4)
-        .setScale(0.4)
-        .setTint(tint);
-      this.projectileEntities[projId] = bullet as any;
+      const frame = proj.skillId === "bolter" ? bolterBulletFrameForLevel(proj.level) : 0;
+      const bullet = this.add.sprite(proj.x, proj.y, "bolter_sheet", frame)
+        .setDepth(4).setScale(0.4).setTint(tint);
+      this.projectileEntities[projId] = bullet;
       this.projLastPos[projId] = { x: proj.x, y: proj.y };
-
-      callbacks.onChange(proj, () => {
+      cb.onChange(proj, () => {
         bullet.setPosition(proj.x, proj.y);
-        // Orient the sprite along its travel direction.
         const prev = this.projLastPos[projId];
         if (prev) {
           const a = Math.atan2(proj.y - prev.y, proj.x - prev.x);
@@ -1491,444 +542,129 @@ export class GameScene extends Phaser.Scene {
       });
     });
 
-    callbacks.onRemove("projectiles", (_proj: any, projId: string) => {
+    cb.onRemove("projectiles", (_p: any, projId: string) => {
       const entity = this.projectileEntities[projId];
       const pos = this.projLastPos[projId];
-      if (entity) {
-        entity.destroy();
-        delete this.projectileEntities[projId];
-      }
-      // Spawn bullet-hit VFX at last known position.
+      if (entity) { entity.destroy(); delete this.projectileEntities[projId]; }
       if (pos) {
-        this.spawnBulletHitVfx(pos.x, pos.y);
+        spawnBulletHitVfx(this, pos.x, pos.y);
         delete this.projLastPos[projId];
       }
     });
 
-    // ============================================================
-    // SKILL CAST (CLAW CONE) STATE LISTENERS
-    // ============================================================
-    callbacks.onAdd("skillCasts", (cast: any, castId: string) => {
-      console.log(
-        "[DEBUG] skillCast onAdd:",
-        cast.skillId,
-        "level:",
-        cast.level,
-        "tier:",
-        cast.tier,
-        "angle:",
-        cast.angle,
-        "range:",
-        cast.range,
-        "faction:",
-        cast.faction,
-      );
-      if (!this.clawAnimCreated) {
-        this.createClawAnimations();
-        this.clawAnimCreated = true;
-      }
+    cb.onAdd("skillCasts", (cast: any, castId: string) => {
       if (cast.skillId === "claw") {
-        const startFrame = clawRowStartFrame(cast.level);
-        const tier: ClawTier = cast.tier ?? "small";
-        // Place the UNSCALED 64px sprite at the OUTER EDGE of the hitbox cone
-        // so the animation visually covers the tip of the hitbox.
-        // If the cone range is 200px and the sprite is 64px, the sprite sits
-        // from (200-64)=136px to 200px from the caster along the aim direction.
-        // The sprite CENTER is at: castPos + (range - 32) along the aim angle.
-        // (32 = half the sprite width since the sprite is drawn centered.)
-        // This applies in ALL directions because we use the aim angle vector.
-        const range: number =
-          cast.range || (tier === "big" ? 110 : tier === "mid" ? 85 : 60);
-        const SPRITE_NATIVE = 64;
-        // Scale sprite to match hitbox size (range = hitbox radius)
-        // At base range (60px for small), scale = 1.0 (64px sprite ≈ 60px hitbox)
-        // At higher levels with larger hitboxes, scale up proportionally
-        const clawScale = Math.max(1.0, range / 60);
-        const scaledSpriteSize = SPRITE_NATIVE * clawScale;
-        const halfSprite = scaledSpriteSize / 2;
-        const edgeDist = range - halfSprite;
-        // Apply VFX gap: shift the sprite outward from the caster's center
-        // along the aim direction.
-        const gapOffset = this.VFX_GAPS.claw;
-        const edgeX = cast.x + Math.cos(cast.angle) * (edgeDist + gapOffset);
-        const edgeY = cast.y + Math.sin(cast.angle) * (edgeDist + gapOffset);
-        // Player claws render white/blue; enemy claws render red.
-        const tint = cast.faction === "enemy" ? 0xff5555 : 0xffffff;
-        const animKey = `claw_${tier}`;
-        const sprite = this.add
-          .sprite(edgeX, edgeY, "claw_sheet", startFrame)
-          .setDepth(5)
-          .setScale(clawScale)
-          .setRotation(cast.angle)
-          .setTint(tint);
-        sprite.anims.play(animKey);
-        (sprite as any).castData = cast; // store for debug hitbox overlay
-        this.clawEntities[castId] = sprite;
+        if (!this.anims.exists("claw_small")) createClawAnimations(this);
+        this.clawEntities[castId] = spawnClawVfx(this, cast);
       } else if (cast.skillId === "heal") {
-        // Heal VFX: green flash for self-heal (range=0), green circle for AoE
-        const radius = cast.range ?? 0;
-        if (radius > 0) {
-          // AoE heal circle — expanding green ring
-          const circle = this.add
-            .circle(cast.x, cast.y, radius, 0x00ff00, 0.2)
-            .setStrokeStyle(3, 0x00ff00, 0.8)
-            .setDepth(6);
-          this.tweens.add({
-            targets: circle,
-            alpha: 0,
-            scale: 1.3,
-            duration: 700,
-            ease: "Cubic.out",
-            onComplete: () => circle.destroy(),
-          });
-          this.clawEntities[castId] = circle as any;
-        } else {
-          // Self-heal green flash
-          const flash = this.add
-            .circle(cast.x, cast.y, 24, 0x00ff00, 0.6)
-            .setDepth(6);
-          this.tweens.add({
-            targets: flash,
-            alpha: 0,
-            scale: 2.5,
-            duration: 500,
-            ease: "Cubic.out",
-            onComplete: () => flash.destroy(),
-          });
-          this.clawEntities[castId] = flash as any;
-        }
+        this.clawEntities[castId] = spawnHealVfx(this, cast) as any;
       } else if (cast.skillId === "pulse") {
-        // Pulse VFX: use pulse spritesheet animation (like claw/slam pattern)
-        if (!this.pulseAnimCreated) {
-          this.createPulseAnimations();
-          this.pulseAnimCreated = true;
-        }
-        const tier: string = cast.level >= 6 ? "big" : "small";
-        const startFrame = tier === "big" ? 4 : 0;
-        const radius: number = cast.range ?? 80;
-        // Scale sprite to match the pulse radius
-        const SPRITE_NATIVE = 64;
-        const pulseScale = Math.max(1.0, (radius * 2) / SPRITE_NATIVE);
-        const animKey = `pulse_${tier}`;
-        const sprite = this.add
-          .sprite(cast.x, cast.y, "pulse_sheet", startFrame)
-          .setDepth(7)
-          .setScale(pulseScale);
-        sprite.anims.play(animKey);
-        sprite.on("animationcomplete", () => sprite.destroy());
+        if (!this.anims.exists("pulse_small")) createPulseAnimations(this);
+        const sprite = spawnPulseVfx(this, cast);
         (sprite as any).castData = cast;
         this.clawEntities[castId] = sprite;
       } else if (cast.skillId === "dash") {
-        // Dash trail: white line from start to end position
-        const startX = (cast as any).startX ?? cast.x;
-        const startY = (cast as any).startY ?? cast.y;
-        const endX = cast.x;
-        const endY = cast.y;
-        // White dashing trail (opposite direction of dash to show speed)
-        const trail = this.add
-          .line(0, 0, startX, startY, endX, endY, 0xffffff, 0.7)
-          .setDepth(6)
-          .setLineWidth(8);
-        this.tweens.add({
-          targets: trail,
-          alpha: 0,
-          duration: 300,
-          ease: "Cubic.out",
-          onComplete: () => trail.destroy(),
-        });
-        // Small white circle at the emerge point (vulnerable again)
-        const emerge = this.add
-          .circle(endX, endY, 12, 0xffffff, 0.8)
-          .setDepth(8);
-        this.tweens.add({
-          targets: emerge,
-          alpha: 0,
-          scale: 2.5,
-          duration: 350,
-          ease: "Cubic.out",
-          onComplete: () => emerge.destroy(),
-        });
-        (emerge as any).castData = cast;
-        this.clawEntities[castId] = emerge as any;
+        this.clawEntities[castId] = spawnDashVfx(this, cast)[1] as any;
       } else if (cast.skillId === "dash_ice") {
-        // Ice blast: cyan/blue expanding circle at the landing position
-        const radius = cast.range ?? 50;
-        const iceBlast = this.add
-          .circle(cast.x, cast.y, radius, 0x66ccff, 0.3)
-          .setStrokeStyle(3, 0x99eeff, 0.9)
-          .setDepth(7);
-        this.tweens.add({
-          targets: iceBlast,
-          alpha: 0,
-          scale: 1.4,
-          duration: 500,
-          ease: "Cubic.out",
-          onComplete: () => iceBlast.destroy(),
-        });
-        // Ice shards: small white-blue lines radiating outward
-        const shardCount = 6;
-        for (let i = 0; i < shardCount; i++) {
-          const a = (i / shardCount) * Math.PI * 2;
-          const sx = cast.x + Math.cos(a) * radius * 0.3;
-          const sy = cast.y + Math.sin(a) * radius * 0.3;
-          const ex = cast.x + Math.cos(a) * radius;
-          const ey = cast.y + Math.sin(a) * radius;
-          const shard = this.add
-            .line(0, 0, sx, sy, ex, ey, 0xaaeeff, 0.8)
-            .setDepth(8)
-            .setLineWidth(3);
-          this.tweens.add({
-            targets: shard,
-            alpha: 0,
-            duration: 400,
-            ease: "Cubic.out",
-            onComplete: () => shard.destroy(),
-          });
-        }
-        (iceBlast as any).castData = cast;
-        this.clawEntities[castId] = iceBlast as any;
+        const objs = spawnDashIceBlastVfx(this, cast);
+        this.clawEntities[castId] = objs[0] as any;
       }
     });
 
-    callbacks.onRemove("skillCasts", (_cast: any, castId: string) => {
+    cb.onRemove("skillCasts", (_c: any, castId: string) => {
       const entity = this.clawEntities[castId];
-      if (entity) {
-        entity.destroy();
-        delete this.clawEntities[castId];
-      }
+      if (entity) { (entity as any).destroy?.(); delete this.clawEntities[castId]; }
     });
 
-    // ---- Shock VFX listeners (Phaser-drawn lightning) ----
-    callbacks.onAdd("shockCasts", (shock: any, shockId: string) => {
-      // Blue for L1-5, purple for L6+
+    cb.onAdd("shockCasts", (shock: any, shockId: string) => {
       const color = shock.level >= 6 ? 0xb266ff : 0x4da6ff;
       const fillColor = shock.level >= 6 ? 0x6a1fb2 : 0x1a5cad;
-
-      // Parse segments from flat string
       const segStr: string = shock.segments || "";
-      const segments: {
-        x1: number;
-        y1: number;
-        x2: number;
-        y2: number;
-        delay: number;
-      }[] = [];
+      const segments: { x1: number; y1: number; x2: number; y2: number; delay: number }[] = [];
       if (segStr.length > 0) {
         for (const part of segStr.split(";")) {
           const [x1, y1, x2, y2, delay] = part.split(",").map(Number);
           if (!isNaN(x1)) segments.push({ x1, y1, x2, y2, delay });
         }
       }
-
-      // Store hitbox reference for F3 overlay
-      const hbRef = this.add.rectangle(shock.x, shock.y, 1, 1, 0xffffff, 0);
-      hbRef.setDepth(7);
-      (hbRef as any).castData = {
-        skillId: "shock",
-        x: shock.x,
-        y: shock.y,
-        angle: shock.aimAngle ?? 0,
-        level: shock.level,
-      };
-      (this.clawEntities as any)[shockId] = hbRef;
+      const hbRef = this.add.rectangle(shock.x, shock.y, 1, 1, 0xffffff, 0).setDepth(7);
+      (hbRef as any).castData = { skillId: "shock", x: shock.x, y: shock.y, angle: shock.aimAngle ?? 0, level: shock.level };
+      this.clawEntities[shockId] = hbRef as any;
       this.time.delayedCall(500, () => {
         if (hbRef && hbRef.active) hbRef.destroy();
         delete this.clawEntities[shockId];
       });
-
-      // Draw each lightning segment with gap offset from caster
       const gap = this.VFX_GAPS.shock;
       const sAngle = shock.aimAngle ?? 0;
       for (const seg of segments) {
         this.time.delayedCall(seg.delay, () => {
           if (!this.scene.isActive()) return;
-          // Offset the start point outward from the caster center by the gap
           let sx = seg.x1;
           let sy = seg.y1;
-          // Only apply gap to segments originating at the caster
           if (Math.hypot(seg.x1 - shock.x, seg.y1 - shock.y) < 5) {
-            sx =
-              shock.x + Math.cos(sAngle) * (this.PLAYER_COLLISION_RADIUS + gap);
-            sy =
-              shock.y + Math.sin(sAngle) * (this.PLAYER_COLLISION_RADIUS + gap);
+            sx = shock.x + Math.cos(sAngle) * (this.PLAYER_COLLISION_RADIUS + gap);
+            sy = shock.y + Math.sin(sAngle) * (this.PLAYER_COLLISION_RADIUS + gap);
           }
-          this.drawLightningBolt(sx, sy, seg.x2, seg.y2, color, fillColor);
+          drawLightningBolt(this, sx, sy, seg.x2, seg.y2, color, fillColor);
         });
       }
     });
 
-    callbacks.onRemove("shockCasts", (_shock: any, shockId: string) => {
+    cb.onRemove("shockCasts", (_s: any, shockId: string) => {
       const entity = this.clawEntities[shockId];
-      if (entity) {
-        entity.destroy();
-        delete this.clawEntities[shockId];
-      }
+      if (entity) { (entity as any).destroy?.(); delete this.clawEntities[shockId]; }
     });
 
-    // ============================================================
-    // SLAM STATE LISTENERS
-    // ============================================================
-    callbacks.onAdd("groundCards", (card: any, cardId: string) => {
-      this.createGroundCardEntity(card, cardId);
-      // Keep the visible box glued to the card's real position: a grabbed
-      // card re-dropped elsewhere (msg 12) updates its schema x/y, and
-      // without this the box stayed at the OLD spot (the "too far to
-      // grab while standing right on it" bug).
-      callbacks.onChange(card, () => {
-        const entity = this.groundCardEntities.get(cardId);
+    cb.onAdd("groundCards", (card: any, cardId: string) => {
+      createGroundCardEntity(this, card, cardId, this.groundCards, this.groundCardCallbacks);
+      cb.onChange(card, () => {
+        const entity = this.groundCards.entities.get(cardId);
         if (entity) entity.setPosition(card.x, card.y);
       });
     });
 
-    callbacks.onRemove("groundCards", (card: any, cardId: string) => {
-      const entity = this.groundCardEntities.get(cardId);
+    cb.onRemove("groundCards", (_card: any, cardId: string) => {
+      const entity = this.groundCards.entities.get(cardId);
       if (entity) entity.destroy();
-      this.groundCardEntities.delete(cardId);
-      // Cancel the dwell timer too: a pending hover would otherwise fire
-      // and render a tooltip for the now-destroyed card.
-      this.cancelGroundCardTooltip();
-      // Own pending pickup confirmed: the server already put the card in
-      // player.equippedSlots. Pull the authoritative slots and rebuild the
-      // HUD from them (replaces insert/replace bookkeeping entirely).
-      if (this.pendingPickups.has(cardId)) {
-        this.pendingPickups.delete(cardId);
-        this.pendingPickupSlots.delete(cardId);
+      this.groundCards.entities.delete(cardId);
+      if (this.groundCards.pendingPickups.has(cardId)) {
+        this.groundCards.pendingPickups.delete(cardId);
+        this.groundCards.pendingPickupSlots.delete(cardId);
         this.syncSlotsFromServer(true);
       }
     });
 
-    callbacks.onAdd("slams", (slam: any, slamId: string) => {
-      const isUpgraded = slam.level >= 6;
-      // Scale slam sprite with hitbox size: base scale 1.5, +10% per level above 2
-      const slamScale = 1.5 * Math.pow(1.1, Math.max(0, slam.level - 2));
-      // Apply VFX gap: offset spawn position along aim direction
-      const gap = this.VFX_GAPS.slam;
-      const spawnX = slam.x + Math.cos(slam.angle) * gap;
-      const spawnY = slam.y + Math.sin(slam.angle) * gap;
-      const sprite = this.add
-        .sprite(spawnX, spawnY, "slam_sheet", 0)
-        .setDepth(4)
-        .setScale(slamScale)
-        .setRotation(slam.angle);
-      sprite.setData("slamLevel", slam.level);
-      sprite.setData("isUpgraded", isUpgraded);
-      sprite.setData("angle", slam.angle);
-      sprite.setData("remainingRange", slam.remainingRange);
+    cb.onAdd("slams", (slam: any, slamId: string) => {
+      const sprite = spawnSlamSprite(this, slam.x, slam.y, slam.level, slam.angle, this.VFX_GAPS.slam);
       this.slamEntities[slamId] = sprite;
-
-      callbacks.onChange(slam, () => {
-        // Re-apply VFX gap on every position update
+      cb.onChange(slam, () => {
         const g = this.VFX_GAPS.slam;
-        sprite.setPosition(
-          slam.x + Math.cos(slam.angle) * g,
-          slam.y + Math.sin(slam.angle) * g,
-        );
+        sprite.setPosition(slam.x + Math.cos(slam.angle) * g, slam.y + Math.sin(slam.angle) * g);
         sprite.setData("remainingRange", slam.remainingRange);
       });
     });
 
-    callbacks.onRemove("slams", (_slam: any, slamId: string) => {
+    cb.onRemove("slams", (_s: any, slamId: string) => {
       const entity = this.slamEntities[slamId];
-      if (entity) {
-        entity.destroy();
-        delete this.slamEntities[slamId];
-      }
+      if (entity) { entity.destroy(); delete this.slamEntities[slamId]; }
     });
 
-    // ============================================================
-    // VORTEX STATE LISTENERS — hurricane pull + yellow blast
-    // ============================================================
-    callbacks.onAdd("vortexes", (vortex: any, vortexId: string) => {
+    cb.onAdd("vortexes", (vortex: any, vortexId: string) => {
       const tier = (vortex.colorTier ?? "grey") as "grey" | "brown" | "purple";
-      const color = VORTEX_COLORS[tier] ?? VORTEX_COLORS.grey;
-      const container = this.add.container(vortex.x, vortex.y).setDepth(4);
-
-      // ---- Hurricane spiral: 3 rotating spiral arms drawn as arcs ----
-      const spiralArms: Phaser.GameObjects.Arc[] = [];
-      const ARM_COUNT = 3;
-      for (let i = 0; i < ARM_COUNT; i++) {
-        // Each arm is a series of small circles forming a spiral curve
-        const arm = this.add.graphics();
-        arm.lineStyle(4, color, 0.85);
-        // Draw spiral curve: r grows with angle
-        const points: { x: number; y: number }[] = [];
-        const maxR = vortex.radius;
-        const turns = 1.75;
-        for (let t = 0; t <= 1.001; t += 0.05) {
-          const angle =
-            t * turns * Math.PI * 2 + i * ((Math.PI * 2) / ARM_COUNT);
-          const r = 4 + t * maxR;
-          points.push({ x: Math.cos(angle) * r, y: Math.sin(angle) * r });
-        }
-        arm.beginPath();
-        arm.moveTo(points[0].x, points[0].y);
-        for (const p of points.slice(1)) arm.lineTo(p.x, p.y);
-        arm.strokePath();
-        container.add(arm);
-        spiralArms.push(arm as unknown as Phaser.GameObjects.Arc);
-      }
-
-      // ---- Eye of the storm (pulsating core) ----
-      const core = this.add
-        .circle(0, 0, 12, color, 0.55)
-        .setStrokeStyle(3, color, 0.95);
-      container.add(core);
-
-      // ---- Outer radius ring ----
-      const radiusRing = this.add
-        .circle(0, 0, vortex.radius, color, 0.06)
-        .setStrokeStyle(2, color, 0.45);
-      container.add(radiusRing);
-
-      // Spin the hurricane continuously
-      const spinEvent = this.time.addEvent({
-        delay: 16,
-        loop: true,
-        callback: () => {
-          for (const arm of spiralArms) arm.rotation += 0.12;
-        },
-      });
-
-      // Pulsate core + ring
-      this.tweens.add({
-        targets: core,
-        scale: { from: 1, to: 1.6 },
-        alpha: { from: 0.95, to: 0.35 },
-        duration: 450,
-        yoyo: true,
-        repeat: -1,
-        ease: "Sine.easeInOut",
-      });
-      this.tweens.add({
-        targets: radiusRing,
-        alpha: { from: 0.45, to: 0.12 },
-        duration: 800,
-        yoyo: true,
-        repeat: -1,
-        ease: "Sine.easeInOut",
-      });
-
+      const { container, spinEvent } = spawnVortex(this, vortex.x, vortex.y, vortex.radius, tier);
       this.vortexEntities[vortexId] = container;
-      (container as any).spinEvent = spinEvent;
-
       let exploded = false;
-      callbacks.onChange(vortex, () => {
+      cb.onChange(vortex, () => {
         container.setPosition(vortex.x, vortex.y);
-
-        // ---- YELLOW EXPLOSION BLAST ----
-        if (
-          vortex.phase === "explode" &&
-          vortex.explosionRadius > 0 &&
-          !exploded
-        ) {
+        if (vortex.phase === "explode" && vortex.explosionRadius > 0 && !exploded) {
           exploded = true;
           spinEvent.remove();
-          this.showVortexExplosion(vortex.x, vortex.y, vortex.explosionRadius);
+          showVortexExplosion(this, vortex.x, vortex.y, vortex.explosionRadius);
         }
       });
     });
 
-    callbacks.onRemove("vortexes", (_vortex: any, vortexId: string) => {
+    cb.onRemove("vortexes", (_v: any, vortexId: string) => {
       const entity = this.vortexEntities[vortexId];
       if (entity) {
         const spinEvent = (entity as any).spinEvent;
@@ -1939,529 +675,130 @@ export class GameScene extends Phaser.Scene {
         delete this.vortexEntities[vortexId];
       }
     });
+
+    (this.room as any).onMessage("mapTransition", (nextMapId: string) => {
+      this.performMapSwap(nextMapId);
+    });
   }
 
-  // ============================================================
-  // SERVER CONNECTION
-  // ============================================================
-
-  async connect() {
-    console.log(
-      `[CONNECT] Scene "${this.sys.settings.key}" connecting to room "game_room"`,
-    );
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    try {
-      // One room type = one game session. Progression (cards/XP/inventory)
-      // lives server-side and survives map transitions — nothing is passed
-      // from the client on join.
-      const roomPromise = this.client.joinOrCreate("game_room", {});
-      // Add a timeout so we don't hang on the loading screen forever
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(
-          () => reject(new Error("Room connection timeout")),
-          10000,
-        );
+  createLocalPlayer(player: any) {
+    createCharacterAnimations(this);
+    const sprite = this.add.sprite(player.x, player.y, "player_sheet", 0).setDepth(4);
+    sprite.setData("serverX", player.x);
+    sprite.setData("serverY", player.y);
+    this.currentPlayer = sprite;
+    this.cameras.main.startFollow(sprite);
+    this.cameras.main.setBounds(0, 0, this.mapData.widthPx, this.mapData.heightPx);
+    const cb = (this.room as any).callbacks as any;
+    cb.onChange(player, () => {
+      this.currentPlayerState = player;
+      const dx = Math.abs(sprite.x - player.x);
+      const dy = Math.abs(sprite.y - player.y);
+      if (dx > 32 || dy > 32) { sprite.x = player.x; sprite.y = player.y; }
+      updateStatsHud(this.statsHud, player);
+      updateXpBar(this.xpBar, player, {
+        onLevelUp: (level) => { this.showLevelUp(level); },
+        scene: this,
+        state: { lastKnownXp: this.lastKnownXp, lastKnownLevel: this.lastKnownLevel },
       });
-      this.room = await Promise.race([roomPromise, timeoutPromise]);
-      console.log(
-        `[CONNECT] Connected to room "game_room" successfully`,
-      );
-    } catch (e) {
-      console.error("Failed to connect:", e);
-      this.room = null;
-    } finally {
-      if (timeoutId) clearTimeout(timeoutId);
-    }
-  }
-
-  // ============================================================
-  // CHARACTER ANIMATIONS
-  // ============================================================
-
-  /**
-   * Create the player animations from the new 8x3 sheet (256x256 frames).
-   *   Row 0 (frames 0-7)   = idle (art faces LEFT by default)
-   *   Row 1 (frames 8-15)  = walk LEFT
-   *   Row 2 (frames 16-23) = walk RIGHT
-   * Vertical movement (up/down) has no dedicated animation — the walk
-   * animation of the last horizontal facing is reused. The idle animation
-   * is flipped horizontally when the player faces right.
-   */
-  private createCharacterAnimations(): void {
-    // Idle animation (row 0, loops slowly)
-    this.anims.create({
-      key: "player_idle",
-      frames: this.anims.generateFrameNumbers("player_sheet", {
-        start: 0,
-        end: 7,
-      }),
-      frameRate: 8,
-      repeat: -1,
-    });
-
-    // Walk LEFT animation (row 1, loops)
-    this.anims.create({
-      key: "player_walk_left",
-      frames: this.anims.generateFrameNumbers("player_sheet", {
-        start: 8,
-        end: 15,
-      }),
-      frameRate: 10,
-      repeat: -1,
-    });
-
-    // Walk RIGHT animation (row 2, loops)
-    this.anims.create({
-      key: "player_walk_right",
-      frames: this.anims.generateFrameNumbers("player_sheet", {
-        start: 16,
-        end: 23,
-      }),
-      frameRate: 10,
-      repeat: -1,
-    });
-  }
-
-  /**
-   * Create the pulse skill animations once (per tier).
-   * pulseskillsheet.png is 4 cols x 2 rows, 64x64 each.
-   * Row 0 (frames 0-3): base pulse (levels 1-5).
-   * Row 1 (frames 4-7): upgraded pulse (levels 6-10).
-   */
-  private createPulseAnimations(): void {
-    const rows: { tier: string; start: number }[] = [
-      { tier: "small", start: 0 },
-      { tier: "big", start: 4 },
-    ];
-    for (const { tier, start } of rows) {
-      const key = `pulse_${tier}`;
-      if (this.anims.exists(key)) continue;
-      this.anims.create({
-        key,
-        frames: this.anims.generateFrameNumbers("pulse_sheet", {
-          start,
-          end: start + 3,
-        }),
-        frameRate: 20,
-        repeat: 0,
-      });
-    }
-  }
-
-  /**
-   * Draw a jagged lightning bolt from (x1,y1) to (x2,y2) using Phaser graphics.
-   * Renders a bright core line + a wider glow line + spark circle at impact.
-   * Auto-fades and destroys.
-   */
-  private drawLightningBolt(
-    x1: number,
-    y1: number,
-    x2: number,
-    y2: number,
-    color: number,
-    fillColor: number,
-  ): void {
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 1) return;
-    const nx = -dy / dist; // perpendicular normal
-    const ny = dx / dist;
-
-    // Generate jagged midpoint offsets
-    const segments = Math.max(4, Math.floor(dist / 30));
-    const points: { x: number; y: number }[] = [];
-    for (let i = 0; i <= segments; i++) {
-      const t = i / segments;
-      const px = x1 + dx * t;
-      const py = y1 + dy * t;
-      // Jagged offset, less at start/end
-      const jag = i === 0 || i === segments ? 0 : (Math.random() - 0.5) * 24;
-      points.push({ x: px + nx * jag, y: py + ny * jag });
-    }
-
-    // --- Glow layer (wide, semi-transparent) ---
-    const glow = this.add.graphics();
-    glow.setDepth(6);
-    glow.lineStyle(8, fillColor, 0.35);
-    glow.beginPath();
-    glow.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++)
-      glow.lineTo(points[i].x, points[i].y);
-    glow.strokePath();
-
-    // --- Core layer (bright, thin) ---
-    const core = this.add.graphics();
-    core.setDepth(7);
-    core.lineStyle(2.5, color, 1.0);
-    core.beginPath();
-    core.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++)
-      core.lineTo(points[i].x, points[i].y);
-    core.strokePath();
-
-    // --- Impact spark at target ---
-    const spark = this.add.circle(x2, y2, 12, color, 0.9);
-    spark.setDepth(8);
-    const sparkGlow = this.add.circle(x2, y2, 20, fillColor, 0.4);
-    sparkGlow.setDepth(7);
-
-    // Animate: flicker then fade
-    this.tweens.add({
-      targets: [core, glow],
-      alpha: 0,
-      duration: 250,
-      delay: 60,
-      onComplete: () => {
-        core.destroy();
-        glow.destroy();
-      },
-    });
-    this.tweens.add({
-      targets: [spark, sparkGlow],
-      alpha: 0,
-      scale: 2.5,
-      duration: 300,
-      onComplete: () => {
-        spark.destroy();
-        sparkGlow.destroy();
-      },
-    });
-
-    // Re-draw the bolt once with different jaggedness for a flicker effect
-    this.time.delayedCall(30, () => {
-      if (!core.active) return;
-      core.clear();
-      core.lineStyle(2.5, color, 0.9);
-      core.beginPath();
-      for (let i = 0; i <= segments; i++) {
-        const t = i / segments;
-        const px = x1 + dx * t;
-        const py = y1 + dy * t;
-        const jag = i === 0 || i === segments ? 0 : (Math.random() - 0.5) * 24;
-        const px2 = px + nx * jag;
-        const py2 = py + ny * jag;
-        if (i === 0) core.moveTo(px2, py2);
-        else core.lineTo(px2, py2);
+      this.lastKnownXp = Math.floor(player.currentXp ?? 0);
+      this.lastKnownLevel = Math.floor(player.level ?? 1);
+      for (const skill of ["shock", "claw", "heal", "pulse", "slam", "dash", "vortex", "bolter", "shield"] as SkillId[]) {
+        this.syncSkillLevel(player, skill);
       }
-      core.strokePath();
+      this.syncSlotsFromServer(false);
+      this.syncInventoryFromServer(false);
+      sprite.setData("attack", player.attack ?? 100);
+      sprite.setData("slotCooldownEndsAt", Array.from(player.slotCooldownEndsAt ?? []));
+      sprite.setData("slotHealKills", Array.from(player.slotHealKills ?? []));
+      sprite.setData("hitFlashUntil", player.hitFlashUntil ?? 0);
+      sprite.setData("shockUntil", player.shockUntil ?? 0);
+      sprite.setData("invincibleUntil", player.invincibleUntil ?? 0);
+      sprite.setData("hitboxW", player.hitboxW ?? 10);
+      sprite.setData("hitboxH", player.hitboxH ?? 10);
+      const seq = player.hitSeq ?? 0;
+      const prev = this.entityHitSeqs["__local__"] ?? 0;
+      if (seq !== prev) {
+        this.entityHitSeqs["__local__"] = seq;
+        if (player.lastHitDamage > 0) {
+          spawnDamageNumber(this, this.damageTexts, sprite.x, sprite.y,
+            player.lastHitDamage, !!player.lastHitCrit,
+            (player as any).lastShieldDamage, (player as any).lastHpDamage);
+        }
+      }
     });
   }
 
-  /**
-   * Update the local player's animation based on current input.
-   *
-   * The sheet only has: idle (row 0, faces LEFT), walk LEFT (row 1) and
-   * walk RIGHT (row 2). Vertical movement (up/down) reuses the walk
-   * animation of the last horizontal facing. When standing still, the
-   * idle animation plays and is flipped horizontally if the player was
-   * last facing right.
-   */
-  private updatePlayerAnimation(): void {
+  createRemotePlayer(player: any, sessionId: string) {
+    const sprite = this.add.sprite(player.x, player.y, "player_sheet", 0).setDepth(4);
+    sprite.setData("serverX", player.x);
+    sprite.setData("serverY", player.y);
+    this.playerEntities[sessionId] = sprite;
+    const cb = (this.room as any).callbacks as any;
+    cb.onChange(player, () => {
+      sprite.setData("serverX", player.x);
+      sprite.setData("serverY", player.y);
+      sprite.setData("hitFlashUntil", player.hitFlashUntil ?? 0);
+      sprite.setData("hitboxW", player.hitboxW ?? 10);
+      sprite.setData("hitboxH", player.hitboxH ?? 10);
+    });
+  }
+
+  updatePlayerAnimation(): void {
     if (!this.currentPlayer) return;
-
     let moving = false;
-    // Horizontal facing: "left" | "right" (persists through vertical moves)
-    let newDirection = this.lastDirection;
-
-    if (this.inputPayload.left) {
-      newDirection = "left";
-      moving = true;
-    }
-    if (this.inputPayload.right) {
-      newDirection = "right";
-      moving = true;
-    }
-    // Vertical movement keeps the last horizontal facing's walk animation.
-    if (this.inputPayload.up || this.inputPayload.down) {
-      moving = true;
-    }
-
-    this.lastDirection = newDirection;
-
+    let newDirection = (this as any).lastDirection || "left";
+    if (this.inputPayload.left) { newDirection = "left"; moving = true; }
+    if (this.inputPayload.right) { newDirection = "right"; moving = true; }
+    if (this.inputPayload.up || this.inputPayload.down) { moving = true; }
+    (this as any).lastDirection = newDirection;
     if (moving) {
-      const animKey =
-        newDirection === "right" ? "player_walk_right" : "player_walk_left";
+      const animKey = newDirection === "right" ? "player_walk_right" : "player_walk_left";
       const currentAnim = this.currentPlayer.anims.currentAnim;
-      if (!currentAnim || currentAnim.key !== animKey) {
-        this.currentPlayer.anims.play(animKey);
-      }
-      // Walk rows are directional art — no flip needed.
+      if (!currentAnim || currentAnim.key !== animKey) this.currentPlayer.anims.play(animKey);
       this.currentPlayer.setFlipX(false);
     } else {
-      // Idle: art faces LEFT; flip when the player faces right.
       const currentAnim = this.currentPlayer.anims.currentAnim;
-      if (!currentAnim || currentAnim.key !== "player_idle") {
-        this.currentPlayer.anims.play("player_idle");
-      }
+      if (!currentAnim || currentAnim.key !== "player_idle") this.currentPlayer.anims.play("player_idle");
       this.currentPlayer.setFlipX(newDirection === "right");
     }
   }
 
-  // ============================================================
-  // ENEMY ANIMATIONS
-  // ============================================================
-
-  /**
-   * Create animations for enemy sprite sheets.
-   *
-   * TYRANID (spriteSheetTRI64.png), 64x64 per frame:
-   *   Row 0 (frames 0-3) = idle animation. Per spec this idle animation is
-   *                        also shown while the enemy moves.
-   *   Row 1 (frames 4-7) = attack animation.
-   * The art faces LEFT by default. When the enemy faces right
-   * (enemy.facingRight === true) the sprite is flipped HORIZONTALLY
-   * (setFlipX) so it mirrors to face right.
-   */
-  private createEnemyAnimations(): void {
-    // Tyranid idle / move animation (loops)
-    this.anims.create({
-      key: "tri_idle",
-      frames: this.anims.generateFrameNumbers("tyranid_sheet", {
-        start: 0,
-        end: 3,
-      }),
-      frameRate: 8,
-      repeat: -1,
-    });
-
-    // Tyranid attack animation (plays once)
-    this.anims.create({
-      key: "tri_attack",
-      frames: this.anims.generateFrameNumbers("tyranid_sheet", {
-        start: 4,
-        end: 7,
-      }),
-      frameRate: 10,
-      repeat: 0,
-    });
-
-    // Orck walk animation (row 0, frames 0-4, loops)
-    this.anims.create({
-      key: "orck_idle",
-      frames: this.anims.generateFrameNumbers("orck_sheet", {
-        start: 0,
-        end: 4,
-      }),
-      frameRate: 10,
-      repeat: -1,
-    });
-
-    // Orck attack animation (row 1, frames 5-9, plays once)
-    this.anims.create({
-      key: "orck_attack",
-      frames: this.anims.generateFrameNumbers("orck_sheet", {
-        start: 5,
-        end: 9,
-      }),
-      frameRate: 10,
-      repeat: 0,
-    });
-
-    // Tau idle animation (row 0, frames 0-5, loops)
-    this.anims.create({
-      key: "tau_idle",
-      frames: this.anims.generateFrameNumbers("tau_sheet", {
-        start: 0,
-        end: 5,
-      }),
-      frameRate: 8,
-      repeat: -1,
-    });
-
-    // Tau attack animation (row 1, frames 6-11, plays once).
-    // Includes built-in muzzle flash frames.
-    this.anims.create({
-      key: "tau_attack",
-      frames: this.anims.generateFrameNumbers("tau_sheet", {
-        start: 6,
-        end: 11,
-      }),
-      frameRate: 12,
-      repeat: 0,
-    });
-
-    // Mechanicus idle animation (row 0, frames 0-5, loops)
-    this.anims.create({
-      key: "mechanicus_idle",
-      frames: this.anims.generateFrameNumbers("mechanicus_sheet", {
-        start: 0,
-        end: 5,
-      }),
-      frameRate: 8,
-      repeat: -1,
-    });
-
-    // Mechanicus attack animation (row 1, frames 6-11, plays once)
-    this.anims.create({
-      key: "mechanicus_attack",
-      frames: this.anims.generateFrameNumbers("mechanicus_sheet", {
-        start: 6,
-        end: 11,
-      }),
-      frameRate: 12,
-      repeat: 0,
-    });
-      // Caster idle animation (row 0, frames 0-4, loops)
-      this.anims.create({
-        key: "caster_idle",
-        frames: this.anims.generateFrameNumbers("caster_sheet", {
-          start: 0,
-          end: 4,
-        }),
-        frameRate: 8,
-        repeat: -1,
-      });
-
-      // Caster attack animation (row 1, frames 6-10, plays once)
-      this.anims.create({
-        key: "caster_attack",
-        frames: this.anims.generateFrameNumbers("caster_sheet", {
-          start: 6,
-          end: 10,
-        }),
-        frameRate: 10,
-        repeat: 0,
-      });
-  }
-
-  // ============================================================
-  // BOLTER ANIMATIONS + MUZZLE FLASH
-  // ============================================================
-
-  /**
-   * Create the bolter muzzle-flash animation once.
-   * BolterSpriteSheet-0002.png row 1 (frames 3,4,5) = muzzle flash frames.
-   */
-  private createBolterAnimations(): void {
-    if (this.anims.exists("bolter_muzzle")) return;
-    this.anims.create({
-      key: "bolter_muzzle",
-      frames: this.anims.generateFrameNumbers("bolter_sheet", {
-        frames: BOLTER_MUZZLE_FRAMES,
-      }),
-      frameRate: 18,
-      repeat: 0,
-    });
-  }
-
-  /**
-   * Spawn a one-shot muzzle flash, offset out from the player's center along
-   * the aim direction by half the hitbox width (PLAYER_COLLISION_RADIUS) so it
-   * plays just OUTSIDE the player hitbox. Rotated to the firing direction and
-   * auto-destroyed on completion.
-   */
-  private spawnMuzzleFlash(x: number, y: number, angle: number): void {
-    const offset = this.PLAYER_COLLISION_RADIUS + this.VFX_GAPS.bolter;
-    const ox = x + Math.cos(angle) * offset;
-    const oy = y + Math.sin(angle) * offset;
-    const flash = this.add
-      .sprite(ox, oy, "bolter_sheet", BOLTER_MUZZLE_FRAMES[0])
-      .setDepth(6)
-      .setScale(0.9)
-      .setRotation(angle);
-    flash.anims.play("bolter_muzzle");
-    flash.on("animationcomplete", () => flash.destroy());
-  }
-
-  // ============================================================
-  // CLAW ANIMATIONS + VIEWPORT SYNC
-  // ============================================================
-
-  /**
-   * Create the claw slash animations once (per tier).
-   * clawSpritesheet-0003.png is 4 cols x 3 rows.
-   */
-  private createClawAnimations(): void {
-    const rows: { tier: ClawTier; start: number }[] = [
-      { tier: "small", start: 0 },
-      { tier: "mid", start: 4 },
-      { tier: "big", start: 8 },
-    ];
-    for (const { tier, start } of rows) {
-      const key = `claw_${tier}`;
-      if (this.anims.exists(key)) continue;
-      this.anims.create({
-        key,
-        frames: this.anims.generateFrameNumbers("claw_sheet", {
-          start,
-          end: start + CLAW_FRAMES_PER_ROW - 1,
-        }),
-        frameRate: 16,
-        repeat: 0,
-      });
-    }
-  }
-
-  /**
-   * Send the camera's world-space viewport rect to the server so it can
-   * activate enemy spawning only where players can see.
-   */
-  private sendViewport(): void {
-    if (!this.room) return;
-    const cam = this.cameras.main;
-    const wv = cam.worldView;
-    this.room.send(3, {
-      x: wv.x,
-      y: wv.y,
-      w: wv.width,
-      h: wv.height,
-    });
-  }
-
-  // ============================================================
-  // SLOT-BASED CARD SYSTEM
-  // ============================================================
-
-  /** Skill currently placed in slot i (null when empty). */
-  /** The skill of the card in slot i (null when empty). */
+  // ---- Slot-based card system ----
   private slotSkill(i: number): SkillId | null {
     return this.slotCards[i]?.skill ?? null;
   }
 
-  /** Trigger slot i: the server casts THAT slot's card with ITS mods. */
   private castSlot(i: number, angle: number): void {
     if (!this.currentPlayer || !this.room) return;
     const skill = this.slotSkill(i);
     if (!skill) return;
     if (!this.isSlotReady(i)) {
-      this.showCooldownToast();
+      showCooldownToast(this, this.statsHud?.hudImage?.y);
       return;
     }
     this.room.send(1, { slot: i, angle });
   }
 
-  /** Client-side readiness check for ONE slot (cooldown + heal charge). */
   private isSlotReady(i: number): boolean {
     if (!this.currentPlayer) return true;
-    const cds = (this.currentPlayer.data.get("slotCooldownEndsAt") as
-      | number[]
-      | undefined) ?? [];
+    const cds = (this.currentPlayer.data.get("slotCooldownEndsAt") as number[] | undefined) ?? [];
     if ((cds[i] ?? 0) > Date.now()) return false;
     const sc = this.slotCards[i];
     if (sc && sc.skill === "heal" && sc.level < 6) {
-      const healKills = (this.currentPlayer.data.get("slotHealKills") as
-        | number[]
-        | undefined) ?? [];
+      const healKills = (this.currentPlayer.data.get("slotHealKills") as number[] | undefined) ?? [];
       const threshold = sc.level <= 2 ? 4 : 3;
       return (healKills[i] ?? 0) >= threshold;
     }
     return true;
   }
 
-  /**
-   * Mirror one skill's synced level into the cache and refresh its card
-   * art when it changes (and is on the HUD).
-   */
   private syncSkillLevel(player: any, skill: SkillId): void {
-    const lvl =
-      player.skillLevels && player.skillLevels.get
-        ? (player.skillLevels.get(skill) ?? 0)
-        : 0;
+    const lvl = player.skillLevels && player.skillLevels.get
+      ? (player.skillLevels.get(skill) ?? 0)
+      : 0;
     if (lvl !== this.skillLevelCache[skill]) {
       this.skillLevelCache[skill] = lvl;
-      // Refresh the art layer of every slot holding this skill
-      // (duplicates allowed — each card keeps its OWN level).
       for (let i = 0; i < this.hudCards.length; i++) {
         const card = this.hudCards[i];
         const sc = this.slotCards[i];
@@ -2472,44 +809,31 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Screen-space center of slot i. */
-  private slotCenter(i: number): { x: number; y: number } {
-    const s = this.cardSlots[i];
-    return { x: s.x + s.width / 2, y: s.y + s.height / 2 };
-  }
-
-  /** Build the slot chrome (icons + plus hints). Card objects come from
-   *  the server's equippedSlots on the first sync — the HUD is purely a
-   *  mirror of server state. */
   private initSlotCards(): void {
-    if (!this.cardSlots || this.cardSlots.length === 0) return;
     this.slotCards = Array(5).fill(null);
     this.hudCards = Array(5).fill(null);
-    this.createSlotInputIcons();
-    this.createSlotPlusHints();
+    this.slotPlusHints = [];
+    for (let i = 0; i < this.statsHud.cardSlots.length; i++) {
+      const c = slotCenter(this.statsHud, i);
+      const plus = this.add.text(c.x, c.y, "+", {
+        color: "#ffffff",
+        fontSize: "22px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      }).setOrigin(0.5).setScrollFactor(0).setDepth(101).setAlpha(0.55).setVisible(false);
+      this.slotPlusHints.push(plus);
+    }
     this.syncSlotsFromServer(false);
   }
 
-  /** Death wiped every equipped card server-side; mirror that locally. */
-  private resetSlotLayoutToDefault(): void {
-    this.rebuildSlotCards(Array(5).fill(null));
-    this.slotsSyncedOnce = false;
-    this.hideBolterTooltip();
-  }
-
-  /**
-   * Pull the local player's equippedSlots from the synced state and
-   * rebuild the HUD when they differ from the local mirror. This is the
-   * SINGLE source of truth for what the HUD shows.
-   */
   private syncSlotsFromServer(rebuildAlways: boolean): void {
     const p = this.currentPlayerState;
     if (!p || !p.equippedSlots) return;
     const slots: (SlotCard | null)[] = Array(5).fill(null);
-    const arr = p.equippedSlots;
     for (let i = 0; i < 5; i++) {
-      const c = arr[i];
-      // Empty slots arrive as sentinels (skill === "") — treated as null.
+      const c = p.equippedSlots[i];
       if (c && c.skill) {
         slots[i] = {
           skill: c.skill as SkillId,
@@ -2520,172 +844,45 @@ export class GameScene extends Phaser.Scene {
         };
       }
     }
-    const same =
-      !rebuildAlways &&
-      this.slotsSyncedOnce &&
+    const same = !rebuildAlways && this.slotsSyncedOnce &&
       slots.every((s, i) => {
         const cur = this.slotCards[i];
         if (!s && !cur) return true;
         if (!s || !cur) return false;
-        return (
-          s.skill === cur.skill &&
+        return s.skill === cur.skill &&
           s.level === cur.level &&
           s.rarity === cur.rarity &&
           s.modIds.length === cur.modIds.length &&
-          s.modIds.every((m, j) => m === cur.modIds[j])
-        );
+          s.modIds.every((m, j) => m === cur.modIds[j]);
       });
     if (!same) {
-      this.rebuildSlotCards(slots);
+      for (const card of this.hudCards) card?.container.destroy();
+      this.hudCards = Array(5).fill(null);
+      this.slotCards = slots.slice(0, 5);
+      while (this.slotCards.length < 5) this.slotCards.push(null);
+      for (let i = 0; i < this.slotCards.length; i++) {
+        const sc = this.slotCards[i];
+        if (!sc) continue;
+        this.hudCards[i] = createSlotCardObj(this, this.statsHud, sc, i);
+        this.attachCardHandlers(this.hudCards[i]!);
+      }
       this.slotsSyncedOnce = true;
+      this.updatePlusHints();
     }
   }
 
-  /** Destroy + recreate every card object from an array of slot cards. */
-  private rebuildSlotCards(slots: (SlotCard | null)[]): void {
-    for (const card of this.hudCards) card?.container.destroy();
-    this.hudCards = Array(5).fill(null);
-    this.slotCards = slots.slice(0, 5);
-    while (this.slotCards.length < 5) this.slotCards.push(null);
-    for (let i = 0; i < this.slotCards.length; i++) {
-      const sc = this.slotCards[i];
-      if (!sc) continue;
-      this.hudCards[i] = this.createSlotCardObj(sc, i);
-    }
-    this.updatePlusHints();
-  }
-
-  /** Create the game object for one slot card (rarity base + art + fill). */
-  private createSlotCardObj(sc: SlotCard, i: number): HudCardObj {
-    const slot = this.cardSlots[i];
-    const c = this.slotCenter(i);
-    const artFrame = cardFrameForLevel(sc.skill, sc.level);
-    // Rarity base fills the card; art sits ON TOP, inset so the rarity
-    // border stays visible (legendary = gold border, common = white...).
-    const inset = slot.width * CARD_ART_INSET_RATIO;
-    const base = this.add
-      .image(0, 0, "card_sheet", rarityBaseFrame(sc.rarity))
-      .setDisplaySize(slot.width, slot.height);
-    const img = this.add
-      .image(0, 0, "card_sheet", artFrame)
-      .setDisplaySize(slot.width - inset * 2, slot.height - inset * 2)
-      .setAlpha(1);
-    const cdFill = this.add
-      .rectangle(
-        0,
-        0,
-        slot.width,
-        slot.height,
-        CARD_CD_COLORS[sc.skill] ?? 0xffffff,
-        0.45,
-      )
-      .setOrigin(0, 0)
-      .setVisible(false);
-    cdFill.setData("baseH", slot.height);
-      cdFill.x = -slot.width / 2; // align fill with the card hitbox (origin 0,0)
-    cdFill.setData("baseW", slot.width);
-    const container = this.add
-      .container(c.x, c.y, [base, img, cdFill])
-      .setScrollFactor(0)
-      .setDepth(102);
-    const obj: HudCardObj = {
-      skill: sc.skill,
-      container,
-      base,
-      img,
-      cdFill,
-      targetSlot: i,
-      rarity: sc.rarity,
-      modIds: sc.modIds,
-      modValues: sc.modValues,
-    };
-    container.setSize(slot.width, slot.height);
-    const PAD = 12; // generous grab padding (cards sit 25px apart)
-    container.setInteractive(
-      new Phaser.Geom.Rectangle(
-        -slot.width / 2 - PAD,
-        -slot.height / 2 - PAD,
-        slot.width + PAD * 2,
-        slot.height + PAD * 2,
-      ),
-      Phaser.Geom.Rectangle.Contains,
-    );
-    this.attachCardHandlers(obj);
-    return obj;
-  }
-
-  /** Faint "+" shown on empty slots while dragging cards around. */
-  private createSlotPlusHints(): void {
-    this.slotPlusHints = [];
-    for (let i = 0; i < this.cardSlots.length; i++) {
-      const c = this.slotCenter(i);
-      const plus = this.add
-        .text(c.x, c.y, "+", {
-          color: "#ffffff",
-          fontSize: "22px",
-          fontFamily: "monospace",
-          fontStyle: "bold",
-          stroke: "#000000",
-          strokeThickness: 3,
-        })
-        .setOrigin(0.5)
-        .setScrollFactor(0)
-        .setDepth(101)
-        .setAlpha(0.55)
-        .setVisible(false);
-      this.slotPlusHints.push(plus);
-    }
-  }
-
-  /** Static "input hint" text under each slot (LMB/RMB/SPC/1/2). */
-  private createSlotInputIcons(): void {
-    for (let i = 0; i < this.cardSlots.length; i++) {
-      const c = this.slotCenter(i);
-      const label = this.add
-        .text(
-          c.x,
-          c.y + this.cardSlots[i].height / 2 + 10,
-          GameScene.SLOT_INPUTS[i],
-          {
-            color: "#dddddd",
-            fontSize: "11px",
-            fontFamily: "monospace",
-            fontStyle: "bold",
-            stroke: "#000000",
-            strokeThickness: 3,
-          },
-        )
-        .setOrigin(0.5)
-        .setScrollFactor(0)
-        .setDepth(104);
-      // No per-scene tracking needed; scene restart destroys them.
-      (this.slotInputLabels ??= []).push(label);
-    }
-  }
-
-  /** Destroy + recreate every card object from the server slots. */
-  private rebuildAllCards(): void {
-    this.rebuildSlotCards(this.slotCards);
-  }
-  private __deadRebuildTail(): void {
-    void 0;
-  }
-
-  /** Right-click grab + hover tooltip handling for one card. */
   private attachCardHandlers(obj: HudCardObj): void {
     obj.container.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
-      // Only LEFT button grabs a card (right stays the cast button).
       if (pointer.rightButtonDown()) return;
       this.beginCardDrag(obj);
     });
     obj.container.on("pointerover", () => {
       const i = this.hudCards.indexOf(obj);
-      if (i >= 0 && !this.dragCard) this.showBolterTooltip(this.cardSlots[i]);
+      if (i >= 0 && !this.dragCard) this.showBolterTooltip(this.statsHud.cardSlots[i]);
     });
     obj.container.on("pointerout", () => this.hideBolterTooltip());
   }
 
-  /** Start dragging a card out of its slot (reorder / drop preview). */
   private beginCardDrag(obj: HudCardObj): void {
     if (this.dragCard) return;
     const fromSlot = this.hudCards.indexOf(obj);
@@ -2697,15 +894,12 @@ export class GameScene extends Phaser.Scene {
     this.updatePlusHints();
   }
 
-  /** Which slot index the pointer is over (-1 when outside the HUD row). */
   private slotAtPointer(pointer: Phaser.Input.Pointer): number {
-    for (let i = 0; i < this.cardSlots.length; i++) {
-      const s = this.cardSlots[i];
+    for (let i = 0; i < this.statsHud.cardSlots.length; i++) {
+      const s = this.statsHud.cardSlots[i];
       if (
-        pointer.x >= s.x &&
-        pointer.x <= s.x + s.width &&
-        pointer.y >= s.y - 20 &&
-        pointer.y <= s.y + s.height + 30
+        pointer.x >= s.x && pointer.x <= s.x + s.width &&
+        pointer.y >= s.y - 20 && pointer.y <= s.y + s.height + 30
       ) {
         return i;
       }
@@ -2713,14 +907,64 @@ export class GameScene extends Phaser.Scene {
     return -1;
   }
 
-  /**
-   * Live "make way" reordering: while dragging, cards animate toward their
-   * target slot each time the hovered insert position changes.
-   */
+  private pointerOverHudCard(pointer: Phaser.Input.Pointer): boolean {
+    for (const card of this.hudCards) {
+      if (!card) continue;
+      const c = card.container;
+      const w = c.input?.hitArea?.width ?? this.statsHud.cardSlots[0].width;
+      const h = c.input?.hitArea?.height ?? this.statsHud.cardSlots[0].height;
+      if (
+        pointer.x >= c.x - w / 2 && pointer.x <= c.x + w / 2 &&
+        pointer.y >= c.y - h / 2 && pointer.y <= c.y + h / 2
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private updatePlusHints(): void {
+    for (let i = 0; i < this.slotPlusHints.length; i++) {
+      const hint = this.slotPlusHints[i];
+      if (!hint) continue;
+      const empty = this.dragCard
+        ? i === this.dragCard.hoverSlot
+        : !this.slotCards[i];
+      hint.setVisible(empty);
+    }
+  }
+
+  private showBolterTooltip(slot: Phaser.GameObjects.Rectangle): void {
+    this.hideBolterTooltip();
+    const i = this.statsHud.cardSlots.indexOf(slot);
+    const skill = this.slotSkill(i) ?? "shock";
+    const lvl = this.skillLevelCache[skill] ?? 1;
+    const card = this.hudCards[i];
+    const panel = buildCardTooltipPanel(this, {
+      skill,
+      level: lvl,
+      rarity: card ? card.rarity : "common",
+      modIds: card ? card.modIds : [],
+      modValues: card ? (card.modValues as number[] | undefined) ?? [] : [],
+    });
+    panel.setScrollFactor(0).setDepth(300);
+    const cam = this.cameras.main;
+    let px = slot.x + slot.width / 2;
+    px = Math.max(panel.width / 2 + 4, Math.min(cam.width - panel.width / 2 - 4, px));
+    const hudTop = this.statsHud ? this.statsHud.hudImage.y : slot.y;
+    let py = hudTop - panel.height / 2 - 30;
+    if (py < panel.height / 2 + 4) py = slot.y + slot.height + panel.height / 2 + 10;
+    panel.setPosition(px, py);
+    this.bolterTooltip = panel;
+  }
+
+  private hideBolterTooltip(): void {
+    if (this.bolterTooltip) { this.bolterTooltip.destroy(); this.bolterTooltip = null; }
+  }
+
   private updateCardDrag(pointer: Phaser.Input.Pointer): void {
     if (!this.dragCard) return;
     const d = this.dragCard;
-    // Card is centered on the cursor while dragging.
     d.obj.container.setPosition(pointer.x, pointer.y);
     const over = this.slotAtPointer(pointer);
     if (over !== d.hoverSlot) {
@@ -2729,50 +973,24 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Tween (or snap) a card container to slot i's screen position. */
-  private tweenCardTo(card: HudCardObj, i: number, animate: boolean): void {
-    const c = this.slotCenter(i);
-    card.targetSlot = i;
-    this.tweens.killTweensOf(card.container);
-    if (animate) {
-      this.tweens.add({
-        targets: card.container,
-        x: c.x,
-        y: c.y,
-        duration: 140,
-        ease: "Quad.easeOut",
-      });
-    } else {
-      card.container.setPosition(c.x, c.y);
-    }
-  }
-
-  /** Finish the drag: reorder (swap), drop to ground, or snap back. */
-  /** Finish the drag: reorder (server-authoritative), drop to ground, or snap back. */
   private endCardDrag(pointer: Phaser.Input.Pointer): void {
     if (!this.dragCard) return;
     const d = this.dragCard;
     const dropSlot = this.slotAtPointer(pointer);
-    // Released over an INVENTORY slot: store it there (msg 14/19).
-    const invDrop = this.invAtPointer(pointer);
+    const invDrop = this.invScreen ? this.invScreen.slotAtPointer(pointer) : -1;
     if (invDrop >= 0) {
       d.obj.container.destroy();
       this.hudCards[d.fromSlot] = null;
       this.dragCard = null;
       const invEmpty = !this.invCardsData[invDrop];
-      if (invEmpty) {
-        this.room?.send(14, { slot: d.fromSlot, inv: invDrop });
-      } else {
-        this.room?.send(19, { slot: d.fromSlot, inv: invDrop });
-      }
+      if (this.room) this.room.send(invEmpty ? 14 : 19, { slot: d.fromSlot, inv: invDrop });
       this.syncSlotsFromServer(true);
       this.syncInventoryFromServer(true);
       this.updatePlusHints();
       return;
     }
-    // Release OUTSIDE the HUD row: drop that slot's card to the ground.
     if (dropSlot < 0) {
-      this.dropCardToGround(d.fromSlot, pointer);
+      if (this.room) this.room.send(10, { slot: d.fromSlot });
       d.obj.container.destroy();
       this.hudCards[d.fromSlot] = null;
       this.dragCard = null;
@@ -2780,12 +998,8 @@ export class GameScene extends Phaser.Scene {
       this.hideBolterTooltip();
       return;
     }
-    // Released over a slot: ask the server to MOVE the card there.
-    // insert-shift semantics run server-side (msg 13); the HUD will be
-    // rebuilt from the authoritative equippedSlots sync.
     if (dropSlot !== d.fromSlot) {
-      this.room?.send(13, { from: d.fromSlot, to: dropSlot });
-      // Optimistic local insert-shift so the motion matches the server.
+      if (this.room) this.room.send(13, { from: d.fromSlot, to: dropSlot });
       const myCard = this.slotCards[d.fromSlot] ?? null;
       const myObj = d.obj;
       if (d.fromSlot < dropSlot) {
@@ -2802,1803 +1016,43 @@ export class GameScene extends Phaser.Scene {
       this.slotCards[dropSlot] = myCard;
       this.hudCards[dropSlot] = myObj;
     }
-    // Tween every displaced card to its (possibly new) slot.
     d.obj.container.setScale(1);
     d.obj.container.setDepth(102);
     for (let i = 0; i < this.hudCards.length; i++) {
       const c = this.hudCards[i];
-      if (c && c !== d.obj) this.tweenCardTo(c, i, true);
+      if (c && c !== d.obj) {
+        const ctr = slotCenter(this.statsHud, i);
+        this.tweens.killTweensOf(c.container);
+        this.tweens.add({
+          targets: c.container,
+          x: ctr.x, y: ctr.y,
+          duration: 140, ease: "Quad.easeOut",
+        });
+        c.targetSlot = i;
+      }
     }
-    this.tweenCardTo(d.obj, dropSlot, true);
+    const final = slotCenter(this.statsHud, dropSlot);
+    this.tweens.killTweensOf(d.obj.container);
+    this.tweens.add({
+      targets: d.obj.container,
+      x: final.x, y: final.y,
+      duration: 140, ease: "Quad.easeOut",
+    });
+    d.obj.targetSlot = dropSlot;
     this.dragCard = null;
     this.updatePlusHints();
   }
 
-  /**
-   * Send the dropped card to the server so it appears on the map ground
-   * for everyone. The card leaves this player's HUD (slotLayout keeps
-   * the now-empty slot).
-   */
-  private dropCardToGround(
-    slot: number,
-    _pointer: Phaser.Input.Pointer,
-  ): void {
-    if (!this.room) return;
-    this.room.send(10, { slot });
-  }
-
-  private showPickupFailedToast(msg: string): void {
-    const x = this.cameras.main.width / 2;
-    const txt = this.add
-      .text(x, this.cameras.main.height - 170, msg, {
-        color: "#ff5555",
-        fontSize: "14px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(3000);
-    this.tweens.add({
-      targets: txt,
-      alpha: 0,
-      delay: 900,
-      duration: 400,
-      onComplete: () => txt.destroy(),
-    });
-  }
-
-  /** True if the pointer is over any ground card entity (screen space). */
-  private pointerOverGroundCard(pointer: Phaser.Input.Pointer): boolean {
-    if (this.groundGrab) return true;
-    for (const entity of this.groundCardEntities.values()) {
-      if (!entity.visible) continue;
-      const w = entity.input?.hitArea?.width ?? 84;
-      const h = entity.input?.hitArea?.height ?? 20;
-      if (
-        pointer.x >= entity.x - w / 2 &&
-        pointer.x <= entity.x + w / 2 &&
-        pointer.y >= entity.y - h / 2 &&
-        pointer.y <= entity.y + h / 2
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * HARD SYNC: after any structural change, snap every card to its
-   * slot's exact position and clear all tweens. Guarantees the visuals
-   * always match the server's equippedSlots (no drift, no stuck tweens).
-   */
-  private syncAllCardPositions(): void {
-    for (const card of this.hudCards) {
-      if (card) this.tweens.killTweensOf(card.container);
-    }
-    for (let i = 0; i < this.hudCards.length; i++) {
-      const card = this.hudCards[i];
-      if (!card) continue;
-      const c = this.slotCenter(i);
-      card.targetSlot = i;
-      card.container.setPosition(c.x, c.y);
-      card.container.setScale(1);
-      card.container.setDepth(102);
-    }
-    this.updatePlusHints();
-  }
-
-  /** True if the pointer is currently over any HUD card (screen space). */
-  private pointerOverHudCard(pointer: Phaser.Input.Pointer): boolean {
-    for (const card of this.hudCards) {
-      if (!card) continue;
-      const c = card.container;
-      const w = c.input?.hitArea?.width ?? this.cardSlots[0].width;
-      const h = c.input?.hitArea?.height ?? this.cardSlots[0].height;
-      if (
-        pointer.x >= c.x - w / 2 &&
-        pointer.x <= c.x + w / 2 &&
-        pointer.y >= c.y - h / 2 &&
-        pointer.y <= c.y + h / 2
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** Show/hide the "+" hints: any empty slot (live layout while dragging). */
-  private updatePlusHints(): void {
-    for (let i = 0; i < this.slotPlusHints.length; i++) {
-      const hint = this.slotPlusHints[i];
-      if (!hint) continue;
-      // While dragging, highlight the hovered drop slot.
-      const empty = this.dragCard
-        ? i === this.dragCard.hoverSlot
-        : !this.slotCards[i];
-      hint.setVisible(empty);
-    }
-  }
-
-  // (dash / claw card refreshers removed - slot system renders cards)
-
-  /** Yellow explosion blast VFX for vortex L5+. */
-  private showVortexExplosion(x: number, y: number, radius: number): void {
-    const YELLOW = 0xffe14d;
-
-    // 1. Core flash — bright yellow filled circle that expands fast
-    const flash = this.add
-      .circle(x, y, radius * 0.25, YELLOW, 0.85)
-      .setDepth(7);
-    this.tweens.add({
-      targets: flash,
-      scale: 3.4,
-      alpha: 0,
-      duration: 380,
-      ease: "Cubic.out",
-      onComplete: () => flash.destroy(),
-    });
-
-    // 2. Expanding shockwave ring
-    const shock = this.add
-      .circle(x, y, radius * 0.35, 0xffffff, 0)
-      .setStrokeStyle(6, YELLOW, 0.95)
-      .setDepth(7);
-    this.tweens.add({
-      targets: shock,
-      scale: 3.2,
-      alpha: 0,
-      duration: 480,
-      ease: "Cubic.out",
-      onComplete: () => shock.destroy(),
-    });
-
-    // 3. Debris sparks flying outward
-    for (let i = 0; i < 10; i++) {
-      const ang = (i / 10) * Math.PI * 2 + Math.random() * 0.4;
-      const spark = this.add.circle(x, y, 4, YELLOW, 1).setDepth(7);
-      const dist = radius * (0.55 + Math.random() * 0.45);
-      this.tweens.add({
-        targets: spark,
-        x: x + Math.cos(ang) * dist,
-        y: y + Math.sin(ang) * dist,
-        alpha: 0,
-        scale: 0.2,
-        duration: 420 + Math.random() * 180,
-        ease: "Quad.out",
-        onComplete: () => spark.destroy(),
-      });
-    }
-
-    // 4. Camera shake for impact
-    this.cameras.main.shake(180, 0.004);
-  }
-
-  // (vortex card refresher removed - slot system renders cards)
-
-  // (heal card refresher removed - slot system renders cards)
-
-  // (pulse card refresher removed - slot system renders cards)
-
-  /**
-   * Update every HUD card's cooldown overlay from the synced player data
-   * (grows bottom-up while on cooldown, dim while not ready).
-   */
-  private updateSlotCooldowns(): void {
-    if (!this.currentPlayer) return;
-    const now = Date.now();
-    const cds = (this.currentPlayer.data.get("slotCooldownEndsAt") as
-      | number[]
-      | undefined) ?? [];
-    const healKills = (this.currentPlayer.data.get("slotHealKills") as
-      | number[]
-      | undefined) ?? [];
-    for (let i = 0; i < this.hudCards.length; i++) {
-      const card = this.hudCards[i];
-      if (!card) continue;
-      const sc = this.slotCards[i];
-      const endsAt = cds[i] ?? 0;
-      let fillPct: number;
-      if (card.skill === "heal" && sc && sc.level < 6) {
-        // Kill-charged heal card: fill = kills / threshold.
-        const kills = healKills[i] ?? 0;
-        const threshold = sc.level <= 2 ? 4 : 3;
-        if (kills >= threshold) {
-          card.img.setAlpha(1);
-          card.cdFill.setVisible(false);
-          continue;
-        }
-        card.img.setAlpha(0.45);
-        card.cdFill.setVisible(true);
-        fillPct = Math.min(1, kills / threshold);
-      } else if (endsAt > now) {
-        card.img.setAlpha(0.45);
-        card.cdFill.setVisible(true);
-        const totalMs = SLOT_CD_MS[card.skill] ?? 1000;
-        fillPct = Math.max(0, Math.min(1, 1 - (endsAt - now) / totalMs));
-      } else {
-        card.img.setAlpha(1);
-        card.cdFill.setVisible(false);
-        continue;
-      }
-      const bh = (card.cdFill.getData("baseH") as number) || 1;
-      const bw = (card.cdFill.getData("baseW") as number) || 1;
-      const height = bh * fillPct;
-      card.cdFill.setSize(bw, height);
-      card.cdFill.y = bh / 2 - height;
-      card.cdFill.visible = true;
-    }
-  }
-  private showBolterTooltip(slot: Phaser.GameObjects.Rectangle): void {
-    this.hideBolterTooltip();
-    const i = this.cardSlots.indexOf(slot);
-    const skill = this.slotSkill(i) ?? "shock";
-    const lvl = this.skillLevelCache[skill] ?? 1;
-    const card = this.hudCards[i];
-    const panel = this.buildCardTooltipPanel({
-      skill,
-      level: lvl,
-      rarity: card ? card.rarity : "common",
-      modIds: card ? card.modIds : [],
-      modValues: card ? (card.modValues as number[] | undefined) ?? [] : [],
-    });
-    panel.setScrollFactor(0);
-    panel.setDepth(300);
-    // Hover the panel ABOVE THE WHOLE HUD IMAGE (its art extends well
-    // above the slots), bottom edge 10px over the HUD top. Clamp in-screen;
-    // if the screen is too short, fall back to below the slot.
-    const cam = this.cameras.main;
-    let px = slot.x + slot.width / 2;
-    px = Math.max(panel.width / 2 + 4, Math.min(cam.width - panel.width / 2 - 4, px));
-    const hudTop = this.hudImage ? this.hudImage.y : slot.y;
-    let py = hudTop - panel.height / 2 - 30;
-    if (py < panel.height / 2 + 4) py = slot.y + slot.height + panel.height / 2 + 10;
-    panel.setPosition(px, py);
-    this.bolterTooltip = panel;
-  }
-
-  private hideBolterTooltip(): void {
-    if (this.bolterTooltip) {
-      this.bolterTooltip.destroy();
-      this.bolterTooltip = null;
-    }
-  }
-
-  /** Approximate local player attack value for the tooltip. */
-  private localPlayerAttack(): number {
-    if (!this.currentPlayer) return 0;
-    // attack is tracked via stats HUD; read from the synced schema via data.
-    return (this.currentPlayer.data.get("attack") as number) ?? 100;
-  }
-
-  /** True if ANY slot holding this skill is ready (claw auto-attack). */
-  private isSkillReady(skill: SkillId): boolean {
-    if (!this.currentPlayer) return true;
-    for (let i = 0; i < this.slotCards.length; i++) {
-      const sc = this.slotCards[i];
-      if (sc && sc.skill === skill && this.isSlotReady(i)) return true;
-    }
-    return false;
-  }
-
-  /** Show a transient "skill in cooldown" message above the HUD. */
-  private showCooldownToast(): void {
-    const msg = "skill in cooldown";
-    const x = this.cameras.main.centerX;
-    const y = this.hudImage
-      ? this.hudImage.y - 18
-      : this.cameras.main.height - 160;
-    if (this.cooldownToast) {
-      this.cooldownToast.setText(msg).setPosition(x, y);
-    } else {
-      this.cooldownToast = this.add
-        .text(x, y, msg, {
-          color: "#cccccc",
-          fontSize: "16px",
-          fontFamily: "monospace",
-          stroke: "#000000",
-          strokeThickness: 3,
-        })
-        .setOrigin(0.5)
-        .setScrollFactor(0)
-        .setDepth(200);
-    }
-    this.cooldownToast.setAlpha(1);
-    this.tweens.killTweensOf(this.cooldownToast);
-    this.time.delayedCall(600, () => {
-      this.tweens.add({
-        targets: this.cooldownToast,
-        alpha: 0,
-        duration: 400,
-      });
-    });
-  }
-
-  /** Show a transient "cards upgraded to Lv X" toast. */
-  private showUpgradeToast(level: number): void {
-    const msg = `Cards upgraded to Lv ${level}`;
-    if (this.upgradeToast) {
-      this.upgradeToast.setText(msg);
-    } else {
-      this.upgradeToast = this.add
-        .text(this.cameras.main.centerX, 60, msg, {
-          color: "#ffd700",
-          fontSize: "20px",
-          fontFamily: "monospace",
-          stroke: "#000000",
-          strokeThickness: 4,
-        })
-        .setOrigin(0.5)
-        .setScrollFactor(0)
-        .setDepth(200);
-    }
-    this.upgradeToast.setAlpha(1);
-    this.tweens.killTweensOf(this.upgradeToast);
-    this.time.delayedCall(1200, () => {
-      this.tweens.add({
-        targets: this.upgradeToast,
-        alpha: 0,
-        duration: 600,
-      });
-    });
-  }
-
-  // ============================================================
-  // STATS HUD
-  // ============================================================
-  // ============================================================
-  // HUD LAYOUT CONSTANTS (native hud.png pixels — tweak these!)
-  // ============================================================
-  //
-  // Adjust these constants in createStatsHUD() to perfectly align the HP
-  // bar and card slots with the hud.png art. All values are in NATIVE
-  // image pixels (1366x479). The HUD_SCALE multiplier is applied
-  // automatically so everything scales together.
-  //
-  //   - Hitboxes are SHOWN when you press F3 (toggleHitboxes) so you can
-  //     see exactly where the regions are and align them visually.
-  //   - Red colors: hpFillColor / hpBackColor are the HP bar colors.
-  //   - Cards: 64x200 native card image goes into the region you define.
-  //
-  // ============================================================
-
-  /**
-   * Bottom-left HUD drawn over the hud.png image.
-   *
-   * TUNABLE CONSTANTS BELOW — adjust for perfect alignment.
-   */
-  private createStatsHUD(): void {
-    //
-    // ============================================================
-    // 🔧 TUNABLE CONSTANTS START (edit these!)
-    // ============================================================
-    //
-
-    // Overall HUD scale (native is 1366x479; tweak if HUD is too big/small)
-    const HUD_SCALE = 0.3;
-
-    // ---- HP bar region (native hud.png pixels) ----
-    // These define WHERE on the HUD image the HP fill goes.
-    const HP_X = 87; // left edge of HP fill area
-    const HP_Y_TOP = 90; // top edge (HP drains DOWN from here)
-    const HP_Y_BOT = 400; // bottom edge (fill is anchored here)
-    const HP_WIDTH = 120; // width of HP bar
-
-    // ---- HP bar colors ----
-    const HP_BACK_COLOR = 0x1a0000; // dark empty-bar backing (deeper red)
-    const HP_FILL_COLOR = 0xaa0000; // HP fill color (deeper red, not bright)
-    const HP_FILL_ALPHA = 1.0;
-
-    // ---- Shield bar region (native hud.png pixels) ----
-    // The shield bar sits just ABOVE the HP bar (further toward the top of
-    // the HUD image), same width as HP. Tune SHIELD_Y_TOP to move it.
-    // SHIELD_Y_BOT == HP_Y_TOP so the shield bar's bottom touches the HP bar's top.
-    const SHIELD_Y_TOP = 90; // top edge of the shield bar (higher = taller)
-    const SHIELD_Y_BOT = 400; // bottom edge of the shield bar (== HP_Y_TOP)
-    // X position of the shield bar (native hud.png pixels). Defaults to the
-    // same X as the HP bar; change this to move the shield bar elsewhere.
-    const SHIELD_X = 238;
-    const SHIELD_BACK_COLOR = 0x06141c; // dark empty backing (deep blue)
-    const SHIELD_FILL_COLOR = 0x33b5ff; // light-blue shield fill
-    const SHIELD_FILL_ALPHA = 0.9;
-
-    // ---- 5 card slot regions (native hud.png pixels) ----
-    // Each slot defines WHERE on the HUD the 64x200 card goes.
-    const SLOT_Y_TOP = 150;
-    const SLOT_Y_BOT = 400;
-    const SLOT_WIDTH = 128;
-    const SLOT_X0 = 440; // slot 0 left
-    const SLOT_GAP = 25; // gap between slots
-
-    // Hitbox colors (visible when F3 is pressed)
-    const HITBOX_HP_COLOR = 0x00ffff; // cyan for HP bar region
-    const HITBOX_CARD_COLOR = 0xff00ff; // magenta for card slots
-    const HITBOX_STROKE = 2;
-
-    //
-    // ============================================================
-    // 🔧 TUNABLE CONSTANTS END
-    // ============================================================
-    //
-
-    const HUD_IMG_W = 1366;
-    const HUD_IMG_H = 479;
-    const hudW = HUD_IMG_W * HUD_SCALE;
-    const hudH = HUD_IMG_H * HUD_SCALE;
-
-    const hudOriginX = 0;
-    const hudOriginY = this.cameras.main.height - hudH;
-
-    const nx = (x: number) => hudOriginX + x * HUD_SCALE;
-    const ny = (y: number) => hudOriginY + y * HUD_SCALE;
-
-    // ---- HUD background image ----
-    this.hudImage = this.add
-      .image(hudOriginX, hudOriginY, "hud")
-      .setOrigin(0, 0)
-      .setDisplaySize(hudW, hudH)
-      .setScrollFactor(0)
-      .setDepth(100);
-
-    // ---- HP bar: back + fill ----
-    const hpFullW = HP_WIDTH * HUD_SCALE;
-    const hpFullH = (HP_Y_BOT - HP_Y_TOP) * HUD_SCALE;
-    this.hpBarFullWidth = hpFullW;
-    this.hpBarFullHeight = hpFullH;
-
-    // Dark backing (empty bar behind the fill)
-    this.add
-      .rectangle(nx(HP_X), ny(HP_Y_TOP), hpFullW, hpFullH, HP_BACK_COLOR)
-      .setOrigin(0, 0)
-      .setScrollFactor(0)
-      .setDepth(101);
-
-    // HP fill (anchored at bottom so it drains TOP->BOTTOM as HP drops)
-    this.hpFill = this.add
-      .rectangle(
-        nx(HP_X),
-        ny(HP_Y_BOT),
-        hpFullW,
-        hpFullH,
-        HP_FILL_COLOR,
-        HP_FILL_ALPHA,
-      )
-      .setOrigin(0, 1)
-      .setScrollFactor(0)
-      .setDepth(102);
-
-    // HP text overlay
-    this.hpText = this.add
-      .text(nx(HP_X) + hpFullW / 2, ny(HP_Y_TOP) + hpFullH / 2, "", {
-        color: "#ffffff",
-        fontSize: "14px",
-        fontFamily: "monospace",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(103);
-
-    // ---- Shield bar: back + fill + text (drawn ABOVE the HP bar) ----
-    // Use the same width as the HP bar. The shield bar extends upward from
-    // the top of the HP bar (SHIELD_Y_BOT == HP_Y_TOP).
-    const shieldFullW = hpFullW;
-    const shieldFullH = (SHIELD_Y_BOT - SHIELD_Y_TOP) * HUD_SCALE;
-    this.shieldBarFullWidth = shieldFullW;
-    this.shieldBarFullHeight = shieldFullH;
-    this.add
-      .rectangle(
-        nx(SHIELD_X),
-        ny(SHIELD_Y_TOP),
-        shieldFullW,
-        shieldFullH,
-        SHIELD_BACK_COLOR,
-      )
-      .setOrigin(0, 0)
-      .setScrollFactor(0)
-      .setDepth(101);
-    this.shieldFill = this.add
-      .rectangle(
-        nx(SHIELD_X),
-        ny(SHIELD_Y_BOT),
-        shieldFullW,
-        shieldFullH,
-        SHIELD_FILL_COLOR,
-        SHIELD_FILL_ALPHA,
-      )
-      .setOrigin(0, 1)
-      .setScrollFactor(0)
-      .setDepth(102);
-    this.shieldText = this.add
-      .text(
-        nx(SHIELD_X) + shieldFullW / 2,
-        ny(SHIELD_Y_TOP) + shieldFullH / 2,
-        "",
-        {
-          color: "#eaf6ff",
-          fontSize: "11px",
-          fontFamily: "monospace",
-          stroke: "#000000",
-          strokeThickness: 3,
-        },
-      )
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(103);
-
-    // ---- Low-HP / low-shield edge vignettes (screen-edge tints) ----
-    // Four thin rectangles per color around the playable window edges.
-    // They start invisible and are driven by updateVignettes() each tick.
-    const camW = this.cameras.main.width;
-    const camH = this.cameras.main.height;
-    const V_THICK = 36; // edge thickness in px (tune)
-    // Left and right edge bars only (cleaner look than full-frame vignette).
-    const makeVignette = (color: number): Phaser.GameObjects.Rectangle[] => {
-      const lef = this.add
-        .rectangle(V_THICK / 2, camH / 2, V_THICK, camH, color)
-        .setScrollFactor(0)
-        .setDepth(490)
-        .setAlpha(0);
-      const rig = this.add
-        .rectangle(camW - V_THICK / 2, camH / 2, V_THICK, camH, color)
-        .setScrollFactor(0)
-        .setDepth(490)
-        .setAlpha(0);
-      return [lef, rig];
-    };
-    this.lowHpVignette = makeVignette(0xff0000);
-    this.lowShieldVignette = makeVignette(0x33b5ff);
-
-    // ---- 5 card slots (empty frames ready for 64x200 cards) ----
-    const slotW = SLOT_WIDTH * HUD_SCALE;
-    const slotH = (SLOT_Y_BOT - SLOT_Y_TOP) * HUD_SCALE;
-    const slotStep = (SLOT_WIDTH + SLOT_GAP) * HUD_SCALE;
-    const slot0X = nx(SLOT_X0);
-    const slot0Y = ny(SLOT_Y_TOP);
-
-    this.cardSlots = [];
-    this.hudHitboxCards = [];
-    for (let i = 0; i < 5; i++) {
-      const x = slot0X + i * slotStep;
-      const y = slot0Y;
-
-      // Invisible placeholder frame (for later card placement)
-      const frame = this.add
-        .rectangle(x, y, slotW, slotH, 0x000000, 0.0)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setDepth(101);
-      this.cardSlots.push(frame);
-
-      // Hitbox overlay (visible when showHitboxes is true)
-      const hb = this.add
-        .rectangle(x, y, slotW, slotH, 0x000000, 0.0)
-        .setStrokeStyle(HITBOX_STROKE, HITBOX_CARD_COLOR, 0.9)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setDepth(1000);
-      hb.setVisible(this.showHitboxes);
-      this.hudHitboxCards.push(hb);
-    }
-
-    // ---- HP bar hitbox overlay ----
-    this.hudHitboxHP = this.add
-      .rectangle(nx(HP_X), ny(HP_Y_TOP), hpFullW, hpFullH, 0x000000, 0.0)
-      .setStrokeStyle(HITBOX_STROKE, HITBOX_HP_COLOR, 0.9)
-      .setOrigin(0, 0)
-      .setScrollFactor(0)
-      .setDepth(1000);
-    this.hudHitboxHP.setVisible(this.showHitboxes);
-
-    // ---- Secondary stats text (top-right) ----
-    this.statsText = this.add
-      .text(this.cameras.main.width - 10, 10, "", {
-        color: "#ffffff",
-        fontSize: "12px",
-        fontFamily: "monospace",
-        align: "right",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(1, 0)
-      .setScrollFactor(0)
-      .setDepth(100);
-  }
-
-  // ============================================================
-  // XP BAR (top-center)
-  // ============================================================
-
-  /**
-   * Create the thin blue XP bar at the top-center of the screen.
-   * Layout:  [ Lv 5 ]  [========blue bar showing xp=========]
-   *                ^- level badge in front of the bar.
-   *
-   * Structure (left to right):
-   *   1. levelBadge  - rounded blue pill with "Lv N" text
-   *   2. xpBarBack   - dark backing rectangle (empty bar)
-   *   3. xpBarFill   - blue fill (current xp progress)
-   *   4. xpBarGain   - white overlay on newly gained portion
-   *   5. xpBarText   - "120 / 1000" centered text
-   */
-  private createXpBar(): void {
-    const W = this.cameras.main.width;
-    const OFFSET_X = -300;
-    const cx = W / 2 + OFFSET_X;
-
-    // ============================================================
-    // 🔧 TUNABLE XP BAR CONSTANTS — edit these to reposition!
-    // ============================================================
-    //
-    // BAR_W        Width of the XP bar in pixels.
-    // BAR_H        Height of the XP bar in pixels.
-    // BADGE_GAP    Gap between level text and bar left edge.
-    // ABOVE_HUD_GAP  How many px ABOVE the HUD image top edge.
-    //               Increase to push the bar higher above the HUD.
-    //               Set to 0 to sit directly on top of the HUD.
-    // OFFSET_X     Horizontal shift of the whole XP bar row.
-    //               0 = screen center (default).
-    //               Negative = shift LEFT  (e.g. -200 moves it left).
-    //               Positive = shift RIGHT (e.g. 200 moves it right).
-    //
-    // ============================================================
-    const BAR_W = Math.min(W * 0.35, 196);
-    const BAR_H = 6;
-    const BADGE_GAP = 6;
-    const ABOVE_HUD_GAP = -34;
-    const BACK_COLOR = 0x0a1a2a;
-    const FILL_COLOR = 0x2f8fff;
-
-    // Position the bar ABOVE the HUD image (above the cards).
-    // hudOriginY = top edge of the HUD image on screen.
-    const HUD_SCALE_TMP = 0.3;
-    const HUD_IMG_H_TMP = 479;
-    const hudTopY = this.cameras.main.height - HUD_IMG_H_TMP * HUD_SCALE_TMP;
-    const TOP_Y = hudTopY - ABOVE_HUD_GAP - BAR_H;
-
-    // Measure the level text so we can lay out: [Lv N]  [==bar==]
-    // We will create the text first, then position the bar to its right.
-    // For now compute approximate layout assuming text width ~ 36px.
-    const levelTextApproxW = 36;
-    const totalW = levelTextApproxW + BADGE_GAP + BAR_W;
-    const rowLeft = cx - totalW / 2;
-    const barX = rowLeft + levelTextApproxW + BADGE_GAP;
-    const levelTextX = rowLeft + levelTextApproxW / 2;
-    const cy = TOP_Y + BAR_H / 2;
-
-    this.xpBarFullWidth = BAR_W;
-    this.xpBarY = cy;
-
-    // ---- XP bar back (dark empty bar) ----
-    this.xpBarBack = this.add
-      .rectangle(barX, TOP_Y, BAR_W, BAR_H, BACK_COLOR)
-      .setOrigin(0, 0)
-      .setScrollFactor(0)
-      .setDepth(150);
-
-    // ---- XP bar fill (blue, grows left to right) ----
-    this.xpBarFill = this.add
-      .rectangle(barX, TOP_Y, 0, BAR_H, FILL_COLOR)
-      .setOrigin(0, 0)
-      .setScrollFactor(0)
-      .setDepth(151);
-
-    // ---- XP bar gain overlay (white, starts invisible) ----
-    this.xpBarGain = this.add
-      .rectangle(barX, TOP_Y, 0, BAR_H, 0xffffff)
-      .setOrigin(0, 0)
-      .setScrollFactor(0)
-      .setDepth(152)
-      .setAlpha(0);
-
-    // ---- Numeric text overlay inside the bar ----
-    this.xpBarText = this.add
-      .text(barX + BAR_W / 2, cy, "", {
-        color: "#ffffff",
-        fontSize: "10px",
-        fontFamily: "monospace",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(153);
-
-    // ---- Level text (gold, no background) ----
-    this.levelBadgeText = this.add
-      .text(levelTextX, cy, "Lv 1", {
-        color: "#ffd700",
-        fontSize: "14px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(153);
-
-    // Dummy container reference (no background graphic anymore)
-    this.levelBadge = this.add
-      .container(0, 0, [this.levelBadgeText])
-      .setScrollFactor(0)
-      .setDepth(151);
-
-    // ---- Skill point badge (blinking dot top-right of level text) ----
-    const badgeX = levelTextX + 16;
-    const badgeY = cy - 10;
-    const badgeBg = this.add.graphics().setScrollFactor(0).setDepth(154);
-    badgeBg.fillStyle(0xffd700, 1);
-    badgeBg.fillCircle(badgeX, badgeY, 6);
-    badgeBg.lineStyle(2, 0xffffff, 0.9);
-    badgeBg.strokeCircle(badgeX, badgeY, 6);
-    this.skillPointBadgeText = this.add
-      .text(badgeX, badgeY, "1", {
-        color: "#000000",
-        fontSize: "10px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(155);
-    this.skillPointBadge = this.add
-      .container(0, 0, [badgeBg, this.skillPointBadgeText])
-      .setScrollFactor(0)
-      .setDepth(154)
-      .setVisible(false);
-
-    // ---- Make level text clickable to open character screen ----
-    this.levelBadgeText.setInteractive({ useHandCursor: true });
-    this.levelBadgeText.on("pointerdown", () => {
-      if (!this.charScreenVisible) this.toggleCharacterScreen();
-    });
-  }
-
-  /**
-   * Refresh the XP bar from a Player state object.
-   * Detects XP gain (currentXp increased without a level change) and triggers
-   *   - white flash on the gained portion that fades to reveal blue
-   *   - "+N xp" popup text at top-center
-   * Detects level-up and triggers a celebration toast.
-   *
-   * @param player - the synced Player state for the local player.
-   */
-  private updateXpBar(player: any): void {
-    if (!this.xpBarFill) return;
-
-    const level = Math.floor(player.level ?? 1);
-    const currentXp = Math.floor(player.currentXp ?? 0);
-    const xpToLevelUp = Math.max(1, Math.floor(player.xpToLevelUp ?? 1));
-
-    // ---- Update level badge text ----
-    this.levelBadgeText.setText("Lv " + level);
-
-    // ---- Compute fill ratio ----
-    const ratio = Phaser.Math.Clamp(currentXp / xpToLevelUp, 0, 1);
-    const fillW = this.xpBarFullWidth * ratio;
-    this.xpBarFill.setSize(fillW, this.xpBarFill.height);
-
-    // ---- Update numeric overlay ----
-    this.xpBarText.setText(
-      formatNumber(currentXp) + " / " + formatNumber(xpToLevelUp),
-    );
-
-    // ---- Detect XP gain / level-up ----
-    if (this.lastKnownLevel !== -1) {
-      // Normal XP gain (same level, xp went up)
-      if (level === this.lastKnownLevel && currentXp > this.lastKnownXp) {
-        const gained = currentXp - this.lastKnownXp;
-        this.flashXpBarGain(this.lastKnownXp, currentXp, xpToLevelUp);
-        this.showXpGainPopup(gained);
-      } else if (level > this.lastKnownLevel) {
-        // Level-up occurred. The server addXp() rolls excess XP into the
-        // new level, so show: (a) XP that completed the previous bar + (b)
-        // XP carried into the new level as a separate gain popup.
-        this.showLevelUpToast(level);
-        // Flash full bar white then reset for new level
-        this.flashLevelUpBar();
-        // Show popup for XP already in new level (if any)
-        if (currentXp > 0) {
-          this.flashXpBarGain(0, currentXp, xpToLevelUp);
-          this.showXpGainPopup(currentXp);
-        }
-      }
-      // XP loss (death penalty) - just silently update the bar
-    }
-
-    this.lastKnownXp = currentXp;
-    this.lastKnownLevel = level;
-
-    // ---- Update skill point badge visibility ----
-    const sp = Math.floor(player.skillPoints ?? 0);
-    if (sp > 0) {
-      this.skillPointBadgeText.setText(String(sp));
-      this.skillPointBadge.setVisible(true);
-      if (!this.skillPointBadgePulse) {
-        this.skillPointBadgePulse = this.tweens.add({
-          targets: this.skillPointBadge,
-          alpha: { from: 0.4, to: 1.0 },
-          duration: 500,
-          yoyo: true,
-          repeat: -1,
-          ease: "Sine.inOut",
-        });
-      }
-    } else {
-      this.skillPointBadge.setVisible(false);
-      if (this.skillPointBadgePulse) {
-        this.skillPointBadgePulse.stop();
-        this.skillPointBadgePulse = null;
-        this.skillPointBadge.setAlpha(1);
-      }
-    }
-  }
-
-  /**
-   * White flash overlay on the gained portion of the XP bar, fades out to
-   * reveal the blue fill underneath.
-   */
-  private flashXpBarGain(
-    fromXp: number,
-    toXp: number,
-    xpToLevelUp: number,
-  ): void {
-    if (!this.xpBarGain) return;
-    const startX = this.xpBarFill.x;
-    const fromRatio = Phaser.Math.Clamp(fromXp / xpToLevelUp, 0, 1);
-    const toRatio = Phaser.Math.Clamp(toXp / xpToLevelUp, 0, 1);
-    const gainX = startX + this.xpBarFullWidth * fromRatio;
-    const gainW = this.xpBarFullWidth * (toRatio - fromRatio);
-    if (gainW < 0.5) return;
-
-    // Position the white gain overlay over the newly gained portion
-    this.xpBarGain
-      .setPosition(gainX, this.xpBarFill.y)
-      .setSize(gainW, this.xpBarFill.height)
-      .setAlpha(1);
-
-    // Fade the white overlay out so the blue fill shows through
-    this.tweens.killTweensOf(this.xpBarGain);
-    this.tweens.add({
-      targets: this.xpBarGain,
-      alpha: 0,
-      duration: 600,
-      ease: "Cubic.out",
-      delay: 80,
-    });
-  }
-
-  /** Full-bar white flash used on level-up. */
-  private flashLevelUpBar(): void {
-    if (!this.xpBarGain) return;
-    this.xpBarGain
-      .setPosition(this.xpBarFill.x, this.xpBarFill.y)
-      .setSize(this.xpBarFullWidth, this.xpBarFill.height)
-      .setAlpha(1);
-    this.tweens.killTweensOf(this.xpBarGain);
-    this.tweens.add({
-      targets: this.xpBarGain,
-      alpha: 0,
-      duration: 800,
-      ease: "Cubic.out",
-      delay: 150,
-    });
-  }
-
-  /**
-   * Show a small "+N xp" popup at the top-center of the screen.
-   * The text rises and fades out over ~1 second.
-   * Uses a simple pool to avoid allocating a new Text each gain.
-   */
-  private showXpGainPopup(amount: number): void {
-    if (amount <= 0) return;
-    // Center the popup above the middle of the XP bar
-    const x = this.xpBarFill.x + this.xpBarFullWidth / 2;
-    const y = this.xpBarY + 18;
-
-    // Try to reuse an idle popup from the pool
-    let popup: Phaser.GameObjects.Text | null = null;
-    for (const p of this.xpGainPopups) {
-      if (p.alpha === 0 || !p.active) {
-        popup = p;
-        break;
-      }
-    }
-    if (!popup) {
-      // Cap pool size to avoid runaway allocations
-      if (this.xpGainPopups.length >= 8) {
-        // Reuse the oldest one
-        popup = this.xpGainPopups[0];
-      } else {
-        popup = this.add
-          .text(x, y, "", {
-            color: "#bfe3ff",
-            fontSize: "12px",
-            fontFamily: "monospace",
-            fontStyle: "bold",
-            stroke: "#000000",
-            strokeThickness: 3,
-          })
-          .setOrigin(0.5)
-          .setScrollFactor(0)
-          .setDepth(201);
-        this.xpGainPopups.push(popup);
-      }
-    }
-
-    popup
-      .setPosition(x, y)
-      .setText("+" + formatNumber(amount) + " xp")
-      .setAlpha(1)
-      .setActive(true)
-      .setVisible(true);
-
-    this.tweens.killTweensOf(popup);
-    this.tweens.add({
-      targets: popup,
-      y: y - 24,
-      alpha: 0,
-      duration: 1000,
-      ease: "Cubic.out",
-      delay: 100,
-      onComplete: () => {
-        popup!.setActive(false);
-      },
-    });
-  }
-
-  /**
-   * Spawn a floating damage number at a world position.
-   * White for normal hits, gold + larger for critical hits.
-   */
-  private showDamageNumber(
-    x: number,
-    y: number,
-    damage: number,
-    isCrit: boolean,
-    shieldDamage?: number,
-    hpDamage?: number,
-  ): void {
-    // Determine color: blue for shield damage, white for HP damage.
-    const sd = shieldDamage ?? 0;
-    const hd = hpDamage ?? (sd > 0 ? damage - sd : damage);
-    // If shield absorbed everything, show blue; if split, show both.
-    const isShieldHit = sd > 0 && hd <= 0;
-    if (damage <= 0) return;
-    // Random horizontal jitter so overlapping hits don't stack perfectly.
-    const jitterX = (Math.random() - 0.5) * 16;
-    const startY = y - 20;
-
-    // Reuse an idle text from the pool.
-    let txt: Phaser.GameObjects.Text | null = null;
-    for (const t of this.damageTexts) {
-      if (t.alpha === 0 || !t.active) {
-        txt = t;
-        break;
-      }
-    }
-    if (!txt) {
-      if (this.damageTexts.length >= 30) {
-        txt = this.damageTexts[0];
-      } else {
-        txt = this.add
-          .text(x, startY, "", {
-            color: "#ffffff",
-            fontSize: "14px",
-            fontFamily: "monospace",
-            fontStyle: "bold",
-            stroke: "#000000",
-            strokeThickness: 3,
-          })
-          .setOrigin(0.5)
-          .setDepth(300);
-        this.damageTexts.push(txt);
-      }
-    }
-
-    // Blue for shield damage, white for HP damage, gold for crit.
-    const baseColor = isShieldHit ? "#33b5ff" : "#ffffff";
-    const label = isCrit
-      ? Math.round(damage) + "!"
-      : String(Math.round(damage));
-    txt
-      .setPosition(x + jitterX, startY)
-      .setText(label)
-      .setFontSize(isCrit ? "20px" : "14px")
-      .setColor(isCrit ? "#ffd700" : baseColor)
-      .setAlpha(1)
-      .setActive(true)
-      .setVisible(true);
-
-    this.tweens.killTweensOf(txt);
-    this.tweens.add({
-      targets: txt,
-      y: startY - 32,
-      alpha: 0,
-      duration: isCrit ? 900 : 700,
-      ease: "Cubic.out",
-      delay: 80,
-      onComplete: () => {
-        txt!.setActive(false);
-      },
-    });
-  }
-
-  /**
-   * Show a short-lived centered announcement (elite spawn/kill, etc).
-   */
-  private announce(msg: string, color: string): void {
-    const x = this.cameras.main.width / 2;
-    const txt = this.add
-      .text(x, 60, msg, {
-        color,
-        fontSize: "18px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 4,
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(3000);
-    this.tweens.add({
-      targets: txt,
-      alpha: 0,
-      delay: 1800,
-      duration: 700,
-      onComplete: () => txt.destroy(),
-    });
-  }
-
-  /**
-   * Elite HUD: announce spawn/kill via state.eliteAlive edge detection.
-   * (No fixed boss bar on screen - reserved for future bosses; the small
-   * floating HP bar above the elite itself is enough.)
-   */
-  private updateEliteHud(): void {
-    const eliteAlive = !!((this.room as any)?.state?.eliteAlive ?? false);
-    if (eliteAlive !== this.lastEliteAlive) {
-      this.lastEliteAlive = eliteAlive;
-      this.announce(
-        eliteAlive
-          ? "AN ELITE ENEMY HAS AWAKENED"
-          : "ELITE SLAIN - EXIT UNLOCKED",
-        eliteAlive ? "#ffd700" : "#66ff66",
-      );
-    }
-  }
-
-  /** Show/hide the "exit sealed" hint while on a locked exit tile. */
-  private updateExitLockedToast(show: boolean): void {
-    if (show) {
-      const x = this.cameras.main.width / 2;
-      const y = 36;
-      const msg = "EXIT SEALED - SLAY THE ELITE TO UNLOCK";
-      if (this.exitLockedToast) {
-        this.exitLockedToast.setText(msg).setPosition(x, y).setVisible(true);
-      } else {
-        this.exitLockedToast = this.add
-          .text(x, y, msg, {
-            color: "#ff8844",
-            fontSize: "16px",
-            fontFamily: "monospace",
-            fontStyle: "bold",
-            stroke: "#000000",
-            strokeThickness: 4,
-          })
-          .setOrigin(0.5)
-          .setScrollFactor(0)
-          .setDepth(3000);
-      }
-    } else if (this.exitLockedToast) {
-      this.exitLockedToast.setVisible(false);
-    }
-  }
-
-  /**
-   * Update the spawn-grace countdown toast (same spot as level-up toast).
-   * Reads spawnGraceUntil from the synced room state; hides once elapsed.
-   */
-  private updateSpawnCountdown(): void {
-    const until = (this.room as any)?.state?.spawnGraceUntil ?? 0;
-    const now = Date.now();
-    if (until <= now) {
-      // Grace over — hide the toast if visible.
-      if (this.spawnCountdownToast) {
-        this.spawnCountdownToast.destroy();
-        this.spawnCountdownToast = null;
-        this.spawnCountdownLastSec = -1;
-      }
-      return;
-    }
-    const secsLeft = Math.max(1, Math.ceil((until - now) / 1000));
-    if (secsLeft === this.spawnCountdownLastSec) return; // no change
-    this.spawnCountdownLastSec = secsLeft;
-    const msg = `ENEMIES WILL SPAWN IN ${secsLeft}`;
-    const x = this.cameras.main.width / 2;
-    const y = 36;
-    if (this.spawnCountdownToast) {
-      this.spawnCountdownToast.setText(msg).setPosition(x, y);
-    } else {
-      this.spawnCountdownToast = this.add
-        .text(x, y, msg, {
-          color: "#ff5555",
-          fontSize: "18px",
-          fontFamily: "monospace",
-          fontStyle: "bold",
-          stroke: "#000000",
-          strokeThickness: 4,
-        })
-        .setOrigin(0.5)
-        .setScrollFactor(0)
-        .setDepth(201);
-    }
-    // Small pulse on each second change.
-    this.tweens.killTweensOf(this.spawnCountdownToast);
-    this.spawnCountdownToast.setScale(1.2);
-    this.tweens.add({
-      targets: this.spawnCountdownToast,
-      scale: 1,
-      duration: 200,
-      ease: "Back.out",
-    });
-  }
-
-  /** Show a level-up celebration toast at top-center. */
-  private showLevelUpToast(level: number): void {
-    const msg = "LEVEL UP!  Lv " + level;
-    const x = this.cameras.main.width / 2;
-    const y = 36;
-    if (this.levelUpToast) {
-      this.levelUpToast.setText(msg).setPosition(x, y);
-    } else {
-      this.levelUpToast = this.add
-        .text(x, y, msg, {
-          color: "#ffd700",
-          fontSize: "18px",
-          fontFamily: "monospace",
-          fontStyle: "bold",
-          stroke: "#000000",
-          strokeThickness: 4,
-        })
-        .setOrigin(0.5)
-        .setScrollFactor(0)
-        .setDepth(201);
-    }
-    this.levelUpToast.setAlpha(1);
-    this.tweens.killTweensOf(this.levelUpToast);
-    // Quick scale pop on appear
-    this.levelUpToast.setScale(1.3);
-    this.tweens.add({
-      targets: this.levelUpToast,
-      scale: 1,
-      duration: 250,
-      ease: "Back.out",
-    });
-    this.time.delayedCall(1500, () => {
-      this.tweens.add({
-        targets: this.levelUpToast,
-        alpha: 0,
-        duration: 600,
-      });
-    });
-  }
-  /** Update the HP bar + stats text from a Player state object. */
-  private updateStatsHUD(player: any): void {
-    if (!this.hpFill) return;
-
-    // ---- Vertical HP bar (anchored at bottom) ----
-    const ratio =
-      player.maxHealth > 0
-        ? Phaser.Math.Clamp(player.currentHealth / player.maxHealth, 0, 1)
-        : 0;
-    // Keep width constant; shrink height with HP. Origin (0,1) keeps
-    // the fill pinned to the bottom so it drains from the top.
-    this.hpFill.setSize(
-      this.hpBarFullWidth,
-      Math.max(0.001, this.hpBarFullHeight * ratio),
-    );
-    this.hpText.setText(`${Math.round(ratio * 100)}%`);
-
-    // ---- Vertical shield bar (same anchoring pattern as HP) ----
-    if (this.shieldFill) {
-      const maxS = (player as any).maxShield ?? 0;
-      const curS = (player as any).shield ?? 0;
-      if (maxS > 0) {
-        const sRatio = Phaser.Math.Clamp(curS / maxS, 0, 1);
-        this.shieldFill.setVisible(true);
-        this.shieldFill.setSize(
-          this.shieldBarFullWidth,
-          Math.max(0.001, this.shieldBarFullHeight * sRatio),
-        );
-        if (this.shieldText) {
-          this.shieldText.setVisible(true);
-          this.shieldText.setText(`${Math.round(sRatio * 100)}%`);
-        }
-      } else {
-        // No shield equipped: hide the bar + text.
-        this.shieldFill.setVisible(false);
-        if (this.shieldText) this.shieldText.setVisible(false);
-      }
-    }
-
-    // ---- Secondary stats (top-right) ----
-    if (this.statsText) {
-      const pct = (v: number) => `${Math.round(v * 100)}%`;
-      this.statsText.setText(
-        [
-          `Lv ${Math.floor(player.level)}  XP ${formatNumber(player.currentXp)}/${formatNumber(player.xpToLevelUp)}`,
-          `ATK ${Math.round(player.attack)}  CRIT ${pct(player.critRate)} / ${pct(player.critDamage)}`,
-        ].join("\n"),
-      );
-    }
-  }
-
-  /**
-   * Update the low-HP (red) and low-shield (blue) edge vignettes for the
-   * LOCAL player only. Effects are per-client (only this player sees their
-   * own low-health/low-shield warning). Both fade in/out smoothly.
-   *
-   * Low-HP: red edges when currentHealth/maxHealth < 0.30 (grows stronger as
-   *         HP drops, fully visible near death).
-   * Low-shield: light-blue edges when shield/maxShield <= 0.20 AND the shield
-   *         is still active (shield > 0). When the shield is fully broken
-   *         (shield === 0) the effect goes away.
-   */
-  private updateVignettes(): void {
+  // ---- Inventory mirror + sync ----
+  pullInventoryState(): (SlotCard | null)[] {
     const p = this.currentPlayerState;
-    if (!p || !this.lowHpVignette.length) return;
-
-    // ---- Low-HP red vignette (< 30% health) ----
-    let hpAlpha = 0;
-    if (p.maxHealth > 0) {
-      const hpRatio = p.currentHealth / p.maxHealth;
-      if (hpRatio < 0.3) {
-        // 0 at 0.30 -> 0.55 at 0 (strong, but not fully opaque).
-        hpAlpha = Phaser.Math.Clamp(((0.3 - hpRatio) / 0.3) * 0.55, 0, 0.55);
-      }
-    }
-    for (const r of this.lowHpVignette) r.setAlpha(hpAlpha);
-
-    // ---- Low-shield blue vignette (<= 20% shield, still active) ----
-    let shAlpha = 0;
-    const maxS = (p as any).maxShield ?? 0;
-    const curS = (p as any).shield ?? 0;
-    if (maxS > 0 && curS > 0) {
-      const sRatio = curS / maxS;
-      if (sRatio <= 0.2) {
-        shAlpha = Phaser.Math.Clamp(((0.2 - sRatio) / 0.2) * 0.5, 0, 0.5);
-      }
-    }
-    // When shield is broken (0) the effect goes away (shAlpha stays 0).
-    for (const r of this.lowShieldVignette) r.setAlpha(shAlpha);
-  }
-
-  // ============================================================
-  // MAP INFO BUTTON + TOOLTIP
-  // ============================================================
-
-  private createMapInfoButton(): void {
-    const W = this.cameras.main.width;
-    const ICON_SIZE = 40;
-    const MARGIN = 50;
-
-    this.mapInfoButton = this.add
-      .image(W - ICON_SIZE / 2 - MARGIN, ICON_SIZE / 2 + 5, "map_info_icon")
-      .setDisplaySize(ICON_SIZE, ICON_SIZE)
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(150)
-      .setInteractive({ useHandCursor: true });
-
-    this.mapInfoTooltip = this.add
-      .container(0, 0)
-      .setDepth(300)
-      .setVisible(false)
-      .setScrollFactor(0);
-
-    const tooltipW = 320;
-    const padding = 12;
-    let tooltipY = padding;
-
-    const infoKey =
-      GameScene.MAP_CONFIGS[this.mapId]?.mapInfoKey ?? "game_room";
-    const mapInfo = MAP_INFO[infoKey] ?? { name: infoKey, description: "" };
-
-    const nameText = this.add
-      .text(padding, tooltipY, mapInfo.name, {
-        color: "#ffd700",
-        fontSize: "16px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0, 0)
-      .setScrollFactor(0);
-    this.mapInfoTooltip.add(nameText);
-    tooltipY += nameText.height + 6;
-
-    if (mapInfo.description) {
-      const descText = this.add
-        .text(padding, tooltipY, mapInfo.description, {
-          color: "#cccccc",
-          fontSize: "12px",
-          fontFamily: "monospace",
-          wordWrap: { width: tooltipW - padding * 2 },
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(0, 0)
-        .setScrollFactor(0);
-      this.mapInfoTooltip.add(descText);
-      tooltipY += descText.height + 8;
-    }
-
-    const modHeader = this.add
-      .text(padding, tooltipY, "Active Modifiers", {
-        color: "#ffffff",
-        fontSize: "12px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 2,
-      })
-      .setOrigin(0, 0)
-      .setScrollFactor(0);
-    this.mapInfoTooltip.add(modHeader);
-    tooltipY += modHeader.height + 4;
-
-    const modifiers: any[] = (this.room?.metadata?.modifiers as any[]) ?? [];
-    if (modifiers.length === 0) {
-      const noneText = this.add
-        .text(padding, tooltipY, "None", {
-          color: "#888888",
-          fontSize: "11px",
-          fontFamily: "monospace",
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(0, 0)
-        .setScrollFactor(0);
-      this.mapInfoTooltip.add(noneText);
-      tooltipY += noneText.height + 4;
-    } else {
-      for (const mod of modifiers) {
-        const disp = MODIFIER_DISPLAY[mod.id as keyof typeof MODIFIER_DISPLAY];
-        const color = disp?.color ?? "#ffffff";
-        const title = disp?.title ?? mod.title ?? mod.id;
-        const desc = disp?.description ?? mod.description ?? "";
-        const modText = this.add
-          .text(padding, tooltipY, "\u25cf " + title, {
-            color: color,
-            fontSize: "11px",
-            fontFamily: "monospace",
-            fontStyle: "bold",
-            stroke: "#000000",
-            strokeThickness: 2,
-          })
-          .setOrigin(0, 0)
-          .setScrollFactor(0);
-        this.mapInfoTooltip.add(modText);
-        tooltipY += modText.height + 2;
-        const modDesc = this.add
-          .text(padding + 14, tooltipY, desc, {
-            color: "#aaaaaa",
-            fontSize: "10px",
-            fontFamily: "monospace",
-            wordWrap: { width: tooltipW - padding * 2 - 14 },
-            stroke: "#000000",
-            strokeThickness: 2,
-          })
-          .setOrigin(0, 0)
-          .setScrollFactor(0);
-        this.mapInfoTooltip.add(modDesc);
-        tooltipY += modDesc.height + 4;
-      }
-    }
-
-    const tooltipH = tooltipY + padding;
-    this.mapInfoTooltipBg = this.add
-      .graphics()
-      .setScrollFactor(0)
-      .setDepth(299);
-    this.mapInfoTooltipBg.fillStyle(0x0a0a14, 0.92);
-    this.mapInfoTooltipBg.fillRoundedRect(0, 0, tooltipW, tooltipH, 8);
-    this.mapInfoTooltipBg.lineStyle(2, 0x4a6a8a, 0.8);
-    this.mapInfoTooltipBg.strokeRoundedRect(0, 0, tooltipW, tooltipH, 8);
-    this.mapInfoTooltip.add(this.mapInfoTooltipBg);
-    this.mapInfoTooltip.sendToBack(this.mapInfoTooltipBg);
-
-    const tx = this.mapInfoButton.x - ICON_SIZE / 2 - tooltipW - 4;
-    const ty = this.mapInfoButton.y - ICON_SIZE / 2;
-    this.mapInfoTooltip.setPosition(tx, ty);
-
-    this.mapInfoButton.on("pointerover", () => {
-      this.mapInfoTooltip.setVisible(true);
-    });
-    this.mapInfoButton.on("pointerout", () => {
-      this.mapInfoTooltip.setVisible(false);
-    });
-  }
-
-  // ============================================================
-  // CHARACTER STATS SCREEN (press C to toggle)
-  // ============================================================
-
-  /** Build a 9-slice outline frame around a rect using the
-   *  "ui_outline" spritesheet: frame 0 = corner (top-left),
-   *  frame 1 = horizontal edge, frame 2 = vertical edge.
-   *  Corners are flipped copies (TR = flipX, BL = flipY, BR = both)
-   *  and edges are tiled to fit exactly between the corners. */
-  private buildOutlineFrame(
-    x: number,
-    y: number,
-    w: number,
-    h: number,
-  ): Phaser.GameObjects.Container {
-    // ================= TWEAK HERE =================
-    const T = 16; // displayed tile size (art is 64px, scaled down)
-    const INSET = 0; // 0 = ring hugs the box edge. Raise to pull the
-    //   border CLOSER to / over the box (e.g. 4 or 8), lower (negative)
-    //   to push it further out.
-    // =============================================
-
-    const ART = 64; // source tile size
-    const cw = Math.min(T, w / 2); // corner display width
-    const ch = Math.min(T, h / 2); // corner display height
-    const frame = this.add.container(0, 0);
-
-    // Place a tile scaled so it fills the rect [tx, ty, tw, th]
-    const tile = (
-      tx: number,
-      ty: number,
-      fr: number,
-      tw: number,
-      th: number,
-    ): Phaser.GameObjects.Image =>
-      this.add
-        .image(tx, ty, "ui_outline", fr)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setScale(tw / ART, th / ART);
-
-    // Left/top edge of the ring, and where the right/bottom ring starts
-    const ox = x - cw + INSET;
-    const oy = y - ch + INSET;
-    const rx = x + w - INSET;
-    const by = y + h - INSET;
-
-    // Corners (frame 0 is the top-left corner; flip for the others)
-    frame.add(tile(ox, oy, 0, cw, ch));
-    frame.add(tile(rx, oy, 0, cw, ch).setFlipX(true));
-    frame.add(tile(ox, by, 0, cw, ch).setFlipY(true));
-    frame.add(tile(rx, by, 0, cw, ch).setFlipX(true).setFlipY(true));
-
-    // Horizontal edges: tile frame 1 between the corners
-    // (bottom edge flipped so the line hugs the bottom side)
-    for (let c = x + cw; c < x + w - cw; c += T) {
-      const tw = Math.min(T, x + w - cw - c);
-      frame.add(tile(c, oy, 1, tw, ch));
-      frame.add(tile(c, by, 1, tw, ch).setFlipY(true));
-    }
-    // Vertical edges: tile frame 2 between the corners
-    // (right edge flipped so the line hugs the right side)
-    for (let r = y + ch; r < y + h - ch; r += T) {
-      const th = Math.min(T, y + h - ch - r);
-      frame.add(tile(ox, r, 2, cw, th));
-      frame.add(tile(rx, r, 2, cw, th).setFlipX(true));
-    }
-    return frame;
-  }
-
-  // ============================================================
-  // INVENTORY SCREEN (press I to toggle; slides in from the right)
-  // ============================================================
-
-  /** Inventory layout constants (derived from the HUD card size so
-   *  shelf slots keep the same aspect ratio as the cards). */
-  private static readonly INV_COLS = 5;
-  private static readonly INV_ROWS = 4;
-  private static readonly INV_SLOT_GAP = 10;
-
-  /** Create the inventory tab: docked right, 5x4 wood-ish shelf with
-   *  the same outline ring as the character tab. */
-  private createInventoryScreen(): void {
-    const W = this.cameras.main.width;
-    const H = this.cameras.main.height;
-
-    // Shelf slot size: same aspect ratio as HUD cards (128x200).
-    const slotW = 64;
-    const slotH = 100;
-    const cols = GameScene.INV_COLS;
-    const rows = GameScene.INV_ROWS;
-    const gap = GameScene.INV_SLOT_GAP;
-    const gridW = cols * slotW + (cols - 1) * gap;
-    const gridH = rows * slotH + (rows - 1) * gap;
-    const PANEL_W = gridW + 40; // padding around the grid
-    // Full window height: the space below the grid holds the
-    // quick-action icon bar (character / reload / inventory).
-    const PANEL_H = H;
-    const px = W - PANEL_W - 24;
-    const py = 0;
-
-    this.invScreen = this.add
-      .container(0, 0)
-      .setDepth(400)
-      .setVisible(false)
-      .setScrollFactor(0);
-
-    // ---- Dim overlay (standalone; fades in after the slide) ----
-    // Purely visual: NOT interactive. The inventory stays open while
-    // the player drags cards in from the HUD or the ground; it only
-    // closes via [I], ESC, or the X button.
-    const overlay = this.add
-      .rectangle(0, 0, W, H, 0x000000, 0)
-      .setOrigin(0, 0)
-      .setScrollFactor(0)
-      .setDepth(399)
-      .setVisible(false);
-    (this.invScreen as any)._overlay = overlay;
-
-    // ---- Panel background ----
-    const panelBg = this.add.graphics().setScrollFactor(0);
-    panelBg.fillStyle(0x0a0a14, 0.95);
-    panelBg.fillRect(px, py, PANEL_W, PANEL_H);
-    this.invScreen.add(panelBg);
-    this.invScreen.add(this.buildOutlineFrame(px, py, PANEL_W, PANEL_H).setDepth(1));
-
-    // ---- Title + close hint ----
-    this.invScreen.add(
-      this.add
-        .text(px + PANEL_W / 2, py + 14, "INVENTORY", {
-          color: "#ffd700",
-          fontSize: "20px",
-          fontFamily: "monospace",
-          fontStyle: "bold",
-          stroke: "#000000",
-          strokeThickness: 4,
-        })
-        .setOrigin(0.5, 0)
-        .setScrollFactor(0),
-    );
-    this.invScreen.add(
-      this.add
-        .text(px + PANEL_W - 12, py + 10, "[I] Close", {
-          color: "#888888",
-          fontSize: "11px",
-          fontFamily: "monospace",
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(1, 0)
-        .setScrollFactor(0),
-    );
-
-    // ---- Wood-like shelf: 5 cols x 4 rows of card-sized cells ----
-    const cellG = this.add.graphics().setScrollFactor(0);
-    const shelfTop = py + 50;
-    this.invSlotRects = [];
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const i = r * cols + c;
-        const x = px + 20 + c * (slotW + gap);
-        const y = shelfTop + r * (slotH + gap);
-        // Shelf plank behind each cell (wood tones)
-        cellG.fillStyle(0x3a2a1a, 0.9);
-        cellG.fillRect(x, y, slotW, slotH);
-        cellG.fillStyle(0x57422a, 0.75);
-        cellG.fillRect(x + 3, y + 3, slotW - 6, slotH - 6);
-        // Invisible drop-target rect (same pattern as cardSlots)
-        const rect = this.add
-          .rectangle(x, y, slotW, slotH)
-          .setOrigin(0, 0)
-          .setScrollFactor(0);
-        this.invSlotRects.push(rect);
-        this.invScreen.add(rect);
-      }
-    }
-    this.invScreen.add(cellG);
-
-    // ---- Quick-action icon bar (below the shelf) ----
-    // character -> open the C tab; reload -> full page reload;
-    // inventory -> no-op (this IS the inventory).
-    const iconSize = 44;
-    const iconY = py + 50 + gridH + 40; // below the grid
-    const barCx = px + PANEL_W / 2;
-    const iconSpacing = iconSize + 24;
-    const defs: Array<{
-      key: string;
-      label: string;
-      tint: number;
-      onClick: () => void;
-    }> = [
-      {
-        key: "char",
-        label: "C",
-        tint: 0xffd700,
-        onClick: () => {
-          if (this.charScreenVisible) return;
-          this.toggleCharacterScreen();
-        },
-      },
-      {
-        key: "reload",
-        label: "R",
-        tint: 0x66ccff,
-        onClick: () => {
-          window.location.reload();
-        },
-      },
-      {
-        key: "inv",
-        label: "I",
-        tint: 0x9aa5b1,
-        onClick: () => {
-          // no-op: this tab IS the inventory
-        },
-      },
-    ];
-    defs.forEach((d, idx) => {
-      const bx = barCx + (idx - (defs.length - 1) / 2) * iconSpacing;
-      const icon = this.add
-        .container(bx, iconY)
-        .setScrollFactor(0);
-      const bg = this.add
-        .rectangle(0, 0, iconSize, iconSize, 0x11131a, 0.95)
-        .setStrokeStyle(2, d.tint);
-      const label = this.add
-        .text(0, 0, d.label, {
-          color: "#" + d.tint.toString(16).padStart(6, "0"),
-          fontSize: "18px",
-          fontFamily: "monospace",
-          fontStyle: "bold",
-        })
-        .setOrigin(0.5);
-      icon.add([bg, label]);
-      icon.setSize(iconSize, iconSize);
-      icon.setInteractive(
-        new Phaser.Geom.Rectangle(
-          -iconSize / 2,
-          -iconSize / 2,
-          iconSize,
-          iconSize,
-        ),
-        Phaser.Geom.Rectangle.Contains,
-      );
-      icon.on("pointerover", () => {
-        bg.setStrokeStyle(2, 0xffffff);
-      });
-      icon.on("pointerout", () => {
-        bg.setStrokeStyle(2, d.tint);
-      });
-      icon.on("pointerdown", () => d.onClick());
-      this.invScreen.add(icon);
-    });
-    // Re-add the rects above the planks so hit tests are stable.
-    for (const r of this.invSlotRects) this.invScreen.add(r);
-    this.invScreen.bringToTop(cellG);
-
-    // Store layout constants for later use.
-    (this.invScreen as any)._px = px;
-    (this.invScreen as any)._py = py;
-    (this.invScreen as any)._panelW = PANEL_W;
-    (this.invScreen as any)._panelH = PANEL_H;
-    (this.invScreen as any)._slotW = slotW;
-    (this.invScreen as any)._slotH = slotH;
-
-    // ---- I key to toggle ----
-    this.invScreenKey = this.input.keyboard.addKey(
-      Phaser.Input.Keyboard.KeyCodes.I,
-    );
-    this.invScreenKey.on("down", () => {
-      this.toggleInventoryScreen();
-    });
-
-    // ESC also closes the inventory.
-    const escKey = this.input.keyboard.addKey(
-      Phaser.Input.Keyboard.KeyCodes.ESC,
-    );
-    escKey.on("down", () => {
-      if (this.invScreenVisible) this.toggleInventoryScreen();
-    });
-  }
-
-  /** Slide the inventory tab in/out from the right edge. */
-  private toggleInventoryScreen(): void {
-    this.invScreenVisible = !this.invScreenVisible;
-    this.tweens.killTweensOf(this.invScreen);
-    const overlay: Phaser.GameObjects.Rectangle = (this.invScreen as any)
-      ._overlay;
-    this.tweens.killTweensOf(overlay);
-    // Fully off-screen right (panel + outline + margin).
-    const offX = (this.invScreen as any)._panelW + 60;
-    if (this.invScreenVisible) {
-      this.invScreen.setPosition(offX, 0).setVisible(true);
-      this.tweens.add({
-        targets: this.invScreen,
-        x: 0,
-        duration: 250,
-        ease: "Cubic.Out",
-        onComplete: () => {
-          // Card visuals live in world space: create them only now so
-          // they appear exactly when the panel lands.
-          this.updateInventoryCards();
-          overlay.setVisible(true).setAlpha(0);
-          this.tweens.add({
-            targets: overlay,
-            alpha: 0.6,
-            duration: 200,
-          });
-        },
-      });
-    } else {
-      // Card visuals are world-space: kill them as the panel leaves.
-      for (const c of this.invCards) c?.container.destroy();
-      this.invCards = Array(20).fill(null);
-      this.hideInvCardTooltip();
-      this.tweens.add({
-        targets: this.invScreen,
-        x: offX,
-        duration: 200,
-        ease: "Cubic.In",
-        onComplete: () => this.invScreen.setVisible(false),
-      });
-      this.tweens.add({
-        targets: overlay,
-        alpha: 0,
-        duration: 200,
-        onComplete: () => overlay.setVisible(false),
-      });
-    }
-  }
-
-  /** Screen-space center of inventory slot i. */
-  private invSlotCenter(i: number): { x: number; y: number } {
-    const r = this.invSlotRects[i];
-    // The invScreen container itself slides; slot centers must be
-    // reported in WORLD space (screen + container offset).
-    const cx = r.x + r.width / 2 + this.invScreen.x;
-    const cy = r.y + r.height / 2 + this.invScreen.y;
-    return { x: cx, y: cy };
-  }
-
-  /** Which inventory slot the pointer is over (-1 when outside). */
-  private invAtPointer(pointer: Phaser.Input.Pointer): number {
-    for (let i = 0; i < this.invSlotRects.length; i++) {
-      const s = this.invSlotRects[i];
-      // Slot rects move with the container: account for invScreen.x.
-      const x = s.x + this.invScreen.x;
-      const y = s.y + this.invScreen.y;
-      if (
-        pointer.x >= x &&
-        pointer.x <= x + s.width &&
-        pointer.y >= y - 10 &&
-        pointer.y <= y + s.height + 10
-      ) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  /**
-   * Pull the local player's inventorySlots from the synced state and
-   * rebuild the shelf when it differs from the local mirror.
-   */
-  private syncInventoryFromServer(rebuildAlways: boolean): void {
-    const p = this.currentPlayerState;
-    if (!p || !(p as any).inventorySlots) return;
+    if (!p || !(p as any).inventorySlots) return Array(20).fill(null);
     const arr = (p as any).inventorySlots;
-    const slots: (SlotCard | null)[] = Array(20).fill(null);
+    const out: (SlotCard | null)[] = Array(20).fill(null);
     for (let i = 0; i < 20; i++) {
       const c = arr[i];
       if (c && c.skill) {
-        slots[i] = {
+        out[i] = {
           skill: c.skill as SkillId,
           level: c.level ?? 1,
           rarity: asRarity(c.rarity),
@@ -4607,143 +1061,63 @@ export class GameScene extends Phaser.Scene {
         };
       }
     }
-    const same =
-      !rebuildAlways &&
-      slots.every((s, i) => {
-        const cur = this.invCardsData[i];
-        if (!s && !cur) return true;
-        if (!s || !cur) return false;
-        return (
-          s.skill === cur.skill &&
-          s.level === cur.level &&
-          s.rarity === cur.rarity
-        );
-      });
-    if (!same) {
-      this.invCardsData = slots;
-      // Visuals exist only while the tab is open (world-space cards).
-      if (this.invScreenVisible) this.updateInventoryCards();
-    }
+    this.invCardsData = out;
+    return out;
   }
-  /** Destroy + recreate every inventory card visual from the mirror. */
-  private updateInventoryCards(): void {
-    for (const c of this.invCards) c?.container.destroy();
-    this.invCards = Array(20).fill(null);
+
+  syncInventoryFromServer(rebuildAlways: boolean): void {
+    const p = this.currentPlayerState;
+    if (!p || !(p as any).inventorySlots) return;
+    const arr = (p as any).inventorySlots;
+    const fresh: (SlotCard | null)[] = Array(20).fill(null);
     for (let i = 0; i < 20; i++) {
-      const sc = this.invCardsData[i];
-      if (!sc) continue;
-      this.invCards[i] = this.createInvCardObj(sc, i);
+      const c = arr[i];
+      if (c && c.skill) {
+        fresh[i] = {
+          skill: c.skill as SkillId,
+          level: c.level ?? 1,
+          rarity: asRarity(c.rarity),
+          modIds: c.modIds ? Array.from(c.modIds) : [],
+          modValues: c.modValues ? Array.from(c.modValues as number[]) : [],
+        };
+      }
+    }
+    const same = !rebuildAlways && fresh.every((s, i) => {
+      const cur = this.invCardsData[i];
+      if (!s && !cur) return true;
+      if (!s || !cur) return false;
+      return s.skill === cur.skill && s.level === cur.level && s.rarity === cur.rarity;
+    });
+    if (!same) {
+      this.invCardsData = fresh;
+      if (this.invScreen?.isVisible()) this.invScreen.rebuildCards();
     }
   }
 
-  /** Build one inventory card visual (smaller version of a HUD card). */
-  private createInvCardObj(sc: SlotCard, i: number): HudCardObj {
-    const slotW = (this.invScreen as any)._slotW;
-    const slotH = (this.invScreen as any)._slotH;
-    const c = this.invSlotCenter(i);
-    const inset = slotW * CARD_ART_INSET_RATIO;
-    const base = this.add
-      .image(0, 0, "card_sheet", rarityBaseFrame(sc.rarity))
-      .setDisplaySize(slotW, slotH);
-    const img = this.add
-      .image(0, 0, "card_sheet", cardFrameForLevel(sc.skill, sc.level))
-      .setDisplaySize(slotW - inset * 2, slotH - inset * 2)
-      .setAlpha(CARD_ART_ALPHA);
-    const cdFill = this.add
-      .rectangle(0, 0, slotW, slotH, 0xffffff, 0.45)
-      .setOrigin(0, 0)
-      .setVisible(false);
-    const container = this.add
-      .container(c.x, c.y, [base, img, cdFill])
-      .setScrollFactor(0)
-      .setDepth(402);
-    container.setSize(slotW, slotH);
-    container.setInteractive(
-      new Phaser.Geom.Rectangle(
-        -slotW / 2 - 6,
-        -slotH / 2 - 6,
-        slotW + 12,
-        slotH + 12,
-      ),
-      Phaser.Geom.Rectangle.Contains,
-    );
-    container.on("pointerdown", (_pointer: Phaser.Input.Pointer) => {
-      this.beginInvCardDrag(i);
-    });
-    container.on("pointerover", () => {
-      if (!this.invDrag && !this.dragCard && !this.groundGrab) {
-        this.showInvCardTooltip(sc, c.x, c.y);
-      }
-    });
-    container.on("pointerout", () => this.hideInvCardTooltip());
-    return {
-      skill: sc.skill,
-      container,
-      base,
-      img,
-      cdFill,
-      targetSlot: -1,
-      rarity: sc.rarity,
-      modIds: sc.modIds,
-      modValues: sc.modValues,
+  beginInvCardDrag(i: number): void {
+    if (this.invDrag || this.dragCard || this.groundCards.grab) return;
+    this.invDrag = {
+      obj: {
+        skill: (this.invCardsData[i]?.skill ?? "shock") as SkillId,
+        container: this.add.container(0, 0),
+        base: this.add.image(0, 0, "card_sheet"),
+        img: this.add.image(0, 0, "card_sheet"),
+        cdFill: this.add.rectangle(0, 0, 1, 1),
+        targetSlot: i,
+        rarity: this.invCardsData[i]?.rarity ?? "common",
+        modIds: this.invCardsData[i]?.modIds ?? [],
+      },
+      fromInv: i,
+      hoverInv: i,
     };
   }
 
-  /** Tooltip for a stored inventory card. */
-  private showInvCardTooltip(sc: SlotCard, x: number, y: number): void {
-    this.hideInvCardTooltip();
-    const tt = this.buildCardTooltipPanel({
-      skill: sc.skill,
-      level: sc.level,
-      rarity: sc.rarity,
-      modIds: sc.modIds,
-      modValues: sc.modValues ?? [],
-    });
-    tt.setDepth(450).setScrollFactor(0);
-    // Keep the panel on-screen (it is 220 wide / up to 172 tall).
-    const cam = this.cameras.main;
-    const tx = Math.max(6, Math.min(cam.width - 226, x + 20));
-    const ty = Math.max(6, Math.min(cam.height - 180, y + 10));
-    tt.setPosition(tx, ty);
-    this.invCardTooltip = tt;
-  }
-
-  private hideInvCardTooltip(): void {
-    if (this.invCardTooltip) {
-      this.invCardTooltip.destroy();
-      this.invCardTooltip = null;
-    }
-  }
-
-  /** Start dragging a stored inventory card. */
-  private beginInvCardDrag(i: number): void {
-    if (this.invDrag || this.dragCard || this.groundGrab) return;
-    const obj = this.invCards[i];
-    if (!obj) return;
-    this.hideInvCardTooltip();
-    this.invDrag = { obj, fromInv: i, hoverInv: i };
-    obj.container.setDepth(2000);
-    obj.container.setScale(1.08);
-  }
-
-  /** Live drag update for inventory cards. */
-  private updateInvCardDrag(pointer: Phaser.Input.Pointer): void {
-    if (!this.invDrag) return;
-    const d = this.invDrag;
-    d.obj.container.setPosition(pointer.x, pointer.y);
-    d.hoverInv = this.invAtPointer(pointer);
-  }
-
-  /** Finish an inventory card drag:
-   *  - over another inventory slot -> server reorder/swap (18)
-   *  - over a HUD slot -> equip / swap (15)
-   *  - elsewhere -> drop to the ground (16) */
-  private endInvCardDrag(pointer: Phaser.Input.Pointer): void {
-    if (!this.invDrag) return;
+  endInvCardDrag(pointer: Phaser.Input.Pointer): void {
+    if (!this.invDrag || !this.invScreen) return;
     const d = this.invDrag;
     this.invDrag = null;
     const hudSlot = this.slotAtPointer(pointer);
-    const invSlot = this.invAtPointer(pointer);
+    const invSlot = this.invScreen.slotAtPointer(pointer);
     if (invSlot >= 0 && invSlot !== d.fromInv) {
       this.room?.send(18, { from: d.fromInv, to: invSlot });
     } else if (hudSlot >= 0) {
@@ -4751,781 +1125,54 @@ export class GameScene extends Phaser.Scene {
     } else {
       this.room?.send(16, { inv: d.fromInv });
     }
-    // Server state sync rebuilds both grids authoritatively.
-    d.obj.container.setScale(1);
-    d.obj.container.setDepth(402);
+    d.obj.container.destroy();
     this.syncSlotsFromServer(true);
     this.syncInventoryFromServer(true);
   }
 
-  private createCharacterScreen(): void {
-    const W = this.cameras.main.width;
-    const H = this.cameras.main.height;
-    const PANEL_W = 520;
-    const PANEL_H = Math.min(H - 60, 600);
-    // Dock the panel to the LEFT edge
-    // (margin leaves room for the outline ring around the panel)
-    const px = 24;
-    const py = Math.round((H - PANEL_H) / 2);
-
-    this.charScreen = this.add
-      .container(0, 0)
-      .setDepth(400)
-      .setVisible(false)
-      .setScrollFactor(0);
-
-    // ---- Dim overlay ----
-    // Standalone (NOT a child of charScreen) so it stays full-screen
-    // while the panel slides. Fades in only after the slide completes.
-    const overlay = this.add
-      .rectangle(0, 0, W, H, 0x000000, 0)
-      .setOrigin(0, 0)
-      .setScrollFactor(0)
-      .setDepth(399)
-      .setVisible(false);
-    overlay.setInteractive(); // block clicks going through
-    overlay.on("pointerdown", () => {
-      if (this.charScreenVisible) this.toggleCharacterScreen();
-    });
-    (this.charScreen as any)._overlay = overlay;
-
-    // ---- Panel background ----
-    const panelBg = this.add.graphics().setScrollFactor(0);
-    panelBg.fillStyle(0x0a0a14, 0.95);
-    panelBg.fillRect(px, py, PANEL_W, PANEL_H);
-    this.charScreen.add(panelBg);
-    // Sprite outline border
-    this.charScreen.add(this.buildOutlineFrame(px, py, PANEL_W, PANEL_H).setDepth(1));
-
-    // ---- Title ----
-    const titleText = this.add
-      .text(px + PANEL_W / 2, py + 14, "CHARACTER", {
-        color: "#ffd700",
-        fontSize: "20px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 4,
-      })
-      .setOrigin(0.5, 0)
-      .setScrollFactor(0);
-    this.charScreen.add(titleText);
-
-    // ---- Close hint + skill points display ----
-    const closeHint = this.add
-      .text(px + PANEL_W - 12, py + 8, "[C] Close", {
-        color: "#888888",
-        fontSize: "11px",
-        fontFamily: "monospace",
-        stroke: "#000000",
-        strokeThickness: 2,
-      })
-      .setOrigin(1, 0)
-      .setScrollFactor(0);
-    this.charScreen.add(closeHint);
-
-    // Skill points banner
-    const spBanner = this.add
-      .text(px + 20, py + 8, "", {
-        color: "#ffd700",
-        fontSize: "13px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0, 0)
-      .setScrollFactor(0);
-    this.charScreen.add(spBanner);
-    (this.charScreen as any)._spBanner = spBanner;
-
-    // Store layout constants for updates
-    (this.charScreen as any)._px = px;
-    (this.charScreen as any)._py = py;
-    (this.charScreen as any)._panelW = PANEL_W;
-    (this.charScreen as any)._panelH = PANEL_H;
-
-    // Dynamic content container (destroyed and rebuilt on each update)
-    (this.charScreen as any)._dynChildren = [];
-
-    // ---- C key to toggle ----
-    this.charScreenKey = this.input.keyboard.addKey(
-      Phaser.Input.Keyboard.KeyCodes.C,
-    );
-    this.charScreenKey.on("down", () => {
-      this.toggleCharacterScreen();
-    });
-
-    // ---- ESC key to close ----
-    const escKey = this.input.keyboard.addKey(
-      Phaser.Input.Keyboard.KeyCodes.ESC,
-    );
-    escKey.on("down", () => {
-      if (this.charScreenVisible) this.toggleCharacterScreen();
-    });
-
-    // ---- Key 9: test skill point ----
-    this.testSkillPointKey = this.input.keyboard.addKey(
-      Phaser.Input.Keyboard.KeyCodes.NINE,
-    );
-    this.testSkillPointKey.on("down", () => {
-      if (this.room) this.room.send(8, {});
-    });
-
-    // ---- Confirmation popup (reused, hidden by default) ----
-    this.confirmPopup = this.add
-      .container(0, 0)
-      .setDepth(500)
-      .setVisible(false)
-      .setScrollFactor(0);
-    const cOverlay = this.add
-      .rectangle(0, 0, W, H, 0x000000, 0.3)
-      .setOrigin(0, 0)
-      .setScrollFactor(0);
-    cOverlay.setInteractive();
-    const cBg = this.add.graphics().setScrollFactor(0);
-    const cW = 300,
-      cH = 120;
-    const cx2 = Math.round((W - cW) / 2),
-      cy2 = Math.round((H - cH) / 2);
-    cBg.fillStyle(0x12121e, 0.97);
-    cBg.fillRoundedRect(cx2, cy2, cW, cH, 10);
-    cBg.lineStyle(2, 0x4a6a8a, 0.9);
-    cBg.strokeRoundedRect(cx2, cy2, cW, cH, 10);
-    const cText = this.add
-      .text(W / 2, cy2 + 18, "", {
-        color: "#ffffff",
-        fontSize: "14px",
-        fontFamily: "monospace",
-        align: "center",
-        wordWrap: { width: cW - 40 },
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0.5, 0)
-      .setScrollFactor(0);
-    const cYes = this.add
-      .text(W / 2 - 50, cy2 + cH - 32, "[ YES ]", {
-        color: "#66bb6a",
-        fontSize: "14px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setInteractive({ useHandCursor: true });
-    const cNo = this.add
-      .text(W / 2 + 50, cy2 + cH - 32, "[ NO ]", {
-        color: "#ef5350",
-        fontSize: "14px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setInteractive({ useHandCursor: true });
-    this.confirmPopup.add([cOverlay, cBg, cText, cYes, cNo]);
-    (this.confirmPopup as any)._text = cText;
-    (this.confirmPopup as any)._yes = cYes;
-    (this.confirmPopup as any)._no = cNo;
-    (this.confirmPopup as any)._bg = cBg;
-    (this.confirmPopup as any)._cx = cx2;
-    (this.confirmPopup as any)._cy = cy2;
-    (this.confirmPopup as any)._cW = cW;
-    (this.confirmPopup as any)._cH = cH;
-    (this.confirmPopup as any)._W = W;
-    // Start hidden (no-op callback)
-    (this.confirmPopup as any)._callback = () => {};
-    cYes.on("pointerdown", () => {
-      const cb = (this.confirmPopup as any)._callback;
-      this.confirmPopup.setVisible(false);
-      (this.confirmPopup as any)._callback = () => {};
-      cb();
-    });
-    cNo.on("pointerdown", () => {
-      this.confirmPopup.setVisible(false);
-      (this.confirmPopup as any)._callback = () => {};
-    });
+  // ---- Toasts / overlays ----
+  private showLevelUp(level: number): void {
+    this.levelUpToast = showLevelUpToast(this, this.levelUpToast, level);
   }
 
-  /** Show confirmation popup with a message and callback on YES.
-   *  Dynamically resizes the background and repositions the Yes/No buttons
-   *  so they never overlap the text. */
-  private showConfirm(message: string, onYes: () => void): void {
-    const pp: any = this.confirmPopup as any;
-    const cText: Phaser.GameObjects.Text = pp._text;
-    const cYes: Phaser.GameObjects.Text = pp._yes;
-    const cNo: Phaser.GameObjects.Text = pp._no;
-    const cBg: Phaser.GameObjects.Graphics = pp._bg;
-    const W: number = pp._W;
-    const cW: number = pp._cW;
-    const baseCy: number = pp._cy;
-
-    cText.setText(message);
-
-    // Measure the rendered text height to know how tall the popup needs to be.
-    const textHeight: number = cText.height;
-    // Minimum height so short messages still look good.
-    const minH: number = pp._cH;
-    // text starts at baseCy + 18; add 18px top + text + 16px gap + 32px buttons + 12px bottom
-    const neededH: number = Math.max(minH, 18 + textHeight + 16 + 32 + 12);
-
-    // Recenter the popup vertically based on new height.
-    const newCy: number = Math.round((this.cameras.main.height - neededH) / 2);
-
-    // Redraw the background at the new size.
-    cBg.clear();
-    cBg.fillStyle(0x12121e, 0.97);
-    cBg.fillRoundedRect(pp._cx, newCy, cW, neededH, 10);
-    cBg.lineStyle(2, 0x4a6a8a, 0.9);
-    cBg.strokeRoundedRect(pp._cx, newCy, cW, neededH, 10);
-
-    // Position the text at the top of the popup.
-    cText.setPosition(W / 2, newCy + 18);
-
-    // Position Yes/No buttons below the text, always clear of it.
-    const btnY: number = newCy + 18 + textHeight + 16;
-    cYes.setPosition(W / 2 - 50, btnY);
-    cNo.setPosition(W / 2 + 50, btnY);
-
-    pp._callback = onYes;
-    this.confirmPopup.setVisible(true);
-  }
-
-  private toggleCharacterScreen(): void {
-    this.charScreenVisible = !this.charScreenVisible;
-    this.tweens.killTweensOf(this.charScreen);
-    const overlay: Phaser.GameObjects.Rectangle = (this.charScreen as any)
-      ._overlay;
-    this.tweens.killTweensOf(overlay);
-    // Off-screen position fully left of the window (panel + outline)
-    const offX = -((this.charScreen as any)._panelW + 60);
-    if (this.charScreenVisible) {
-      // Hide map tooltip if open
-      this.mapInfoTooltip.setVisible(false);
-      this.updateCharacterScreen();
-      // Slide in from the left edge; dim the screen only once it lands
-      this.charScreen.setPosition(offX, 0).setVisible(true);
-      this.tweens.add({
-        targets: this.charScreen,
-        x: 0,
-        duration: 250,
-        ease: "Cubic.Out",
-        onComplete: () => {
-          overlay.setVisible(true).setAlpha(0);
-          this.tweens.add({
-            targets: overlay,
-            alpha: 0.6,
-            duration: 200,
-          });
-        },
-      });
-    } else {
-      // Fade the dim out while the panel slides away
-      this.tweens.add({
-        targets: overlay,
-        alpha: 0,
-        duration: 200,
-        onComplete: () => overlay.setVisible(false),
-      });
-      // Slide out to the left, then hide and clean up
-      this.tweens.add({
-        targets: this.charScreen,
-        x: offX,
-        duration: 200,
-        ease: "Cubic.In",
-        onComplete: () => {
-          const dyn: Phaser.GameObjects.GameObject[] =
-            (this.charScreen as any)._dynChildren ?? [];
-          for (const d of dyn) d.destroy();
-          (this.charScreen as any)._dynChildren = [];
-          this.charScreen.setVisible(false);
-        },
-      });
-    }
-  }
-
-  /** Destroy all dynamic children of the char screen. */
-  private clearCharScreenDyn(): void {
-    const dyn: Phaser.GameObjects.GameObject[] =
-      (this.charScreen as any)._dynChildren ?? [];
-    for (const d of dyn) d.destroy();
-    (this.charScreen as any)._dynChildren = [];
-  }
-
-  /** Add a GameObject to char screen and track it as dynamic. */
-  private addDyn(
-    obj: Phaser.GameObjects.GameObject,
-  ): Phaser.GameObjects.GameObject {
-    this.charScreen.add(obj);
-    (
-      (this.charScreen as any)._dynChildren as Phaser.GameObjects.GameObject[]
-    ).push(obj);
-    return obj;
-  }
-
-  private updateCharacterScreen(): void {
-    const p = this.currentPlayerState;
-    if (!p) return;
-    const px: number = (this.charScreen as any)._px;
-    const py: number = (this.charScreen as any)._py;
-    const panelW: number = (this.charScreen as any)._panelW;
-
-    // Clear previous dynamic content
-    this.clearCharScreenDyn();
-
-    const sp = Math.floor(p.skillPoints ?? 0);
-    const spBanner: Phaser.GameObjects.Text = (this.charScreen as any)
-      ._spBanner;
-    spBanner.setText(sp > 0 ? "Skill Points: " + sp : "");
-
-    let y = py + 42;
-
-    // ---- STAT SECTION ----
-    const statHeader = this.add
-      .text(px + 20, y, "STATS", {
-        color: "#ffd700",
-        fontSize: "14px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0, 0)
-      .setScrollFactor(0);
-    this.addDyn(statHeader);
-    y += statHeader.height + 6;
-
-    const pct = (v: number) => Math.round(v * 100) + "%";
-    const stats: [string, string, string][] = [
-      [
-        "Health",
-        Math.round(p.currentHealth ?? 0) + " / " + Math.round(p.maxHealth ?? 0),
-        "health",
-      ],
-      ["Base ATK", String(Math.round(p.attack ?? 0)), "attack"],
-      ["Defence", pct(p.defence ?? 0), "defence"],
-      ["Crit Rate", pct(p.critRate ?? 0), "critRate"],
-      ["Crit Damage", pct(p.critDamage ?? 0), "critDamage"],
-      [
-        "Move Speed",
-        "+" + Math.round(((p.moveSpeed ?? 120) / 120 - 1) * 100) + "%",
-        "moveSpeed",
-      ],
-      [
-        "Shield",
-        Math.round((p as any).shield ?? 0) +
-          " / " +
-          Math.round((p as any).maxShield ?? 0),
-        "shield",
-      ],
-    ];
-
-    for (const [label, val, statId] of stats) {
-      // Stat label + value
-      const line = this.add
-        .text(px + 20, y, label + ":  " + val, {
-          color: "#ffffff",
-          fontSize: "13px",
-          fontFamily: "monospace",
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(0, 0)
-        .setScrollFactor(0);
-      this.addDyn(line);
-
-      // Upgrade button (gold [+]) if player has skill points
-      if (sp > 0) {
-        const btnX = px + panelW - 50;
-        // Build upgrade description for this stat
-        let upgradeDesc = "";
-        if (statId === "health") upgradeDesc = "+500 Max Health";
-        else if (statId === "attack") upgradeDesc = "+20 Attack";
-        else if (statId === "defence") upgradeDesc = "+2% Defence";
-        else if (statId === "critRate") upgradeDesc = "+2% Crit Rate";
-        else if (statId === "critDamage") upgradeDesc = "+20% Crit Damage";
-        else if (statId === "moveSpeed") upgradeDesc = "+5% Move Speed";
-        else if (statId === "shield") upgradeDesc = "faster shield recovery";
-        const btn = this.add
-          .text(btnX, y, "[ + ]", {
-            color: "#ffd700",
-            fontSize: "14px",
-            fontFamily: "monospace",
-            fontStyle: "bold",
-            stroke: "#000000",
-            strokeThickness: 3,
-          })
-          .setOrigin(0, 0)
-          .setScrollFactor(0)
-          .setInteractive({ useHandCursor: true });
-        this.addDyn(btn);
-        // Hover tooltip showing what the upgrade gives (ABOVE the button)
-        btn.on("pointerover", () => {
-          btn.setStyle({ color: "#ffffff" });
-          const tt = this.add
-            .text(btnX + 20, y - 6, upgradeDesc, {
-              color: "#88ccff",
-              fontSize: "11px",
-              fontFamily: "monospace",
-              backgroundColor: "#0a0a14",
-              padding: { x: 6, y: 4 },
-            })
-            .setOrigin(0, 1)
-            .setScrollFactor(0)
-            .setDepth(450);
-          (this.charScreen as any)._statHoverTT = tt;
-          this.charScreen.add(tt);
-        });
-        btn.on("pointerout", () => {
-          btn.setStyle({ color: "#ffd700" });
-          const tt = (this.charScreen as any)._statHoverTT;
-          if (tt) {
-            tt.destroy();
-            (this.charScreen as any)._statHoverTT = null;
-          }
-        });
-        btn.on("pointerdown", () => {
-          const statLabel = label;
-          this.showConfirm(
-            "Increase " + statLabel + " by " + upgradeDesc + "?\nAre you sure?",
-            () => {
-              if (this.room) this.room.send(6, { stat: statId });
-              this.time.delayedCall(200, () => {
-                if (this.charScreenVisible) this.updateCharacterScreen();
-              });
-            },
-          );
-        });
+  private updateSpawnCountdown(): void {
+    const until = (this.room as any)?.state?.spawnGraceUntil ?? 0;
+    const now = Date.now();
+    if (until <= now) {
+      if (this.spawnCountdownToast) {
+        this.spawnCountdownToast.destroy();
+        this.spawnCountdownToast = null;
+        this.spawnCountdownLastSec = -1;
       }
-      y += line.height + 4;
+      return;
     }
+    const secsLeft = Math.max(1, Math.ceil((until - now) / 1000));
+    if (secsLeft === this.spawnCountdownLastSec) return;
+    this.spawnCountdownLastSec = secsLeft;
+    this.spawnCountdownToast = showSpawnCountdownToast(this, this.spawnCountdownToast, secsLeft);
+  }
 
-    y += 16;
-
-    // ---- EQUIPPED ITEMS SECTION (shield + future equippables) ----
-    const itemHeader = this.add
-      .text(px + 20, y, "EQUIPPED ITEMS", {
-        color: "#88ccff",
-        fontSize: "14px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0, 0)
-      .setScrollFactor(0);
-    this.addDyn(itemHeader);
-    y += itemHeader.height + 8;
-
-    const equippedItems: {
-      id: string;
-      name: string;
-      level: number;
-      statId: string;
-    }[] = [];
-    const pShieldLvl = (p as any).shieldCardLevel ?? 1;
-    if ((p as any).maxShield && (p as any).maxShield > 0) {
-      equippedItems.push({
-        id: "shield",
-        name: "Shield",
-        level: pShieldLvl,
-        statId: "shield",
-      });
-    }
-
-    const itemDispW = 48;
-    const itemDispH = 75;
-    const itemGap = 12;
-    const itemStartX = px + 30;
-    for (let i = 0; i < equippedItems.length; i++) {
-      const it = equippedItems[i];
-      const itX = itemStartX + i * (itemDispW + itemGap);
-      // Shield uses the shield card art frame (column 2, tier 0).
-      const frame = (cardFrameForLevel as any)("shield", 1) ?? 0;
-      const shieldInset = itemDispW * CARD_ART_INSET_RATIO;
-      const slotBg = this.add
-        .rectangle(itX, y, itemDispW + 6, itemDispH + 6, 0x113355, 0.8)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setStrokeStyle(2, 0x33b5ff);
-      this.addDyn(slotBg);
-      const slotBase = this.add
-        .image(itX + 3, y + 3, "card_sheet", rarityBaseFrame("common"))
-        .setOrigin(0, 0)
-        .setDisplaySize(itemDispW, itemDispH)
-        .setScrollFactor(0);
-      this.addDyn(slotBase);
-      const slotImg = this.add
-        .sprite(itX + 3 + shieldInset, y + 3 + shieldInset, "card_sheet", frame)
-        .setOrigin(0, 0)
-        .setDisplaySize(itemDispW - shieldInset * 2, itemDispH - shieldInset * 2)
-        .setScrollFactor(0)
-        .setInteractive({ useHandCursor: true });
-      this.addDyn(slotImg);
-      // Right-click on the shield card upgrades the slot. Left-click is free for later use.
-      slotImg.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
-        if (!pointer.rightButtonDown()) return;
-        if (sp <= 0) return;
-        this.showConfirm(
-          "Upgrade Shield card slot?\nFaster recovery delay.\nAre you sure?",
-          () => {
-            if (this.room) this.room.send(6, { stat: "shield" });
-            this.time.delayedCall(200, () => {
-              if (this.charScreenVisible) this.updateCharacterScreen();
-            });
-          },
-        );
-      });
-      const lvlBg = this.add
-        .rectangle(
-          itX + itemDispW / 2,
-          y + itemDispH - 2,
-          itemDispW - 6,
-          16,
-          0x000000,
-          0.85,
-        )
-        .setOrigin(0.5, 1)
-        .setScrollFactor(0);
-      this.addDyn(lvlBg);
-      const lvlText = this.add
-        .text(itX + itemDispW / 2, y + itemDispH - 4, "Lv " + it.level, {
-          color: "#ffffff",
-          fontSize: "10px",
-          fontFamily: "monospace",
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(0.5, 1)
-        .setScrollFactor(0);
-      this.addDyn(lvlText);
-    }
-    y += itemDispH + 18;
-
-    // ---- CARD SECTION ----
-    const cardHeader = this.add
-      .text(px + 20, y, "EQUIPPED CARDS", {
-        color: "#ffd700",
-        fontSize: "14px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0, 0)
-      .setScrollFactor(0);
-    this.addDyn(cardHeader);
-    y += cardHeader.height + 10;
-
-    // Equipped cards straight from the server slots (duplicates allowed).
-    const equipped: string[] = [];
-    if (p.equippedSlots) {
-      for (const c of p.equippedSlots) {
-        if (c && c.skill) equipped.push(c.skill);
-      }
-    }
-
-    // Lay out cards horizontally (like in the HUD)
-    const cardDispW = 48;
-    const cardDispH = 75;
-    const cardGap = 12;
-    const cardStartX = px + 30;
-
-    for (let i = 0; i < equipped.length; i++) {
-      const skillId = equipped[i];
-      // THIS slot's card level (duplicate cards upgrade independently).
-      const slotCard = (p.equippedSlots as any)[i];
-      const skillLvl = slotCard?.level ?? p.skillLevels.get(skillId) ?? 1;
-      const cardX = cardStartX + i * (cardDispW + cardGap);
-      const cardInfo =
-        SKILL_CARDS_LOOKUP[skillId as keyof typeof SKILL_CARDS_LOOKUP];
-
-      // Card = rarity base (white default) + skill art inset on top.
-      const frame = cardFrameForLevel(skillId as any, skillLvl);
-      const rarity = asRarity((p.equippedSlots as any)[i]?.rarity);
-      const csInset = cardDispW * CARD_ART_INSET_RATIO;
-      const cardBase = this.add
-        .image(cardX, y, "card_sheet", rarityBaseFrame(rarity))
-        .setDisplaySize(cardDispW, cardDispH)
-        .setOrigin(0, 0)
-        .setScrollFactor(0);
-      this.addDyn(cardBase);
-      const cardImg = this.add
-        .image(cardX + csInset, y + csInset, "card_sheet", frame)
-        .setDisplaySize(cardDispW - csInset * 2, cardDispH - csInset * 2)
-        .setOrigin(0, 0)
-        .setScrollFactor(0)
-        .setInteractive({ useHandCursor: true });
-      this.addDyn(cardImg);
-
-      // Level badge on the card
-      const lvlBg = this.add.graphics().setScrollFactor(0);
-      lvlBg.fillStyle(0x000000, 0.7);
-      lvlBg.fillRoundedRect(
-        cardX + cardDispW / 2 - 14,
-        y + cardDispH - 18,
-        28,
-        14,
-        4,
+  private updateEliteHud(): void {
+    const eliteAlive = !!((this.room as any)?.state?.eliteAlive ?? false);
+    if (eliteAlive !== this.lastEliteAlive) {
+      this.lastEliteAlive = eliteAlive;
+      announce(
+        this,
+        eliteAlive ? "AN ELITE ENEMY HAS AWAKENED" : "ELITE SLAIN - EXIT UNLOCKED",
+        eliteAlive ? "#ffd700" : "#66ff66",
       );
-      this.addDyn(lvlBg);
-      const lvlText = this.add
-        .text(cardX + cardDispW / 2, y + cardDispH - 11, "Lv" + skillLvl, {
-          color: "#ffd700",
-          fontSize: "9px",
-          fontFamily: "monospace",
-          fontStyle: "bold",
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(0.5)
-        .setScrollFactor(0);
-      this.addDyn(lvlText);
-
-      // Hover tooltip: same styled panel as ground drops / HUD slots.
-      const ttCard = (p.equippedSlots as any)[i];
-      cardImg.on("pointerover", () => {
-        const panel = this.buildCardTooltipPanel({
-          skill: skillId as SkillId,
-          level: skillLvl,
-          rarity: asRarity(ttCard?.rarity ?? "common"),
-          modIds: (ttCard?.modIds as string[]) ?? [],
-          modValues: (ttCard?.modValues as number[]) ?? [],
-        });
-        // Fixed to the camera (char screen is a screen-space UI).
-        panel.setScrollFactor(0);
-        panel.setDepth(450);
-        panel.setPosition(
-          cardX + cardDispW / 2,
-          y - panel.height / 2 - 8,
-        );
-        (this.charScreen as any)._hoverTT = panel;
-        this.charScreen.add(panel);
-      });
-      cardImg.on("pointerout", () => {
-        const tt = (this.charScreen as any)._hoverTT;
-        if (tt) {
-          tt.destroy();
-          (this.charScreen as any)._hoverTT = null;
-        }
-      });
-
-      // Right-click to upgrade card. Left-click is free for later use.
-      const title = cardInfo?.title ?? skillId;
-      cardImg.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
-        if (!pointer.rightButtonDown()) return;
-        if (sp <= 0) return;
-        // Build upgrade description for the card
-        let cardUpgradeDesc = "";
-        if (skillId === "bolter") {
-          cardUpgradeDesc = "+10% damage, +2% projectile speed";
-          const nextChain = (l: number) => {
-            if (l >= 10) return 4;
-            if (l >= 7) return 3;
-            if (l >= 3) return 2;
-            return 0;
-          };
-          const curChain = nextChain(skillLvl);
-          const newChain = nextChain(skillLvl + 1);
-          if (newChain > curChain)
-            cardUpgradeDesc += ", chain to " + newChain + " enemies";
-        } else if (skillId === "claw") {
-          cardUpgradeDesc = "+20% damage";
-          if (skillLvl + 1 >= 5) {
-            cardUpgradeDesc += ", inflict bleed (10 dmg/tick, 10s)";
-          }
-          if (skillLvl + 1 >= 5) cardUpgradeDesc += ", +10% hitbox size";
-        } else if (skillId === "slam") {
-          cardUpgradeDesc = "+20% damage, +10% hitbox size";
-          if (skillLvl + 1 >= 5) cardUpgradeDesc += ", bypasses walls";
-        } else {
-          cardUpgradeDesc = "upgrade to level " + (skillLvl + 1);
-        }
-        this.showConfirm(
-          title +
-            ": " +
-            cardUpgradeDesc +
-            "\nAre you sure you want to upgrade the card?",
-          () => {
-            if (this.room) this.room.send(7, { slot: i }); // upgrade THIS card only
-            this.time.delayedCall(200, () => {
-              if (this.charScreenVisible) this.updateCharacterScreen();
-            });
-          },
-        );
-      });
     }
-
-    // ---- Level / XP info below cards ----
-    y += cardDispH + 20;
-    const level = Math.floor(p.level ?? 1);
-    const currentXp = Math.floor(p.currentXp ?? 0);
-    const xpToLevelUp = Math.floor(p.xpToLevelUp ?? 0);
-    const xpRemaining = Math.max(0, xpToLevelUp - currentXp);
-    const xpInfo = this.add
-      .text(
-        px + 20,
-        y,
-        [
-          "Level: " +
-            level +
-            "    XP: " +
-            formatNumber(currentXp) +
-            " / " +
-            formatNumber(xpToLevelUp),
-          "XP to next level: " + formatNumber(xpRemaining),
-        ].join("\n"),
-        {
-          color: "#aaaaff",
-          fontSize: "12px",
-          fontFamily: "monospace",
-          stroke: "#000000",
-          strokeThickness: 2,
-        },
-      )
-      .setOrigin(0, 0)
-      .setScrollFactor(0);
-    this.addDyn(xpInfo);
   }
 
-  // ============================================================
-  // LAYERED MAP RENDERING
-  // ============================================================
-
-  /**
-   * Render the layered Tiled map:
-   *   - Baselayer: every tile drawn (depth 0) — the floor.
-   *   - Interactive layer: every non-zero tile drawn (depth 1) — walls,
-   *     decor, spawn & exit markers.
-   *
-   * Both layers are blitted into a single canvas texture each (one draw call
-   * per layer) using the BIGOBS64sym.png spritesheet.
-   *
-   * Tile ids are Tiled global ids (firstgid=1); frame index = id - firstgid.
-   */
+  // ---- Layered map + debug hitbox rendering ----
   private renderLayeredMap(): void {
     const map = this.mapData;
     const { tileSize, tilesetColumns, tilesetKey, firstgid, cols, rows } = map;
-
-    const tilesetImg = this.textures
-      .get(tilesetKey)
-      .getSourceImage() as HTMLImageElement;
-
-    // ---- 1) Baselayer canvas (depth 0) ----
+    const tilesetImg = this.textures.get(tilesetKey).getSourceImage() as HTMLImageElement;
     const baseKey = "layered_baselayer";
     if (this.textures.exists(baseKey)) this.textures.remove(baseKey);
-    const baseCanvas = this.textures.createCanvas(
-      baseKey,
-      cols * tileSize,
-      rows * tileSize,
-    );
+    const baseCanvas = this.textures.createCanvas(baseKey, cols * tileSize, rows * tileSize);
     const baseCtx = baseCanvas.getContext();
-
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const tileId = map.baselayer[r][c];
@@ -5533,504 +1180,199 @@ export class GameScene extends Phaser.Scene {
         const frameIndex = tileId - firstgid;
         const fc = frameIndex % tilesetColumns;
         const fr = Math.floor(frameIndex / tilesetColumns);
-        baseCtx.drawImage(
-          tilesetImg,
-          fc * tileSize,
-          fr * tileSize,
-          tileSize,
-          tileSize,
-          c * tileSize,
-          r * tileSize,
-          tileSize,
-          tileSize,
-        );
+        baseCtx.drawImage(tilesetImg, fc * tileSize, fr * tileSize, tileSize, tileSize, c * tileSize, r * tileSize, tileSize, tileSize);
       }
     }
     baseCanvas.refresh();
     this.add.image(0, 0, baseKey).setOrigin(0, 0).setDepth(0);
-
-    // ---- 2) Interactive layer canvas (depth 1) — skip tile 0 ----
     const interKey = "layered_interactive";
     if (this.textures.exists(interKey)) this.textures.remove(interKey);
-    const interCanvas = this.textures.createCanvas(
-      interKey,
-      cols * tileSize,
-      rows * tileSize,
-    );
+    const interCanvas = this.textures.createCanvas(interKey, cols * tileSize, rows * tileSize);
     const interCtx = interCanvas.getContext();
-
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const tileId = map.interactiveLayer[r][c];
-        if (tileId === 0) continue; // empty — nothing to draw
+        if (tileId === 0) continue;
         const frameIndex = tileId - firstgid;
         const fc = frameIndex % tilesetColumns;
         const fr = Math.floor(frameIndex / tilesetColumns);
-        interCtx.drawImage(
-          tilesetImg,
-          fc * tileSize,
-          fr * tileSize,
-          tileSize,
-          tileSize,
-          c * tileSize,
-          r * tileSize,
-          tileSize,
-          tileSize,
-        );
+        interCtx.drawImage(tilesetImg, fc * tileSize, fr * tileSize, tileSize, tileSize, c * tileSize, r * tileSize, tileSize, tileSize);
       }
     }
     interCanvas.refresh();
     this.add.image(0, 0, interKey).setOrigin(0, 0).setDepth(1);
-
-    // Enemy spawn zones are NOT drawn here — they only appear in the debug
-    // hitbox overlay (toggle F3), so the map is clean during normal play.
   }
 
-  // ============================================================
-  // DEBUG HITBOX OVERLAY
-  // ============================================================
-
-  /**
-   * Render debug hitbox overlays (toggle with F3 or button).
-   *
-   * Colors:
-   *   RED (thick)   = collision tile (blocks movement)
-   *   YELLOW (thin) = player spawn point
-   *   CYAN (thin)   = exit zone
-   *   MAGENTA (thin)= enemy spawn zone
-   *   WHITE (thin)  = map boundary
-   */
   private renderDebugHitboxes(): void {
     const gfx = this.add.graphics().setDepth(10);
     const map = this.mapData;
     const { tileSize, cols, rows } = map;
-
-    // Collision tiles (RED)
     gfx.lineStyle(3, 0xff0000, 0.7);
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        if (map.collisionGrid[r * cols + c]) {
-          gfx.strokeRect(c * tileSize, r * tileSize, tileSize, tileSize);
-        }
+        if (map.collisionGrid[r * cols + c]) gfx.strokeRect(c * tileSize, r * tileSize, tileSize, tileSize);
       }
     }
-
-    // Player spawn point (YELLOW)
     gfx.lineStyle(2, 0xffff00, 0.9);
     const sp = map.spawnPoint;
-    gfx.strokeRect(
-      sp.x - tileSize / 2,
-      sp.y - tileSize / 2,
-      tileSize,
-      tileSize,
-    );
-
-    // Exit zone (CYAN)
+    gfx.strokeRect(sp.x - tileSize / 2, sp.y - tileSize / 2, tileSize, tileSize);
     gfx.lineStyle(2, 0x00ffff, 0.9);
     const ex = map.exitPoint;
     gfx.strokeRect(ex.x, ex.y, ex.width, ex.height);
-
-    // Enemy spawn zones (MAGENTA)
     gfx.lineStyle(2, 0xff00ff, 0.7);
-    for (const zone of map.enemySpawnZones) {
-      gfx.strokeRect(zone.x, zone.y, zone.width, zone.height);
-    }
-
-    // Map boundary (WHITE)
+    for (const zone of map.enemySpawnZones) gfx.strokeRect(zone.x, zone.y, zone.width, zone.height);
     gfx.lineStyle(1, 0xffffff, 0.3);
     gfx.strokeRect(0, 0, map.widthPx, map.heightPx);
-
     gfx.setVisible(this.showHitboxes);
     this.debugHitboxes = gfx;
   }
 
-  // ============================================================
-  // DEBUG HUD (FPS + Hitbox Toggle Button)
-  // ============================================================
-
-  /**
-   * Create the debug HUD fixed to the top-left of the screen.
-   * Uses setScrollFactor(0) so it stays in place while the camera moves.
-   */
   private createDebugHUD(): void {
-    // ---- FPS counter (top-left) ----
-    this.debugFPS = this.add
-      .text(10, 10, "FPS: 0", {
-        color: "#00ff00",
-        fontSize: "14px",
-        fontFamily: "monospace",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setScrollFactor(0)
-      .setDepth(100);
-
-    // ---- Hitbox toggle button (below FPS) ----
-    this.hitboxToggleButton = this.add
-      .text(10, 32, "[F3] Hitboxes: OFF", {
-        color: "#ffaa00",
-        fontSize: "12px",
-        fontFamily: "monospace",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setScrollFactor(0)
-      .setDepth(100)
-      .setInteractive({ useHandCursor: true })
-      .on("pointerdown", () => {
-        this.toggleHitboxes();
-      });
+    this.debugFPS = this.add.text(10, 10, "FPS: 0", {
+      color: "#00ff00", fontSize: "14px", fontFamily: "monospace",
+      stroke: "#000000", strokeThickness: 3,
+    }).setScrollFactor(0).setDepth(100);
+    this.hitboxToggleButton = this.add.text(10, 32, "[F3] Hitboxes: OFF", {
+      color: "#ffaa00", fontSize: "12px", fontFamily: "monospace",
+      stroke: "#000000", strokeThickness: 3,
+    }).setScrollFactor(0).setDepth(100).setInteractive({ useHandCursor: true })
+      .on("pointerdown", () => this.toggleHitboxes());
   }
 
-  /** Toggle hitbox visibility and update button text. */
   private toggleHitboxes(): void {
     this.showHitboxes = !this.showHitboxes;
-    if (this.debugHitboxes) {
-      this.debugHitboxes.setVisible(this.showHitboxes);
-    }
-    // Also toggle the HUD hitbox overlays (HP bar + card slots)
-    if (this.hudHitboxHP) {
-      this.hudHitboxHP.setVisible(this.showHitboxes);
-    }
-    this.hudHitboxCards.forEach((hb) => {
-      hb.setVisible(this.showHitboxes);
-    });
-    if (this.debugEntityHitboxes) {
-      this.debugEntityHitboxes.setVisible(this.showHitboxes);
-    }
-    this.hitboxToggleButton.setText(
-      this.showHitboxes ? "[F3] Hitboxes: ON" : "[F3] Hitboxes: OFF",
+    if (this.debugHitboxes) this.debugHitboxes.setVisible(this.showHitboxes);
+    if (this.statsHud?.hudHitboxHP) this.statsHud.hudHitboxHP.setVisible(this.showHitboxes);
+    this.statsHud?.hudHitboxCards.forEach((hb) => hb.setVisible(this.showHitboxes));
+    if (this.debugEntityHitboxes) this.debugEntityHitboxes.setVisible(this.showHitboxes);
+    this.hitboxToggleButton.setText(this.showHitboxes ? "[F3] Hitboxes: ON" : "[F3] Hitboxes: OFF");
+  }
+
+  // ---- Death screen ----
+  private showDeathScreen(): void {
+    if (this.deathScreen.container) return;
+    this.deathScreen.container = showDeathScreen(
+      this,
+      () => {
+        if (this.mapId !== "map1") {
+          this.deathScreen = hideDeathScreen(this.deathScreen);
+          try { this.room?.leave(); } catch (_e) { /* ignore */ }
+          this.room = null;
+          for (const id in this.playerEntities) { this.playerEntities[id]?.destroy(); delete this.playerEntities[id]; }
+          for (const id in this.enemyEntities) { this.enemyEntities[id]?.destroy(); delete this.enemyEntities[id]; }
+          for (const id in this.projectileEntities) { this.projectileEntities[id]?.destroy(); delete this.projectileEntities[id]; }
+          for (const id in this.clawEntities) { this.clawEntities[id]?.destroy(); delete this.clawEntities[id]; }
+          this.scene.restart({ fadeIn: true });
+          return;
+        }
+        if (this.room) this.room.send(4, {});
+        this.slotCards = Array(5).fill(null);
+        this.hudCards = Array(5).fill(null);
+        this.slotsSyncedOnce = false;
+      this.hideBolterTooltip();
+        this.deathScreen = hideDeathScreen(this.deathScreen);
+      },
+      () => { /* Quit no-op */ },
     );
   }
 
-  // ============================================================
-  // FIXED TIMESTEP UPDATE LOOP
-  // ============================================================
+  private hideDeathScreen(): void {
+    this.deathScreen = hideDeathScreen(this.deathScreen);
+    this.wasDead = false;
+  }
 
-  /**
-   * This runs at a fixed 60Hz. Each tick we:
-   *   1. Read keyboard input
-   *   2. Send input to server (message type 0)
-   *   3. Predict movement locally (apply same formula as server)
-   *   4. Clamp to map boundaries
-   *   5. Resolve tile collisions (O(1) grid lookup)
-   *   6. Interpolate remote players toward their server positions
-   *   7. Update FPS counter
-   */
-  fixedTick() {
+  // ---- Map swap (in-place) ----
+  private performMapSwap(nextMapId: string): void {
+    if (this.transitioning) return;
+    const cfg = (GameScene.MAP_CONFIGS as any)[nextMapId];
+    if (!cfg) return;
+    this.transitioning = true;
+    const cam = this.cameras.main;
+    const FADE_MS = 400;
+    cam.once("camerafadeoutcomplete", () => {
+      const destroyMap = (entities: Record<string, any>) => {
+        for (const id in entities) { entities[id]?.destroy?.(); delete entities[id]; }
+      };
+      destroyMap(this.enemyEntities);
+      destroyMap(this.projectileEntities);
+      destroyMap(this.clawEntities);
+      destroyMap(this.slamEntities);
+      destroyMap(this.vortexEntities);
+      for (const [id, bar] of Object.entries(this.enemyHpBars)) { bar?.destroy?.(); delete this.enemyHpBars[id]; }
+      this.enemyLastPos = {};
+      this.projLastPos = {};
+      this.entityHitSeqs = {};
+      resetGroundCards(this, this.groundCards);
+      this.dragCard = null;
+      this.children.list.filter((obj) =>
+        (obj as any).texture &&
+        ((obj as any).texture.key === "layered_baselayer" ||
+          (obj as any).texture.key === "layered_interactive")
+      ).forEach((obj) => obj.destroy());
+      if (this.debugHitboxes) { this.debugHitboxes.destroy(); this.debugHitboxes = null; }
+      this.mapId = nextMapId;
+      this.mapData = cfg.mapData;
+      this.renderLayeredMap();
+      this.renderDebugHitboxes();
+      if (this.debugHitboxes) this.debugHitboxes.setVisible(this.showHitboxes);
+      const spawn = this.mapData.spawnPoint;
+      for (const id in this.playerEntities) {
+        const s = this.playerEntities[id];
+        if (s?.active) { s.x = spawn.x; s.y = spawn.y; s.setData("serverX", spawn.x); s.setData("serverY", spawn.y); }
+      }
+      if (this.currentPlayer) { this.currentPlayer.x = spawn.x; this.currentPlayer.y = spawn.y; }
+      this.cameras.main.centerOn(spawn.x, spawn.y);
+      this.cameras.main.setBounds(0, 0, this.mapData.widthPx, this.mapData.heightPx);
+      rebuildMapInfoTooltip(this, this.mapInfo);
+      cam.fadeIn(FADE_MS, 0, 0, 0);
+      this.transitioning = false;
+    });
+    cam.fadeOut(FADE_MS, 0, 0, 0);
+  }
+
+  // ---- Fixed-timestep tick ----
+  fixedTick(): void {
     this.currentTick++;
     const now = Date.now();
-
-    // Toggle hitbox overlay on F3 press
-    if (Phaser.Input.Keyboard.JustDown(this.hitboxToggleKey)) {
-      this.toggleHitboxes();
-    }
-
-    // Update FPS counter
+    if (Phaser.Input.Keyboard.JustDown(this.hitboxToggleKey)) this.toggleHitboxes();
     this.debugFPS.setText("FPS: " + Math.round(this.game.loop.actualFps));
-
     if (!this.currentPlayer || !this.room) return;
-
-    // ---- Read input ----
     this.inputPayload.left = this.wasdKeys.left.isDown;
     this.inputPayload.right = this.wasdKeys.right.isDown;
     this.inputPayload.up = this.wasdKeys.up.isDown;
     this.inputPayload.down = this.wasdKeys.down.isDown;
     this.inputPayload.tick = this.currentTick;
-
-    // ---- Send input to server ----
     this.room.send(0, this.inputPayload);
-
-    // ---- Update character animation ----
     this.updatePlayerAnimation();
 
-    // ---- Client-side prediction (apply same movement as server) ----
     const dt = this.fixedTimeStep / 1000;
-    let dirX = 0;
-    let dirY = 0;
+    let dirX = 0, dirY = 0;
     if (this.inputPayload.left) dirX -= 1;
     if (this.inputPayload.right) dirX += 1;
     if (this.inputPayload.up) dirY -= 1;
     if (this.inputPayload.down) dirY += 1;
-
-    // Normalize diagonal (same as server)
     const length = Math.sqrt(dirX * dirX + dirY * dirY);
-    if (length > 0) {
-      dirX /= length;
-      dirY /= length;
-    }
-
+    if (length > 0) { dirX /= length; dirY /= length; }
     this.currentPlayer.x += dirX * this.moveSpeed * dt;
     this.currentPlayer.y += dirY * this.moveSpeed * dt;
-
-    // Clamp to map boundaries
-    this.currentPlayer.x = Phaser.Math.Clamp(
-      this.currentPlayer.x,
-      0,
-      this.mapData.widthPx,
-    );
-    this.currentPlayer.y = Phaser.Math.Clamp(
-      this.currentPlayer.y,
-      0,
-      this.mapData.heightPx,
-    );
-
-    // ---- Resolve tile collisions (O(1) — matches server) ----
+    this.currentPlayer.x = Phaser.Math.Clamp(this.currentPlayer.x, 0, this.mapData.widthPx);
+    this.currentPlayer.y = Phaser.Math.Clamp(this.currentPlayer.y, 0, this.mapData.heightPx);
     const resolved = resolveTileCollision(
-      this.currentPlayer.x,
-      this.currentPlayer.y,
+      this.currentPlayer.x, this.currentPlayer.y,
       this.PLAYER_COLLISION_RADIUS,
-      this.mapData.collisionGrid,
-      this.mapData.cols,
-      this.mapData.rows,
-      this.mapData.tileSize,
+      this.mapData.collisionGrid, this.mapData.cols, this.mapData.rows, this.mapData.tileSize,
     );
     this.currentPlayer.x = resolved.x;
     this.currentPlayer.y = resolved.y;
 
-    // ---- Map exit ----
-    // Fully server-authoritative now: the server checks ALL players'
-    // positions against the exit zone and broadcasts "mapTransition".
-    // The client only shows the "exit locked" toast while standing on
-    // the exit before the elite is dead.
-    const onExit =
-      this.currentPlayer &&
-      this.currentPlayer.active &&
-      (this.currentPlayer.x !== 0 || this.currentPlayer.y !== 0) &&
-      this.isOnExitTile();
-    if (onExit && !(this.room as any)?.state?.exitUnlocked) {
-      this.updateExitLockedToast(true);
-    } else {
-      this.updateExitLockedToast(false);
-    }
+    this.sendViewport();
+    updateSlotCooldowns(this, this.statsHud, this.hudCards, this.slotCards, this.currentPlayer);
+    if (this.dragCard) this.updateCardDrag(this.input.activePointer);
+    else if (this.groundCards.grab) updateGroundGrab(this.groundCards, this.input.activePointer);
 
-    // ---- Local player hit flash ----
-    if (this.currentPlayer) {
-      const localFlash = this.currentPlayer.data.get("hitFlashUntil") as number;
-      const localShock = this.currentPlayer.data.get("shockUntil") as number;
-      if (localFlash && now < localFlash) {
-        // Flash blue when the last hit was absorbed by shield, white otherwise.
-        const shielded =
-          this.currentPlayerState &&
-          (this.currentPlayerState as any).lastHitShielded === true;
-        this.currentPlayer.setTintFill(shielded ? 0x33b5ff : 0xffffff);
-      } else if (localShock && now < localShock) {
-        this.currentPlayer.setTint(0xb266ff);
-      } else {
-        this.currentPlayer.clearTint();
-      }
-    }
-
-    // ---- Local player invincibility (dash) ----
-    if (this.currentPlayer) {
-      const invUntil = this.currentPlayer.data.get("invincibleUntil") as number;
-      if (invUntil && now < invUntil) {
-        this.currentPlayer.setAlpha(0.4);
-      } else {
-        this.currentPlayer.setAlpha(1);
-      }
-    }
-
-    // ---- Interpolate remote players toward server position ----
-    for (const sessionId in this.playerEntities) {
-      if (sessionId === this.room.sessionId) continue;
-
-      const entity = this.playerEntities[sessionId];
-      const serverX = entity.data.get("serverX") as number;
-      const serverY = entity.data.get("serverY") as number;
-
-      if (serverX !== undefined && serverY !== undefined) {
-        // Distance to server target - used to detect movement and direction
-        const dx = serverX - entity.x;
-        const dy = serverY - entity.y;
-        const dist = Math.hypot(dx, dy);
-
-        entity.x = Phaser.Math.Linear(entity.x, serverX, 0.2);
-        entity.y = Phaser.Math.Linear(entity.y, serverY, 0.2);
-
-        // ---- Animation driving for remote players ----
-        // Direction is derived client-side from the position delta
-        // because the Player schema does not sync facing direction.
-        const moving = dist > 1.5; // small threshold to ignore jitter
-        let direction = entity.data.get("lastDirection") as string;
-        if (direction !== "left" && direction !== "right") {
-          direction = "left";
-        }
-
-        if (moving) {
-          // Horizontal delta updates facing; vertical keeps the last one.
-          if (Math.abs(dx) > 1) {
-            direction = dx > 0 ? "right" : "left";
-          }
-        }
-        entity.setData("lastDirection", direction);
-
-        if (moving) {
-          const animKey =
-            direction === "right" ? "player_walk_right" : "player_walk_left";
-          const currentAnim = entity.anims.currentAnim;
-          if (!currentAnim || currentAnim.key !== animKey) {
-            entity.anims.play(animKey);
-          }
-          entity.setFlipX(false);
-        } else {
-          const currentAnim = entity.anims.currentAnim;
-          if (!currentAnim || currentAnim.key !== "player_idle") {
-            entity.anims.play("player_idle");
-          }
-          entity.setFlipX(direction === "right");
-        }
-      }
-
-      // Hit flash: tint white while hitFlashUntil > now.
-      const playerFlash = entity.data.get("hitFlashUntil") as number;
-      if (playerFlash && now < playerFlash) {
-        entity.setTintFill(0xffffff);
-      } else {
-        entity.clearTint();
-      }
-    }
-
-    // ---- Interpolate enemies toward their server position + apply facing ----
-    for (const enemyId in this.enemyEntities) {
-      const entity = this.enemyEntities[enemyId];
-      const serverX = entity.data.get("serverX") as number;
-      const serverY = entity.data.get("serverY") as number;
-
-      // Smoother interpolation (higher factor = snappier).
-      if (serverX !== undefined && serverY !== undefined) {
-        entity.x = Phaser.Math.Linear(entity.x, serverX, 0.35);
-        entity.y = Phaser.Math.Linear(entity.y, serverY, 0.35);
-      }
-
-      // Facing: sprite faces LEFT by default; flip horizontally when right.
-      const facingRight = entity.data.get("facingRight") as boolean;
-      entity.setFlipX(!!facingRight);
-
-      // Animation: attack when attacking, otherwise idle (shown for move+stand).
-      const attacking = entity.data.get("attacking") as boolean;
-      const textureKey = entity.texture.key;
-      const isOrck = textureKey === "orck_sheet";
-      const isTau = textureKey === "tau_sheet";
-      const isMech = textureKey === "mechanicus_sheet";
-        const isCaster = textureKey === "caster_sheet";
-      const atkKey = isTau
-        ? "tau_attack"
-        : isMech
-          ? "mechanicus_attack"
-          : isCaster
-            ? "caster_attack"
-          : isOrck
-            ? "orck_attack"
-            : "tri_attack";
-      const idleKey = isTau
-        ? "tau_idle"
-        : isMech
-          ? "mechanicus_idle"
-          : isCaster
-            ? "caster_idle"
-          : isOrck
-            ? "orck_idle"
-            : "tri_idle";
-      const eAnim = entity.anims.currentAnim;
-      if (attacking) {
-        if (!eAnim || eAnim.key !== atkKey) {
-          entity.anims.play(atkKey);
-        }
-      } else {
-        if (!eAnim || eAnim.key !== idleKey) {
-          entity.anims.play(idleKey);
-        }
-      }
-
-      // Hit flash: tint white while hitFlashUntil > now.
-      const flashUntil = entity.data.get("hitFlashUntil") as number;
-      const shockUntil = entity.data.get("shockUntil") as number;
-      if (flashUntil && now < flashUntil) {
-        entity.setTintFill(0xffffff);
-      } else if (shockUntil && now < shockUntil) {
-        // Shock: purple tint
-        entity.setTint(0xb266ff);
-      } else {
-        entity.clearTint();
-      }
-      // Invincibility opacity (dash)
-      const enemyInvUntil = entity.data.get("invincibleUntil") as number;
-      if (enemyInvUntil && now < enemyInvUntil) {
-        entity.setAlpha(0.4);
-      } else {
-        entity.setAlpha(1);
-      }
-
-      // ---- Update the floating HP bar ----
-      const hpBar = this.enemyHpBars[enemyId];
-      if (hpBar) {
-        hpBar.setPosition(entity.x, entity.y);
-        const fill = hpBar.getAt(1) as Phaser.GameObjects.Rectangle;
-        const shieldFillEl = hpBar.getAt(2) as Phaser.GameObjects.Rectangle;
-        const lvText = hpBar.getAt(3) as Phaser.GameObjects.Text;
-        const hp = entity.data.get("hp") as number;
-        const maxHp = entity.data.get("maxHp") as number;
-        if (fill && maxHp > 0) {
-          const pct = Math.max(0, hp / maxHp);
-          fill.scaleX = pct;
-        }
-        // Shield overlay: white translucent bar that shrinks as the shield
-        // depletes. Hidden when the enemy has no shield.
-        if (shieldFillEl) {
-          const sh = entity.data.get("shield") as number;
-          const maxSh = entity.data.get("maxShield") as number;
-          if (maxSh > 0 && sh > 0) {
-            shieldFillEl.setVisible(true);
-            shieldFillEl.scaleX = Math.max(0, sh / maxSh);
-          } else {
-            shieldFillEl.setVisible(false);
-          }
-        }
-        if (lvText) {
-          const lv = entity.data.get("level") as number;
-          const newText = String(lv ?? 1);
-          if (lvText.text !== newText) lvText.setText(newText);
-        }
-      }
-    }
-
-    // ---- Slam VFX: update sprite frame based on travel progress ----
-    for (const slamId in this.slamEntities) {
-      const sprite = this.slamEntities[slamId];
-      const isUpgraded = sprite.data.get("isUpgraded") as boolean;
-      const remaining = sprite.data.get("remainingRange") as number;
-      const totalRange = isUpgraded ? 200 : 120;
-      const travelled = Math.max(0, 1 - remaining / totalRange); // 0..1
-
-      if (isUpgraded) {
-        // Row 1: 4 frames (0=start, 1=travel1, 2=travel2, 3=impact)
-        // Show 0 at start, alternate 1/2 during travel, 3 at end.
-        let frame: number;
-        if (travelled >= 0.95) {
-          frame = 4 + 3; // row 1 frame 3 (index 7 in the 4-col sheet)
-        } else if (travelled <= 0.05) {
-          frame = 4 + 0; // row 1 frame 0
-        } else {
-          // Alternate frames 1 and 2 during travel
-          frame = 4 + (Math.floor(travelled * 20) % 2 === 0 ? 1 : 2);
-        }
-        sprite.setFrame(frame);
-      } else {
-        // Row 0: 3 frames (0=start, 1=travel, 2=impact)
-        let frame: number;
-        if (travelled >= 0.9) {
-          frame = 2; // impact frame
-        } else if (travelled <= 0.05) {
-          frame = 0; // start frame
-        } else {
-          frame = 1; // travel frame
-        }
-        sprite.setFrame(frame);
-      }
-    }
-
-    // ---- Check death state ----
+    this.updateSpawnCountdown();
+    this.updateEliteHud();
+    updateVignettes(this.statsHud, this.currentPlayerState);
     if (this.currentPlayerState) {
       if (this.currentPlayerState.currentHealth <= 0 && !this.wasDead) {
         this.wasDead = true;
@@ -6038,719 +1380,31 @@ export class GameScene extends Phaser.Scene {
       } else if (this.currentPlayerState.currentHealth > 0 && this.wasDead) {
         this.hideDeathScreen();
       }
-      this.updateVignettes();
-    }
-    // ---- Update bolter cooldown fill on the card ----
-    // ---- Slot card cooldown fills + drag update ----
-    this.updateSlotCooldowns();
-    if (this.dragCard) this.updateCardDrag(this.input.activePointer);
-    else if (this.invDrag) this.updateInvCardDrag(this.input.activePointer);
-    else if (this.groundGrab) this.updateGroundGrab(this.input.activePointer);
-    // ---- Spawn-grace countdown toast (map-entry safety window) ----
-    this.updateSpawnCountdown();
-    // ---- Elite enemy: announce toasts + boss HP bar ----
-    this.updateEliteHud();
-    // ---- Sync viewport to server (for viewport-activated spawning) ----
-    // ---- Update live entity hitbox overlay ----
-    this.updateEntityHitboxes();
-    this.sendViewport();
-  }
-
-  // ============================================================
-  // LIVE ENTITY HITBOX OVERLAY
-  // ============================================================
-
-  /**
-   * Redraw the live entity hitbox overlay (call each frame).
-   * Only visible when showHitboxes is true (toggle F3).
-   *
-   * Colors:
-   *   GREEN  (circle) = player hitbox (radius 10)
-   *   RED    (circle) = enemy hitbox (radius 9)
-   *   BLUE   (circle) = bolter projectile hitbox (radius 6)
-   *   ORANGE (cone)   = claw skill VFX hitbox
-   */
-  private updateEntityHitboxes(): void {
-    const gfx = this.debugEntityHitboxes;
-    if (!gfx) return;
-    gfx.clear();
-
-    if (!this.showHitboxes) return;
-
-    // ---- Players (GREEN rectangles, from synced hitboxW/H) ----
-    gfx.lineStyle(1.5, 0x00ff00, 0.9);
-    if (this.currentPlayer) {
-      const pw = (this.currentPlayer.data.get("hitboxW") as number) ?? 10;
-      const ph = (this.currentPlayer.data.get("hitboxH") as number) ?? 10;
-      gfx.strokeRect(
-        this.currentPlayer.x - pw,
-        this.currentPlayer.y - ph,
-        pw * 2,
-        ph * 2,
-      );
-    }
-    for (const sessionId in this.playerEntities) {
-      if (sessionId === this.room?.sessionId) continue;
-      const sp = this.playerEntities[sessionId];
-      const pw = (sp.data.get("hitboxW") as number) ?? 10;
-      const ph = (sp.data.get("hitboxH") as number) ?? 10;
-      gfx.strokeRect(sp.x - pw, sp.y - ph, pw * 2, ph * 2);
     }
 
-    // ---- Enemies (RED rectangles, from synced hitboxW/H) ----
-    gfx.lineStyle(1.5, 0xff0000, 0.9);
-    for (const id in this.enemyEntities) {
-      const sp = this.enemyEntities[id];
-      const ew = (sp.data.get("hitboxW") as number) ?? 12;
-      const eh = (sp.data.get("hitboxH") as number) ?? 12;
-      gfx.strokeRect(sp.x - ew, sp.y - eh, ew * 2, eh * 2);
-    }
-
-    // ---- Bolter projectiles (BLUE circles, radius 6) ----
-    gfx.lineStyle(1.5, 0x00aaff, 0.9);
-    for (const id in this.projectileEntities) {
-      const e = this.projectileEntities[id];
-      gfx.strokeCircle(e.x, e.y, 6);
-    }
-
-    // ---- Claw VFX (ORANGE cones) ----
-    gfx.lineStyle(1.5, 0xff8800, 0.8);
-    for (const id in this.clawEntities) {
-      const e = this.clawEntities[id];
-      // Read range from the synced cast data (stored on the sprite).
-      const castData = (e as any).castData as any;
-      const range = castData?.range || 60;
-      const tier: string = castData?.tier || "small";
-      const halfAngle = tier === "big" ? 0.9 : tier === "mid" ? 0.7 : 0.5;
-      const angle = castData?.angle ?? e.rotation ?? 0;
-      // The cone originates from the CASTER's position (castData.x/y),
-      // not the sprite position (which is at the cone edge).
-      const cx = castData?.x ?? e.x;
-      const cy = castData?.y ?? e.y;
-      gfx.beginPath();
-      gfx.moveTo(cx, cy);
-      gfx.lineTo(
-        cx + Math.cos(angle - halfAngle) * range,
-        cy + Math.sin(angle - halfAngle) * range,
-      );
-      gfx.moveTo(cx, cy);
-      gfx.lineTo(
-        cx + Math.cos(angle + halfAngle) * range,
-        cy + Math.sin(angle + halfAngle) * range,
-      );
-      gfx.strokePath();
-      gfx.beginPath();
-      gfx.arc(cx, cy, range, angle - halfAngle, angle + halfAngle);
-      gfx.strokePath();
-    }
-
-    // ---- Pulse VFX (PURPLE circles) ----
-    gfx.lineStyle(1.5, 0xb266ff, 0.8);
-    for (const id in this.clawEntities) {
-      const e = this.clawEntities[id];
-      const castData = (e as any).castData as any;
-      // Only draw pulse hitbox for pulse casts
-      if (castData?.skillId !== "pulse") continue;
-      const radius = castData?.range || 80;
-      // The pulse is centered on the caster
-      const cx = castData?.x ?? e.x;
-      const cy = castData?.y ?? e.y;
-      gfx.strokeCircle(cx, cy, radius);
-    }
-
-    // ---- Shock VFX (YELLOW-GREEN cones) ----
-    gfx.lineStyle(1.5, 0xccff00, 0.8);
-    for (const id in this.clawEntities) {
-      const e = this.clawEntities[id];
-      const castData = (e as any).castData as any;
-      if (castData?.skillId !== "shock") continue;
-      // Range: base 200px, +30 per odd level
-      const lvl = castData?.level ?? 1;
-      const increases = Math.floor((lvl - 1) / 2) + 1;
-      const range = 200 + 30 * (increases - 1);
-      const halfAngle = 0.6; // ~34 degrees
-      const angle = castData?.angle ?? 0;
-      const cx = castData?.x ?? e.x;
-      const cy = castData?.y ?? e.y;
-      gfx.beginPath();
-      gfx.moveTo(cx, cy);
-      gfx.lineTo(
-        cx + Math.cos(angle - halfAngle) * range,
-        cy + Math.sin(angle - halfAngle) * range,
-      );
-      gfx.moveTo(cx, cy);
-      gfx.lineTo(
-        cx + Math.cos(angle + halfAngle) * range,
-        cy + Math.sin(angle + halfAngle) * range,
-      );
-      gfx.strokePath();
-      gfx.beginPath();
-      gfx.arc(cx, cy, range, angle - halfAngle, angle + halfAngle);
-      gfx.strokePath();
-    }
-
-    // ---- Slam VFX (CYAN rectangles, rotated) ----
-    gfx.lineStyle(1.5, 0x00ffff, 0.8);
     for (const slamId in this.slamEntities) {
       const sprite = this.slamEntities[slamId];
-      const isUpgraded = sprite.data.get("isUpgraded") as boolean;
-      // Actual server hitbox: halfWidth=40 (perpendicular), halfHeight=20 (along travel)
-      // Scale slightly with level for upgraded
-      const hw = isUpgraded ? 50 : 40;
-      const hh = isUpgraded ? 25 : 20;
-      const angle = sprite.data.get("angle") as number;
-      const cx = sprite.x;
-      const cy = sprite.y;
-      // Compute 4 corners of the rotated rectangle
-      const cos = Math.cos(angle);
-      const sin = Math.sin(angle);
-      const corners = [
-        { x: -hh, y: -hw }, // top-left
-        { x: hh, y: -hw }, // top-right
-        { x: hh, y: hw }, // bottom-right
-        { x: -hh, y: hw }, // bottom-left
-      ].map((p) => ({
-        x: cx + p.x * cos - p.y * sin,
-        y: cy + p.x * sin + p.y * cos,
-      }));
-      gfx.beginPath();
-      gfx.moveTo(corners[0].x, corners[0].y);
-      for (let i = 1; i < corners.length; i++)
-        gfx.lineTo(corners[i].x, corners[i].y);
-      gfx.closePath();
-      gfx.strokePath();
-    }
-
-    // ---- Dash VFX (WHITE line trail) ----
-    gfx.lineStyle(2, 0xffffff, 0.8);
-    for (const id in this.clawEntities) {
-      const ent = this.clawEntities[id];
-      const castData = (ent as any).castData as any;
-      if (castData?.skillId !== "dash") continue;
-      const startX = castData?.startX ?? castData?.x ?? ent.x;
-      const startY = castData?.startY ?? castData?.y ?? ent.y;
-      const endX = castData?.x ?? ent.x;
-      const endY = castData?.y ?? ent.y;
-      gfx.lineStyle(2, 0xffffff, 0.8);
-      gfx.lineBetween(startX, startY, endX, endY);
-    }
-
-    // ---- Dash Ice Blast VFX (CYAN circles) ----
-    gfx.lineStyle(2, 0x66ccff, 0.9);
-    for (const id in this.clawEntities) {
-      const ent = this.clawEntities[id];
-      const castData = (ent as any).castData as any;
-      if (castData?.skillId !== "dash_ice") continue;
-      const radius = castData?.range ?? 50;
-      const cx = castData?.x ?? ent.x;
-      const cy = castData?.y ?? ent.y;
-      gfx.strokeCircle(cx, cy, radius);
+      const remaining = sprite.data.get("remainingRange") as number;
+      updateSlamFrame(sprite, remaining);
     }
   }
 
-  // ============================================================
-  // BULLET HIT VFX
-  // ============================================================
-
-  /** Spawn a brief impact burst at a position (bullet hit wall/target). */
-  private spawnBulletHitVfx(x: number, y: number): void {
-    const burst = this.add.circle(x, y, 3, 0xffffff).setDepth(6);
-    this.tweens.add({
-      targets: burst,
-      scale: 4,
-      alpha: 0,
-      duration: 180,
-      onComplete: () => burst.destroy(),
-    });
-  }
-
-  /** Spawn a blood splat mist effect at the given position. */
-  private spawnBloodSplat(x: number, y: number): void {
-    // Central dark-red burst
-    const splat = this.add.circle(x, y, 8, 0x8b0000, 0.7).setDepth(6);
-    this.tweens.add({
-      targets: splat,
-      scale: 3,
-      alpha: 0,
-      duration: 450,
-      ease: "Cubic.out",
-      onComplete: () => splat.destroy(),
-    });
-    // Scattered small blood particles
-    for (let i = 0; i < 6; i++) {
-      const angle = (Math.PI * 2 * i) / 6 + Math.random() * 0.5;
-      const dist = 12 + Math.random() * 16;
-      const px = x + Math.cos(angle) * dist;
-      const py = y + Math.sin(angle) * dist;
-      const drop = this.add
-        .circle(px, py, 2 + Math.random() * 2, 0xaa1111, 0.6)
-        .setDepth(6);
-      this.tweens.add({
-        targets: drop,
-        x: x + Math.cos(angle) * (dist + 10),
-        y: y + Math.sin(angle) * (dist + 10),
-        alpha: 0,
-        duration: 350 + Math.random() * 200,
-        ease: "Cubic.out",
-        onComplete: () => drop.destroy(),
-      });
-    }
-  }
-
-  /**
-   * Returns true if the local player's center is inside this map's exit zone.
-   */
-  private isOnExitTile(): boolean {
-    if (!this.currentPlayer) return false;
-    const ex = this.mapData.exitPoint;
-    const inside =
-      this.currentPlayer.x >= ex.x &&
-      this.currentPlayer.x <= ex.x + ex.width &&
-      this.currentPlayer.y >= ex.y &&
-      this.currentPlayer.y <= ex.y + ex.height;
-    if (inside) {
-      console.log(
-        `[EXIT] Player at (${this.currentPlayer.x}, ${this.currentPlayer.y}) inside exit zone (${ex.x},${ex.y},${ex.width},${ex.height}) (server-authoritative)`,
-      );
-    }
-    return inside;
-  }
-
-  /**
-   * Fade to black, show the loading screen image, then switch to the next
-   * Phaser scene. The destination scene fades in from black once its room
-   * has finished connecting (see create()).
-   *
-   * The old Colyseus room is left during the dark phase and is
-   * auto-disposed by Colyseus once it has no clients.
-   */
-  // ============================================================
-  // DEATH SCREEN OVERLAY
-  // ============================================================
-
-  /**
-   * Show the death screen: translucent black overlay + gold-lined box
-   * with Respawn and Quit buttons.
-   */
-  private showDeathScreen(): void {
-    if (this.deathOverlay) return; // already shown
-    const cam = this.cameras.main;
-    const cx = cam.width / 2;
-    const cy = cam.height / 2;
-
-    // Translucent black background
-    const bg = this.add
-      .rectangle(cx, cy, cam.width, cam.height, 0x000000, 0.75)
-      .setScrollFactor(0)
-      .setDepth(2000);
-
-    // Gold-lined box (wood-colored fill)
-    const boxW = 360;
-    const boxH = 220;
-    const box = this.add
-      .rectangle(cx, cy, boxW, boxH, 0x3d2b1f, 0.95)
-      .setScrollFactor(0)
-      .setDepth(2001);
-    // Sprite outline border
-    const boxOutline = this.buildOutlineFrame(
-      cx - boxW / 2,
-      cy - boxH / 2,
-      boxW,
-      boxH,
-    ).setDepth(2005);
-
-    // "YOU DIED" title
-    const title = this.add
-      .text(cx, cy - 70, "YOU DIED", {
-        fontFamily: "Georgia, serif",
-        fontSize: "28px",
-        color: "#d4a017",
-        stroke: "#000000",
-        strokeThickness: 4,
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(2002);
-
-    // Respawn button
-    const respawnBtn = this.add
-      .rectangle(cx, cy + 10, 180, 44, 0x2d4a2b, 0.9)
-      .setScrollFactor(0)
-      .setDepth(2002)
-      .setInteractive({ useHandCursor: true });
-    // Sprite outline border
-    const respawnOutline = this.buildOutlineFrame(cx - 90, cy - 12, 180, 44).setDepth(2005);
-    const respawnText = this.add
-      .text(cx, cy + 10, "Respawn", {
-        fontFamily: "Georgia, serif",
-        fontSize: "18px",
-        color: "#ffffff",
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(2003);
-
-    // Quit button
-    const quitBtn = this.add
-      .rectangle(cx, cy + 64, 180, 44, 0x4a2b2b, 0.9)
-      .setScrollFactor(0)
-      .setDepth(2002)
-      .setInteractive({ useHandCursor: true });
-    // Sprite outline border
-    const quitOutline = this.buildOutlineFrame(cx - 90, cy + 42, 180, 44).setDepth(2005);
-    const quitText = this.add
-      .text(cx, cy + 64, "Quit", {
-        fontFamily: "Georgia, serif",
-        fontSize: "18px",
-        color: "#ffffff",
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(2003);
-
-    // Button actions
-    respawnBtn.on("pointerdown", () => {
-      // Dying on any map >1 (map2+) restarts the RUN: leave the room and
-      // boot a fresh scene (new room = new session = fresh player).
-      // Dying on map1 respawns in place (server message 4).
-      if (this.mapId !== "map1") {
-        this.hideDeathScreen();
-        try {
-          this.room?.leave();
-        } catch (_e) {
-          /* ignore */
-        }
-        this.room = null;
-        // Clear all local entity sprites
-        for (const id in this.playerEntities) {
-          this.playerEntities[id]?.destroy();
-          delete this.playerEntities[id];
-        }
-        for (const id in this.enemyEntities) {
-          this.enemyEntities[id]?.destroy();
-          delete this.enemyEntities[id];
-        }
-        for (const id in this.projectileEntities) {
-          this.projectileEntities[id]?.destroy();
-          delete this.projectileEntities[id];
-        }
-        for (const id in this.clawEntities) {
-          this.clawEntities[id]?.destroy();
-          delete this.clawEntities[id];
-        }
-        // Restart this scene: create() re-runs, connects to a NEW room
-        // (fresh run). scene.restart() handles stop+start of the SAME
-        // scene safely.
-        this.scene.restart({ fadeIn: true });
-        return;
-      }
-      // Normal respawn (same map): reset HUD cards to the default layout.
-      if (this.room) {
-        this.room.send(4, {});
-      }
-      this.resetSlotLayoutToDefault();
-      this.hideDeathScreen();
-    });
-    quitBtn.on("pointerdown", () => {
-      // Quit does nothing for now
-    });
-
-    // Hover effects
-    respawnBtn.on("pointerover", () => respawnBtn.setFillStyle(0x3d6a3d, 0.95));
-    respawnBtn.on("pointerout", () => respawnBtn.setFillStyle(0x2d4a2b, 0.9));
-    quitBtn.on("pointerover", () => quitBtn.setFillStyle(0x6a3d3d, 0.95));
-    quitBtn.on("pointerout", () => quitBtn.setFillStyle(0x4a2b2b, 0.9));
-
-    this.deathOverlay = this.add
-      .container(0, 0, [
-        bg,
-        box,
-        boxOutline,
-        title,
-        respawnBtn,
-        respawnOutline,
-        respawnText,
-        quitBtn,
-        quitOutline,
-        quitText,
-      ])
-      .setScrollFactor(0)
-      .setDepth(2000);
-  }
-
-  /** Hide the death screen overlay. */
-  private hideDeathScreen(): void {
-    if (this.deathOverlay) {
-      this.deathOverlay.destroy();
-      this.deathOverlay = null;
-    }
-    this.wasDead = false;
-  }
-
-  // ============================================================
-  // MAP TRANSITION
-  // ============================================================
-
-  // ============================================================
-  // IN-PLACE MAP SWAP (server-authoritative transition)
-  // ============================================================
-
-  /**
-   * Swap to a new map WITHOUT leaving the room or reconnecting.
-   * The server has already: cleared per-map entities, repositioned the
-   * player at the new spawn, and awarded transition XP. The client just
-   * needs to: fade out, destroy all world sprites + old map render,
-   * rebuild the tilemap for the new map, update camera bounds, fade in.
-   * HUD (cards/XP/inventory) is untouched — it syncs from the live
-   * room state as usual.
-   */
-  private performMapSwap(nextMapId: string): void {
-    if (this.transitioning) return;
-    const cfg = GameScene.MAP_CONFIGS[nextMapId];
-    if (!cfg) {
-      console.warn(`[TRANSITION] Unknown mapId "${nextMapId}" — ignoring`);
-      return;
-    }
-    this.transitioning = true;
-    console.log(
-      `[TRANSITION] Swapping map in place: ${this.mapId} -> ${nextMapId}`,
-    );
-
-    const cam = this.cameras.main;
-    const FADE_MS = 400;
-
-    cam.once("camerafadeoutcomplete", () => {
-      // ---- 1) Destroy ALL world entities (server already cleared them,
-      //         but local sprites must go too). ----
-      const destroyMap = (entities: Record<string, any>) => {
-        for (const id in entities) {
-          entities[id]?.destroy?.();
-          delete entities[id];
-        }
-      };
-      // NOTE: playerEntities are intentionally NOT destroyed here — the
-      // players stay in the room across maps, and their onChange
-      // closures animate these exact sprites. They are snapped to the
-      // new spawn below, after the map rebuild.
-      destroyMap(this.enemyEntities);
-      destroyMap(this.projectileEntities);
-      destroyMap(this.clawEntities);
-      destroyMap(this.slamEntities);
-      destroyMap(this.vortexEntities);
-      for (const [id, bar] of Object.entries(this.enemyHpBars)) {
-        bar?.destroy?.();
-        delete this.enemyHpBars[id];
-      }
-      this.enemyLastPos = {};
-      this.projLastPos = {};
-      this.entityHitSeqs = {};
-      // Ground cards (Map<string, Container>)
-      for (const [cardId, entity] of this.groundCardEntities) {
-        entity?.destroy?.();
-        this.groundCardEntities.delete(cardId);
-      }
-      this.cancelGroundCardTooltip();
-      this.pendingPickups.clear();
-      this.pendingPickupSlots.clear();
-      this.groundGrab = null;
-      this.dragCard = null;
-
-      // (Player sprites survive the swap; nothing to rebind.)
-
-      // ---- 2) Destroy the old map render (baselayer + interactive
-      //         canvases) so the new map draws on a clean slate. ----
-      this.children.list
-        .filter(
-          (obj) =>
-            (obj as any).texture &&
-            ((obj as any).texture.key === "layered_baselayer" ||
-              (obj as any).texture.key === "layered_interactive"),
-        )
-        .forEach((obj) => obj.destroy());
-      if (this.debugHitboxes) {
-        this.debugHitboxes.destroy();
-        this.debugHitboxes = null;
-      }
-
-      // ---- 3) Swap map data + rebuild ----
-      this.mapId = nextMapId;
-      this.mapData = cfg.mapData;
-      this.renderLayeredMap();
-      this.renderDebugHitboxes();
-      // Keep F3 overlay state consistent with the freshly drawn overlay.
-      if (this.debugHitboxes) {
-        this.debugHitboxes.setVisible(this.showHitboxes);
-      }
-
-      // ---- 4) Snap surviving player sprites to the new map's spawn
-      //         (the server already repositioned the authoritative
-      //         positions there; this keeps prediction + interpolation
-      //         resuming from a sane point). ----
-      const spawn = this.mapData.spawnPoint;
-      for (const id in this.playerEntities) {
-        const s = this.playerEntities[id];
-        if (s?.active) {
-          s.x = spawn.x;
-          s.y = spawn.y;
-          s.setData("serverX", spawn.x);
-          s.setData("serverY", spawn.y);
-        }
-      }
-      if (this.currentPlayer) {
-        this.currentPlayer.x = spawn.x;
-        this.currentPlayer.y = spawn.y;
-      }
-      this.cameras.main.centerOn(spawn.x, spawn.y);
-
-      // ---- 5) Update camera bounds to the new map size + re-follow. ----
-      this.cameras.main.setBounds(
-        0,
-        0,
-        this.mapData.widthPx,
-        this.mapData.heightPx,
-      );
-
-      // ---- 6) Refresh map info tooltip (name/description/modifiers). ----
-      this.rebuildMapInfoTooltip();
-
-      cam.fadeIn(FADE_MS, 0, 0, 0);
-      this.transitioning = false;
-      console.log(
-        `[TRANSITION] Map swap complete: now on "${nextMapId}"`,
-      );
-    });
-
-    cam.fadeOut(FADE_MS, 0, 0, 0);
-  }
-
-  /**
-   * Rebuild the map-info tooltip contents for the current mapId.
-   * (The tooltip is created once in create(); a map swap changes the
-   * name/description/modifiers without recreating the button.)
-   */
-  private rebuildMapInfoTooltip(): void {
-    if (this.mapInfoTooltip) {
-      this.mapInfoTooltip.destroy();
-      this.mapInfoTooltip = this.add
-        .container(0, 0)
-        .setDepth(300)
-        .setVisible(false)
-        .setScrollFactor(0);
-    }
-    if (this.mapInfoButton) {
-      // Re-run the tooltip builder by toggling visibility state.
-      // Simplest robust approach: destroy + rebuild via createMapInfoButton
-      // is risky mid-game; instead re-populate below.
-    }
-    const info = GameScene.MAP_CONFIGS[this.mapId];
-    if (!info || !this.mapInfoTooltip) return;
-    const padding = 12;
-    let tooltipY = padding;
-    const mapInfo =
-      MAP_INFO[info.mapInfoKey] ?? { name: info.mapInfoKey, description: "" };
-    const nameText = this.add
-      .text(padding, tooltipY, mapInfo.name, {
-        color: "#ffd700",
-        fontSize: "16px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0, 0)
-      .setScrollFactor(0);
-    this.mapInfoTooltip.add(nameText);
-    tooltipY += nameText.height + 6;
-    if (mapInfo.description) {
-      const descText = this.add
-        .text(padding, tooltipY, mapInfo.description, {
-          color: "#cccccc",
-          fontSize: "12px",
-          fontFamily: "monospace",
-          wordWrap: { width: 320 - padding * 2 },
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(0, 0)
-        .setScrollFactor(0);
-      this.mapInfoTooltip.add(descText);
-      tooltipY += descText.height + 6;
-    }
-    const mods = (this.room?.metadata?.modifiers as any[]) ?? [];
-    const modHeader = this.add
-      .text(padding, tooltipY, "Active Modifiers", {
-        color: "#ffffff",
-        fontSize: "12px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 2,
-      })
-      .setOrigin(0, 0)
-      .setScrollFactor(0);
-    this.mapInfoTooltip.add(modHeader);
-    tooltipY += modHeader.height + 4;
-    if (mods.length === 0) {
-      const noneText = this.add
-        .text(padding, tooltipY, "None", {
-          color: "#888888",
-          fontSize: "11px",
-          fontFamily: "monospace",
-        })
-        .setOrigin(0, 0)
-        .setScrollFactor(0);
-      this.mapInfoTooltip.add(noneText);
-      tooltipY += noneText.height + 4;
-    } else {
-      for (const m of mods) {
-        const t = this.add
-          .text(
-            padding,
-            tooltipY,
-            `${m.title ?? m.id}${m.description ? ` — ${m.description}` : ""}`,
-            {
-              color: "#88ff88",
-              fontSize: "11px",
-              fontFamily: "monospace",
-              wordWrap: { width: 320 - padding * 2 },
-            },
-          )
-          .setOrigin(0, 0)
-          .setScrollFactor(0);
-        this.mapInfoTooltip.add(t);
-        tooltipY += t.height + 2;
-      }
-    }
-
-    // Background panel sized to content (mirrors createMapInfoButton).
-    const tooltipH = tooltipY + padding;
-    this.mapInfoTooltipBg = this.add.graphics();
-    this.mapInfoTooltipBg.fillStyle(0x0a0a14, 0.92);
-    this.mapInfoTooltipBg.fillRoundedRect(0, 0, 320, tooltipH, 8);
-    this.mapInfoTooltipBg.lineStyle(2, 0x4a6a8a, 0.8);
-    this.mapInfoTooltipBg.strokeRoundedRect(0, 0, 320, tooltipH, 8);
-    this.mapInfoTooltip.add(this.mapInfoTooltipBg);
-    this.mapInfoTooltip.sendToBack(this.mapInfoTooltipBg);
-  }
-
-  // ============================================================
-  // PHASER UPDATE (routes to fixed timestep)
-  // ============================================================
-
-  update(_time: number, delta: number) {
+  sendViewport(): void {
     if (!this.room) return;
+    const cam = this.cameras.main;
+    const wv = cam.worldView;
+    this.room.send(3, { x: wv.x, y: wv.y, w: wv.width, h: wv.height });
+  }
 
+  update(_t: number, delta: number): void {
+    if (!this.room) return;
     this.elapsedTime += delta;
-    // Guard: never run more than 5 catch-up ticks in one frame (freeze
-    // protection if the tab was backgrounded or a frame stalled).
     let catchUpTicks = 0;
     while (this.elapsedTime >= this.fixedTimeStep) {
       this.elapsedTime -= this.fixedTimeStep;
       this.fixedTick();
-      if (++catchUpTicks >= 5) {
-        this.elapsedTime = 0;
-        break;
-      }
+      if (++catchUpTicks >= 5) { this.elapsedTime = 0; break; }
     }
   }
 }
+

@@ -76,6 +76,7 @@ import {
   applyEnemyModifiers,
   type ModifierId,
 } from "../config/modifiers";
+import { cardModMetadata } from "../config/cardMods";
 
 /** Starter cards handed to FRESH players (all 5 slots filled). */
 const STARTER_CARDS: { skill: SkillId; level: number }[] = [
@@ -205,6 +206,12 @@ export class GameRoom extends Room {
           ? { id, title: d.title, description: d.description }
           : { id, title: id, description: "" };
       }),
+      /**
+       * Card mod display metadata (label/color/kind/fallback) lives in
+       * `config/cardMods.ts`. Sending it here means the client never needs
+       * hardcoded per-mod strings - a new mod shows up automatically.
+       */
+      cardMods: cardModMetadata(),
     });
     console.log(
       `[MAP] Map "${mapId}" initialized: ${def.data.cols}x${def.data.rows} tiles, ` +
