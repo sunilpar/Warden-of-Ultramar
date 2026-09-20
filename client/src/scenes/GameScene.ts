@@ -13,6 +13,7 @@
  */
 import Phaser from "phaser";
 import { Client } from "@colyseus/sdk";
+import { Callbacks } from "@colyseus/schema";
 import { BACKEND_URL } from "../backend";
 
 import { LAYERED_MAP, resolveTileCollision } from "../maps/layeredMapData";
@@ -34,6 +35,7 @@ import {
   showLevelUpToast,
   showSpawnCountdownToast,
   announce,
+  showExitLockedToast,
 } from "../ui/toasts";
 import {
   createStatsHud,
@@ -102,6 +104,7 @@ import {
   type GroundCardsState,
   type GroundCardCallbacks,
 } from "../systems/groundCards";
+import { updateEntityVisuals } from "../systems/entityRenderer";
 
 export class GameScene extends Phaser.Scene {
   client = new Client(BACKEND_URL);
@@ -138,6 +141,7 @@ export class GameScene extends Phaser.Scene {
 
   private levelUpToast!: Phaser.GameObjects.Text;
   private spawnCountdownToast: Phaser.GameObjects.Text | null = null;
+  private exitLockedToast: Phaser.GameObjects.Text | null = null;
   private spawnCountdownLastSec = -1;
   private eliteEnemyId: string | null = null;
   private lastEliteAlive = false;
@@ -393,7 +397,7 @@ export class GameScene extends Phaser.Scene {
       const roomPromise = this.client.joinOrCreate("game_room", {});
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutId = setTimeout(() => reject(new Error("Room connection timeout")), 10000);
-      });
+    });
       this.room = await Promise.race([roomPromise, timeoutPromise]);
     } catch (e) {
       console.error("Failed to connect:", e);
@@ -404,7 +408,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   bindRoomStateListeners() {
-    const cb = (this.room as any).callbacks as any;
+    const cb = Callbacks.get(this.room as any) as any;
 
     cb.onAdd("players", (player: any, sessionId: string) => {
       if (sessionId === this.room.sessionId) {
@@ -489,17 +493,23 @@ export class GameScene extends Phaser.Scene {
         sprite.setData("hitboxH", enemy.hitboxH ?? 12);
         sprite.setData("attacking", !!enemy.attacking);
         this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
+        // Client-authoritative hit flash: trigger the moment a NEW hit is
+        // detected (hitSeq bump) instead of trusting the server timestamp,
+        // which is often already expired by the time the patch arrives.
         const seq = enemy.hitSeq ?? 0;
         const prev = this.entityHitSeqs[enemyId] ?? 0;
         if (seq !== prev) {
           this.entityHitSeqs[enemyId] = seq;
+          // Damage taken -> white flash ALWAYS (blue when shield absorbed it all).
+          sprite.setData("flashShielded", !!enemy.lastHitShielded);
+          sprite.setData("clientFlashUntil", Date.now() + 160);
           if (enemy.lastHitDamage > 0) {
             spawnDamageNumber(this, this.damageTexts, enemy.x, enemy.y,
               enemy.lastHitDamage, !!enemy.lastHitCrit,
               (enemy as any).lastShieldDamage, (enemy as any).lastHpDamage);
           }
         }
-      });
+    });
     });
 
     cb.onRemove("enemies", (enemy: any, enemyId: string) => {
@@ -521,7 +531,6 @@ export class GameScene extends Phaser.Scene {
       delete this.enemyLastPos[enemyId];
       delete this.entityHitSeqs[enemyId];
     });
-
     cb.onAdd("projectiles", (proj: any, projId: string) => {
       if (!this.anims.exists("bolter_muzzle")) createBolterAnimations(this);
       const tier = bolterColorTier(proj.level);
@@ -539,7 +548,7 @@ export class GameScene extends Phaser.Scene {
           bullet.setRotation(a);
         }
         this.projLastPos[projId] = { x: proj.x, y: proj.y };
-      });
+    });
     });
 
     cb.onRemove("projectiles", (_p: any, projId: string) => {
@@ -593,7 +602,7 @@ export class GameScene extends Phaser.Scene {
       this.time.delayedCall(500, () => {
         if (hbRef && hbRef.active) hbRef.destroy();
         delete this.clawEntities[shockId];
-      });
+    });
       const gap = this.VFX_GAPS.shock;
       const sAngle = shock.aimAngle ?? 0;
       for (const seg of segments) {
@@ -620,7 +629,7 @@ export class GameScene extends Phaser.Scene {
       cb.onChange(card, () => {
         const entity = this.groundCards.entities.get(cardId);
         if (entity) entity.setPosition(card.x, card.y);
-      });
+    });
     });
 
     cb.onRemove("groundCards", (_card: any, cardId: string) => {
@@ -641,7 +650,7 @@ export class GameScene extends Phaser.Scene {
         const g = this.VFX_GAPS.slam;
         sprite.setPosition(slam.x + Math.cos(slam.angle) * g, slam.y + Math.sin(slam.angle) * g);
         sprite.setData("remainingRange", slam.remainingRange);
-      });
+    });
     });
 
     cb.onRemove("slams", (_s: any, slamId: string) => {
@@ -661,7 +670,7 @@ export class GameScene extends Phaser.Scene {
           spinEvent.remove();
           showVortexExplosion(this, vortex.x, vortex.y, vortex.explosionRadius);
         }
-      });
+    });
     });
 
     cb.onRemove("vortexes", (_v: any, vortexId: string) => {
@@ -689,7 +698,7 @@ export class GameScene extends Phaser.Scene {
     this.currentPlayer = sprite;
     this.cameras.main.startFollow(sprite);
     this.cameras.main.setBounds(0, 0, this.mapData.widthPx, this.mapData.heightPx);
-    const cb = (this.room as any).callbacks as any;
+    const cb = Callbacks.get(this.room as any) as any;
     cb.onChange(player, () => {
       this.currentPlayerState = player;
       const dx = Math.abs(sprite.x - player.x);
@@ -700,7 +709,7 @@ export class GameScene extends Phaser.Scene {
         onLevelUp: (level) => { this.showLevelUp(level); },
         scene: this,
         state: { lastKnownXp: this.lastKnownXp, lastKnownLevel: this.lastKnownLevel },
-      });
+    });
       this.lastKnownXp = Math.floor(player.currentXp ?? 0);
       this.lastKnownLevel = Math.floor(player.level ?? 1);
       for (const skill of ["shock", "claw", "heal", "pulse", "slam", "dash", "vortex", "bolter", "shield"] as SkillId[]) {
@@ -720,6 +729,9 @@ export class GameScene extends Phaser.Scene {
       const prev = this.entityHitSeqs["__local__"] ?? 0;
       if (seq !== prev) {
         this.entityHitSeqs["__local__"] = seq;
+        // Client-authoritative flash (white, blue when shield absorbed).
+        sprite.setData("flashShielded", !!player.lastHitShielded);
+        sprite.setData("clientFlashUntil", Date.now() + 160);
         if (player.lastHitDamage > 0) {
           spawnDamageNumber(this, this.damageTexts, sprite.x, sprite.y,
             player.lastHitDamage, !!player.lastHitCrit,
@@ -728,13 +740,12 @@ export class GameScene extends Phaser.Scene {
       }
     });
   }
-
   createRemotePlayer(player: any, sessionId: string) {
     const sprite = this.add.sprite(player.x, player.y, "player_sheet", 0).setDepth(4);
     sprite.setData("serverX", player.x);
     sprite.setData("serverY", player.y);
     this.playerEntities[sessionId] = sprite;
-    const cb = (this.room as any).callbacks as any;
+    const cb = Callbacks.get(this.room as any) as any;
     cb.onChange(player, () => {
       sprite.setData("serverX", player.x);
       sprite.setData("serverY", player.y);
@@ -854,7 +865,7 @@ export class GameScene extends Phaser.Scene {
           s.rarity === cur.rarity &&
           s.modIds.length === cur.modIds.length &&
           s.modIds.every((m, j) => m === cur.modIds[j]);
-      });
+    });
     if (!same) {
       for (const card of this.hudCards) card?.container.destroy();
       this.hudCards = Array(5).fill(null);
@@ -1135,6 +1146,24 @@ export class GameScene extends Phaser.Scene {
     this.levelUpToast = showLevelUpToast(this, this.levelUpToast, level);
   }
 
+  private isOnExitTile(): boolean {
+    if (!this.currentPlayer) return false;
+    const ex = this.mapData.exitPoint;
+    return (
+      this.currentPlayer.x >= ex.x &&
+      this.currentPlayer.x <= ex.x + ex.width &&
+      this.currentPlayer.y >= ex.y &&
+      this.currentPlayer.y <= ex.y + ex.height
+    );
+  }
+
+  private updateInvCardDrag(pointer: Phaser.Input.Pointer): void {
+    if (!this.invDrag) return;
+    const d = this.invDrag;
+    d.obj.container.setPosition(pointer.x, pointer.y);
+    d.hoverInv = this.invScreen?.slotAtPointer(pointer) ?? -1;
+  }
+
   private updateSpawnCountdown(): void {
     const until = (this.room as any)?.state?.spawnGraceUntil ?? 0;
     const now = Date.now();
@@ -1364,6 +1393,20 @@ export class GameScene extends Phaser.Scene {
     );
     this.currentPlayer.x = resolved.x;
     this.currentPlayer.y = resolved.y;
+
+    // ---- Exit-locked toast while standing on the exit before elite death ----
+    const onExit =
+      this.currentPlayer &&
+      this.currentPlayer.active &&
+      (this.currentPlayer.x !== 0 || this.currentPlayer.y !== 0) &&
+      this.isOnExitTile();
+    this.exitLockedToast = showExitLockedToast(this, this.exitLockedToast, !!(onExit && !(this.room as any)?.state?.exitUnlocked));
+
+    // ---- Entity visuals: interpolation, anims, HP bars, hit flash ----
+    updateEntityVisuals(this as any);
+
+    // ---- Inventory card drag follow ----
+    if (this.invDrag) this.updateInvCardDrag(this.input.activePointer);
 
     this.sendViewport();
     updateSlotCooldowns(this, this.statsHud, this.hudCards, this.slotCards, this.currentPlayer);

@@ -96,6 +96,8 @@ export class Enemy extends Schema {
   @type("number") lastHitDamage: number = 0;
   /** Whether the last hit was a critical hit. */
   @type("boolean") lastHitCrit: boolean = false;
+  /** Whether the last hit was fully absorbed by the shield (blue flash on client). */
+  @type("boolean") lastHitShielded: boolean = false;
   /** Monotonic counter — increments every time damage is taken (so client can detect new hits). */
   @type("number") hitSeq: number = 0;
   /** True while the enemy is playing its attack animation. */
@@ -451,6 +453,7 @@ export class Enemy extends Schema {
     const totalDmg = mitigated * this.incomingDamageMultiplier;
     this.lastHitDamage = Math.round(totalDmg);
     this.lastHitCrit = isCrit;
+    this.lastHitShielded = shieldAbsorbed > 0 && totalDmg - shieldAbsorbed <= 0;
     (this as any).lastShieldDamage = shieldAbsorbed;
     (this as any).lastHpDamage = totalDmg - shieldAbsorbed;
     this.hitSeq += 1;
@@ -510,6 +513,7 @@ export class Enemy extends Schema {
       this.lastHitDamage = this.bleedTickDamage;
       this.hitSeq += 1;
       this.hitFlashUntil = Math.max(this.hitFlashUntil, Date.now() + 100);
+      this.lastHitShielded = false;
       return this.isDead;
     }
     return false;

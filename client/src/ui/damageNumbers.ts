@@ -40,7 +40,7 @@ export function spawnDamageNumber(
   shieldDamage: number,
   hpDamage: number,
 ): void {
-  let txt = pool.find((t) => !t.active);
+  let txt = pool.find((t) => t.alpha === 0 || !t.active);
   const startY = y - 14;
   if (!txt) {
     txt = scene.add
@@ -50,7 +50,7 @@ export function spawnDamageNumber(
         stroke: "#000000",
         strokeThickness: 4,
       })
-      .setOrigin(0.5);
+      .setOrigin(0.5).setDepth(300);
     pool.push(txt);
   } else {
     txt.setPosition(x, startY).setActive(true).setVisible(true);
