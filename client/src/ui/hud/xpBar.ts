@@ -18,6 +18,9 @@ export interface XpBarRefs {
   skillPointBadgeText: Phaser.GameObjects.Text;
   xpBarFullWidth: number;
   xpBarY: number;
+  /** World-space center of the gold skill-point dot. Used for hit area. */
+  badgeX: number;
+  badgeY: number;
   xpGainPopups: Phaser.GameObjects.Text[];
 }
 
@@ -124,12 +127,31 @@ export function createXpBar(scene: Phaser.Scene): XpBarRefs {
     skillPointBadgeText,
     xpBarFullWidth: BAR_W,
     xpBarY: cy,
+    badgeX,
+    badgeY,
     xpGainPopups: [],
   };
 }
 
 export function setLevelClickHandler(refs: XpBarRefs, cb: () => void): void {
-  (refs.skillPointBadge as any)._onLevelClick = cb;
+  // Both the level badge text and the gold skill-point dot are clickable
+  // shortcuts to open the character screen. The badge is the more obvious
+  // target (it pulses when a skill point is available).
+  const handler = () => cb();
+  // Level badge text — already created with setInteractive in createXpBar,
+  // we just need to bind the actual click handler here.
+  refs.levelBadgeText.off("pointerdown");
+  refs.levelBadgeText.on("pointerdown", handler);
+  // Skill-point gold dot — make the whole container clickable with a
+  // circle hit area centered on the dot. Without this the dot is purely
+  // visual; no input event ever fires.
+  refs.skillPointBadge.off("pointerdown");
+  refs.skillPointBadge.setInteractive(
+    new Phaser.Geom.Circle(refs.badgeX, refs.badgeY, 12),
+    Phaser.Geom.Circle.Contains,
+  );
+  refs.skillPointBadge.on("pointerdown", handler);
+  (refs as any)._onLevelClick = cb;
 }
 
 export interface XpBarCallbacks {
@@ -160,7 +182,13 @@ export function updateXpBar(
   if (cb.state.lastKnownLevel !== -1) {
     if (level === cb.state.lastKnownLevel && currentXp > cb.state.lastKnownXp) {
       const gained = currentXp - cb.state.lastKnownXp;
-      flashXpBarGain(cb.scene, refs, cb.state.lastKnownXp, currentXp, xpToLevelUp);
+      flashXpBarGain(
+        cb.scene,
+        refs,
+        cb.state.lastKnownXp,
+        currentXp,
+        xpToLevelUp,
+      );
       spawnXpGainPopup(
         cb.scene,
         refs.xpGainPopups,

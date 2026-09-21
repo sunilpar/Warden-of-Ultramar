@@ -626,10 +626,13 @@ export class GameScene extends Phaser.Scene {
 
     cb.onAdd("groundCards", (card: any, cardId: string) => {
       createGroundCardEntity(this, card, cardId, this.groundCards, this.groundCardCallbacks);
-      cb.onChange(card, () => {
-        const entity = this.groundCards.entities.get(cardId);
-        if (entity) entity.setPosition(card.x, card.y);
     });
+    // Track schema x/y → entity position. Registered once per room (not
+    // inside onAdd) so re-spawning / re-adding a card doesn't accumulate
+    // duplicate listeners.
+    cb.onChange("groundCards", (card: any, cardId: string) => {
+      const entity = this.groundCards.entities.get(cardId);
+      if (entity) entity.setPosition(card.x, card.y);
     });
 
     cb.onRemove("groundCards", (_card: any, cardId: string) => {

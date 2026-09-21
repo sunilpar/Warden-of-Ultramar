@@ -34,6 +34,12 @@ import { showPickupFailedToast } from "../ui/toasts";
 import type { HudCardObj } from "../ui/hud/statsHud";
 
 const PICKUP_RANGE_PX = 96;
+// Server tolerance added to its 96 px check so a tiny client-prediction
+// vs server-authoritative disagreement (moveSpeed * RTT) doesn't fail
+// pickup silently. Client uses this slightly larger value for its
+// pre-check; server still gates with the smaller radius.
+const PICKUP_REACH_TOLERANCE_PX = 28;
+const PICKUP_RANGE_CLIENT_PX = PICKUP_RANGE_PX + PICKUP_REACH_TOLERANCE_PX;
 const TOOLTIP_DWELL_MS = 350;
 
 export interface GroundCardsState {
@@ -202,7 +208,7 @@ function beginGrab(
   const ey = entity.y;
   const cardDist = Math.hypot(card.x - p.x, card.y - p.y);
   const entDist = Math.hypot(ex - p.x, ey - p.y);
-  if (cardDist > PICKUP_RANGE_PX && entDist > PICKUP_RANGE_PX) {
+  if (cardDist > PICKUP_RANGE_CLIENT_PX && entDist > PICKUP_RANGE_CLIENT_PX) {
     showPickupFailedToast(scene, "TOO FAR TO GRAB");
     return;
   }

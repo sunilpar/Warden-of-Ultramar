@@ -119,6 +119,8 @@ export function createCharacterScreen(cb: CharacterScreenCallbacks): CharacterSc
     { id: "attack", label: "Attack", getValue: (p) => Math.round(p.attack).toString(), upgradeDesc: "+8 Attack" },
     { id: "critRate", label: "Crit Rate", getValue: (p) => Math.round(p.critRate * 100) + "%", upgradeDesc: "+5% Crit Rate" },
     { id: "critDamage", label: "Crit Damage", getValue: (p) => Math.round(p.critDamage * 100) + "%", upgradeDesc: "+15% Crit Damage" },
+    { id: "moveSpeed", label: "Move Speed", getValue: (p) => Math.round((p.moveSpeed ?? 120) * 100 / 120) + "%", upgradeDesc: "+5% Move Speed" },
+    { id: "defence", label: "Defence", getValue: (p) => Math.round((p.defence ?? 0) * 100) + "%", upgradeDesc: "+2% Defence (cap 95%)" },
   ];
 
   let visible = false;

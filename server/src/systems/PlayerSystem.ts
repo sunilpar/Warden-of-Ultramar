@@ -56,8 +56,17 @@ export class PlayerSystem {
         player.x = Math.max(0, Math.min(this.mapSystem.width, player.x));
         player.y = Math.max(0, Math.min(this.mapSystem.height, player.y));
 
-        // Resolve tile collisions (O(1) grid lookup)
-        const resolved = this.mapSystem.resolveRectTileCollision(player.x, player.y, player.hitboxW, player.hitboxH);
+        // Resolve tile collisions (O(1) grid lookup).
+        // MUST match the client's prediction in client/src/maps/layeredMapData.ts:
+        // a CIRCLE of radius PLAYER_COLLISION_RADIUS (= 10). The server used to
+        // resolve as an AABB (hw=9, hh=20) which produced different results in
+        // narrow gaps and let the player get stuck. Circle vs circle is consistent
+        // across server + client prediction.
+        const resolved = this.mapSystem.resolveTileCollision(
+          player.x,
+          player.y,
+          GAME_CONFIG.PLAYER.COLLISION_RADIUS,
+        );
         player.x = resolved.x;
         player.y = resolved.y;
 

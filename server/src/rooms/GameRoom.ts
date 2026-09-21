@@ -741,8 +741,20 @@ export class GameRoom extends Room {
       const player = this.state.players.get(client.sessionId);
       if (!player || !player.isDead) return;
       // Respawn: reset stats, heal to full, move to spawn point.
-      // respawn() empties all HUD slots (death wipes equipped cards).
+      // respawn() empties all HUD slots (death wipes equipped cards);
+      // we then refill the same starter loadout that onJoin uses so
+      // the player has something to cast immediately.
       player.respawn();
+      for (let i = 0; i < NUM_CARD_SLOTS && i < STARTER_CARDS.length; i++) {
+        const sc = STARTER_CARDS[i];
+        const card = new CardInstance();
+        card.skill = sc.skill;
+        card.level = sc.level;
+        card.rarity = "common";
+        player.equippedSlots[i] = card;
+      }
+      player.recomputeSkillLevels();
+      player.recomputeShield();
       const spawn = this.mapSystem.getSpawnPoint();
       player.x = spawn.x;
       player.y = spawn.y;
