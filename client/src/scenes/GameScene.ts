@@ -105,6 +105,7 @@ import {
   type GroundCardCallbacks,
 } from "../systems/groundCards";
 import { updateEntityVisuals } from "../systems/entityRenderer";
+import { getSkillTargeting } from "../config/targeting";
 
 export class GameScene extends Phaser.Scene {
   client = new Client(BACKEND_URL);
@@ -136,8 +137,16 @@ export class GameScene extends Phaser.Scene {
   private skillLevelCache: Partial<Record<SkillId, number>> = {};
   private invCardsData: (SlotCard | null)[] = Array(20).fill(null);
 
-  private dragCard: { obj: HudCardObj; fromSlot: number; hoverSlot: number } | null = null;
-  private invDrag: { obj: HudCardObj; fromInv: number; hoverInv: number } | null = null;
+  private dragCard: {
+    obj: HudCardObj;
+    fromSlot: number;
+    hoverSlot: number;
+  } | null = null;
+  private invDrag: {
+    obj: HudCardObj;
+    fromInv: number;
+    hoverInv: number;
+  } | null = null;
 
   private levelUpToast!: Phaser.GameObjects.Text;
   private spawnCountdownToast: Phaser.GameObjects.Text | null = null;
@@ -195,7 +204,10 @@ export class GameScene extends Phaser.Scene {
   private bolterTooltip: Phaser.GameObjects.Container | null = null;
   private slotPlusHints: Phaser.GameObjects.Text[] = [];
 
-  static readonly MAP_CONFIGS: Record<string, { mapData: LayeredMapData; mapInfoKey: string }> = {
+  static readonly MAP_CONFIGS: Record<
+    string,
+    { mapData: LayeredMapData; mapInfoKey: string }
+  > = {
     map1: { mapData: LAYERED_MAP, mapInfoKey: "game_room" },
     map2: { mapData: LAYERED_MAP_2, mapInfoKey: "game_room_2" },
   };
@@ -261,39 +273,72 @@ export class GameScene extends Phaser.Scene {
     this.input.on("pointerup", (pointer: Phaser.Input.Pointer) => {
       if (this.dragCard) this.endCardDrag(pointer);
       else if (this.invDrag) this.endInvCardDrag(pointer);
-      else if (this.groundCards.grab) endGroundGrab(this, this.groundCards, this.groundCardCallbacks, pointer);
+      else if (this.groundCards.grab)
+        endGroundGrab(
+          this,
+          this.groundCards,
+          this.groundCardCallbacks,
+          pointer,
+        );
     });
     this.input.on("pointerupoutside", (pointer: Phaser.Input.Pointer) => {
       if (this.dragCard) this.endCardDrag(pointer);
       else if (this.invDrag) this.endInvCardDrag(pointer);
-      else if (this.groundCards.grab) endGroundGrab(this, this.groundCards, this.groundCardCallbacks, pointer);
+      else if (this.groundCards.grab)
+        endGroundGrab(
+          this,
+          this.groundCards,
+          this.groundCardCallbacks,
+          pointer,
+        );
     });
 
-    this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.ZERO)?.on("down", () => {
-      if (this.room) this.room.send(9, {});
-    });
-    this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)?.on("down", () => {
-      this.castSlot(2, this.aimAngle);
-    });
-    this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.ONE)?.on("down", () => {
-      this.castSlot(3, this.aimAngle);
-    });
-    this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.TWO)?.on("down", () => {
-      this.castSlot(4, this.aimAngle);
-    });
+    this.input.keyboard
+      ?.addKey(Phaser.Input.Keyboard.KeyCodes.ZERO)
+      ?.on("down", () => {
+        if (this.room) this.room.send(9, {});
+      });
+    this.input.keyboard
+      ?.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)
+      ?.on("down", () => {
+        this.castSlot(2, this.currentAimAngle());
+      });
+    this.input.keyboard
+      ?.addKey(Phaser.Input.Keyboard.KeyCodes.ONE)
+      ?.on("down", () => {
+        this.castSlot(3, this.currentAimAngle());
+      });
+    this.input.keyboard
+      ?.addKey(Phaser.Input.Keyboard.KeyCodes.TWO)
+      ?.on("down", () => {
+        this.castSlot(4, this.currentAimAngle());
+      });
 
     this.mapId = "map1";
     this.mapData = (GameScene.MAP_CONFIGS as any)["map1"].mapData;
     this.transitioning = false;
 
-    const startData = this.sys.settings.data as { fadeIn?: boolean } | undefined;
+    const startData = this.sys.settings.data as
+      | { fadeIn?: boolean }
+      | undefined;
     const isFadeIn = !!startData?.fadeIn;
     let cover: Phaser.GameObjects.Rectangle | null = null;
     let loadingImg: Phaser.GameObjects.Image | null = null;
     if (isFadeIn) {
       const { width, height } = this.scale;
-      cover = this.add.rectangle(0, 0, width, height, 0x000000).setOrigin(0, 0).setScrollFactor(0).setDepth(1000);
-      loadingImg = this.add.image(this.cameras.main.centerX, this.cameras.main.centerY, "loading_screen").setScrollFactor(0).setDepth(1001);
+      cover = this.add
+        .rectangle(0, 0, width, height, 0x000000)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(1000);
+      loadingImg = this.add
+        .image(
+          this.cameras.main.centerX,
+          this.cameras.main.centerY,
+          "loading_screen",
+        )
+        .setScrollFactor(0)
+        .setDepth(1001);
     }
 
     this.renderLayeredMap();
@@ -328,25 +373,31 @@ export class GameScene extends Phaser.Scene {
       slotW: this.statsHud.cardSlots[0].width,
       slotH: this.statsHud.cardSlots[0].height,
       pullState: () => this.pullInventoryState(),
-      sendSlotToInv: (slot, inv, empty) => this.room?.send(empty ? 14 : 19, { slot, inv }),
+      sendSlotToInv: (slot, inv, empty) =>
+        this.room?.send(empty ? 14 : 19, { slot, inv }),
       sendInvSwap: (from, to) => this.room?.send(18, { from, to }),
       sendInvToSlot: (inv, slot) => this.room?.send(15, { inv, slot }),
       sendInvDrop: (inv) => this.room?.send(16, { inv }),
-      isDragFree: () => !this.dragCard && !this.invDrag && !this.groundCards.grab,
+      isDragFree: () =>
+        !this.dragCard && !this.invDrag && !this.groundCards.grab,
       onDragStart: (i: number) => this.beginInvCardDrag(i),
     });
     this.initSlotCards();
 
-    this.hitboxToggleKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F3);
+    this.hitboxToggleKey = this.input.keyboard.addKey(
+      Phaser.Input.Keyboard.KeyCodes.F3,
+    );
 
     this.groundCardCallbacks = {
       canGrab: () => !this.dragCard && !this.invDrag,
       getPlayer: () => this.currentPlayer as any,
       getSlotTemplate: () => this.hudCards[0],
       sendPickupToSlot: (cardId, slot) => this.room?.send(11, { cardId, slot }),
-      sendPickupToInventory: (cardId, inv) => this.room?.send(17, { cardId, inv }),
+      sendPickupToInventory: (cardId, inv) =>
+        this.room?.send(17, { cardId, inv }),
       sendRedrop: (cardId, x, y) => this.room?.send(12, { cardId, x, y }),
-      invAtPointer: (p) => this.invScreen ? this.invScreen.slotAtPointer(p) : -1,
+      invAtPointer: (p) =>
+        this.invScreen ? this.invScreen.slotAtPointer(p) : -1,
       slotAtPointer: (p) => this.slotAtPointer(p),
       refreshHud: () => {
         this.syncSlotsFromServer(true);
@@ -366,11 +417,14 @@ export class GameScene extends Phaser.Scene {
     const serverMapId: string = (this.room as any)?.state?.mapId ?? "map1";
     const cfgLate = (GameScene.MAP_CONFIGS as any)[serverMapId];
     if (cfgLate && serverMapId !== this.mapId) {
-      this.children.list.filter((obj) =>
-        (obj as any).texture &&
-        ((obj as any).texture.key === "layered_baselayer" ||
-          (obj as any).texture.key === "layered_interactive")
-      ).forEach((obj) => obj.destroy());
+      this.children.list
+        .filter(
+          (obj) =>
+            (obj as any).texture &&
+            ((obj as any).texture.key === "layered_baselayer" ||
+              (obj as any).texture.key === "layered_interactive"),
+        )
+        .forEach((obj) => obj.destroy());
       if (this.debugHitboxes) {
         this.debugHitboxes.destroy();
         this.debugHitboxes = null;
@@ -396,8 +450,11 @@ export class GameScene extends Phaser.Scene {
     try {
       const roomPromise = this.client.joinOrCreate("game_room", {});
       const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error("Room connection timeout")), 10000);
-    });
+        timeoutId = setTimeout(
+          () => reject(new Error("Room connection timeout")),
+          10000,
+        );
+      });
       this.room = await Promise.race([roomPromise, timeoutPromise]);
     } catch (e) {
       console.error("Failed to connect:", e);
@@ -420,7 +477,10 @@ export class GameScene extends Phaser.Scene {
 
     cb.onRemove("players", (_p: any, sessionId: string) => {
       const entity = this.playerEntities[sessionId];
-      if (entity) { entity.destroy(); delete this.playerEntities[sessionId]; }
+      if (entity) {
+        entity.destroy();
+        delete this.playerEntities[sessionId];
+      }
     });
 
     cb.onAdd("enemies", (enemy: any, enemyId: string) => {
@@ -429,13 +489,33 @@ export class GameScene extends Phaser.Scene {
       const isTau = enemy.typeId === "tau";
       const isMech = enemy.typeId === "mechanicus";
       const isCaster = enemy.typeId === "caster";
-      const textureKey = isTau ? "tau_sheet" : isMech ? "mechanicus_sheet" : isCaster ? "caster_sheet" : isOrck ? "orck_sheet" : "tyranid_sheet";
-      const idleAnim = isTau ? "tau_idle" : isMech ? "mechanicus_idle" : isCaster ? "caster_idle" : isOrck ? "orck_idle" : "tri_idle";
+      const textureKey = isTau
+        ? "tau_sheet"
+        : isMech
+          ? "mechanicus_sheet"
+          : isCaster
+            ? "caster_sheet"
+            : isOrck
+              ? "orck_sheet"
+              : "tyranid_sheet";
+      const idleAnim = isTau
+        ? "tau_idle"
+        : isMech
+          ? "mechanicus_idle"
+          : isCaster
+            ? "caster_idle"
+            : isOrck
+              ? "orck_idle"
+              : "tri_idle";
       const isElite = !!enemy.isElite;
       const displaySize = isTau || isMech || isCaster ? 88 : isOrck ? 80 : 64;
       const eliteSize = Math.round(displaySize * 1.6);
-      const sprite = this.add.sprite(enemy.x, enemy.y, textureKey, 0)
-        .setDisplaySize(isElite ? eliteSize : displaySize, isElite ? eliteSize : displaySize)
+      const sprite = this.add
+        .sprite(enemy.x, enemy.y, textureKey, 0)
+        .setDisplaySize(
+          isElite ? eliteSize : displaySize,
+          isElite ? eliteSize : displaySize,
+        )
         .setDepth(isElite ? 8 : 3);
       sprite.anims.play(idleAnim);
       this.enemyEntities[enemyId] = sprite;
@@ -446,24 +526,48 @@ export class GameScene extends Phaser.Scene {
       const hpW = isElite ? 64 : 38;
       const hpH = isElite ? 7 : 5;
       const barY = isElite ? -58 : -42;
-      const hpBg = this.add.rectangle(0, barY, hpW, hpH, 0x000000, 0.7).setStrokeStyle(1, isElite ? 0xffd700 : 0x000000, 0.9);
-      const hpFill = this.add.rectangle(-hpW / 2, barY, hpW, hpH, isElite ? 0xff9900 : 0xff3333).setOrigin(0, 0.5);
-      const shieldFill = this.add.rectangle(-hpW / 2, barY, hpW, hpH, 0xffffff, 0.6).setOrigin(0, 0.5).setVisible(false);
-      const lvText = this.add.text(-hpW / 2 - 4, barY, String(enemy.level ?? 1), {
-        color: isElite ? "#ffd700" : "#ffffff",
-        fontSize: "9px",
-        fontFamily: "monospace",
-        stroke: "#000000",
-        strokeThickness: 2,
-      }).setOrigin(1, 0.5);
-      const barChildren: Phaser.GameObjects.GameObject[] = [hpBg, hpFill, shieldFill, lvText];
+      const hpBg = this.add
+        .rectangle(0, barY, hpW, hpH, 0x000000, 0.7)
+        .setStrokeStyle(1, isElite ? 0xffd700 : 0x000000, 0.9);
+      const hpFill = this.add
+        .rectangle(-hpW / 2, barY, hpW, hpH, isElite ? 0xff9900 : 0xff3333)
+        .setOrigin(0, 0.5);
+      const shieldFill = this.add
+        .rectangle(-hpW / 2, barY, hpW, hpH, 0xffffff, 0.6)
+        .setOrigin(0, 0.5)
+        .setVisible(false);
+      const lvText = this.add
+        .text(-hpW / 2 - 4, barY, String(enemy.level ?? 1), {
+          color: isElite ? "#ffd700" : "#ffffff",
+          fontSize: "9px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(1, 0.5);
+      const barChildren: Phaser.GameObjects.GameObject[] = [
+        hpBg,
+        hpFill,
+        shieldFill,
+        lvText,
+      ];
       if (isElite) {
-        barChildren.push(this.add.text(0, barY - 11, "ELITE", {
-          color: "#ffd700", fontSize: "10px", fontFamily: "monospace", fontStyle: "bold",
-          stroke: "#000000", strokeThickness: 3,
-        }).setOrigin(0.5));
+        barChildren.push(
+          this.add
+            .text(0, barY - 11, "ELITE", {
+              color: "#ffd700",
+              fontSize: "10px",
+              fontFamily: "monospace",
+              fontStyle: "bold",
+              stroke: "#000000",
+              strokeThickness: 3,
+            })
+            .setOrigin(0.5),
+        );
       }
-      const hpBar = this.add.container(enemy.x, enemy.y, barChildren).setDepth(5);
+      const hpBar = this.add
+        .container(enemy.x, enemy.y, barChildren)
+        .setDepth(5);
       this.enemyHpBars[enemyId] = hpBar;
       this.enemyLastPos[enemyId] = { x: enemy.x, y: enemy.y };
       sprite.setData("hitFlashUntil", enemy.hitFlashUntil ?? 0);
@@ -504,30 +608,48 @@ export class GameScene extends Phaser.Scene {
           sprite.setData("flashShielded", !!enemy.lastHitShielded);
           sprite.setData("clientFlashUntil", Date.now() + 160);
           if (enemy.lastHitDamage > 0) {
-            spawnDamageNumber(this, this.damageTexts, enemy.x, enemy.y,
-              enemy.lastHitDamage, !!enemy.lastHitCrit,
-              (enemy as any).lastShieldDamage, (enemy as any).lastHpDamage);
+            spawnDamageNumber(
+              this,
+              this.damageTexts,
+              enemy.x,
+              enemy.y,
+              enemy.lastHitDamage,
+              !!enemy.lastHitCrit,
+              (enemy as any).lastShieldDamage,
+              (enemy as any).lastHpDamage,
+            );
           }
         }
-    });
+      });
     });
 
     cb.onRemove("enemies", (enemy: any, enemyId: string) => {
       if (enemy && enemy.lastHitDamage > 0) {
-        spawnDamageNumber(this, this.damageTexts,
+        spawnDamageNumber(
+          this,
+          this.damageTexts,
           enemy.x ?? this.enemyLastPos[enemyId]?.x ?? 0,
           enemy.y ?? this.enemyLastPos[enemyId]?.y ?? 0,
-          enemy.lastHitDamage, !!enemy.lastHitCrit,
-          (enemy as any).lastShieldDamage, (enemy as any).lastHpDamage);
+          enemy.lastHitDamage,
+          !!enemy.lastHitCrit,
+          (enemy as any).lastShieldDamage,
+          (enemy as any).lastHpDamage,
+        );
       }
       const dx = enemy?.x ?? this.enemyLastPos[enemyId]?.x ?? 0;
       const dy = enemy?.y ?? this.enemyLastPos[enemyId]?.y ?? 0;
       spawnBloodSplat(this, dx, dy);
       if (enemyId === this.eliteEnemyId) this.eliteEnemyId = null;
       const entity = this.enemyEntities[enemyId];
-      if (entity) { entity.destroy(); delete this.enemyEntities[enemyId]; }
+      if (entity) {
+        entity.destroy();
+        delete this.enemyEntities[enemyId];
+      }
       const hpBar = this.enemyHpBars[enemyId];
-      if (hpBar) { hpBar.destroy(); delete this.enemyHpBars[enemyId]; }
+      if (hpBar) {
+        hpBar.destroy();
+        delete this.enemyHpBars[enemyId];
+      }
       delete this.enemyLastPos[enemyId];
       delete this.entityHitSeqs[enemyId];
     });
@@ -535,9 +657,13 @@ export class GameScene extends Phaser.Scene {
       if (!this.anims.exists("bolter_muzzle")) createBolterAnimations(this);
       const tier = bolterColorTier(proj.level);
       const tint = proj.skillId === "bolter" ? BOLTER_COLORS[tier] : 0xffffff;
-      const frame = proj.skillId === "bolter" ? bolterBulletFrameForLevel(proj.level) : 0;
-      const bullet = this.add.sprite(proj.x, proj.y, "bolter_sheet", frame)
-        .setDepth(4).setScale(0.4).setTint(tint);
+      const frame =
+        proj.skillId === "bolter" ? bolterBulletFrameForLevel(proj.level) : 0;
+      const bullet = this.add
+        .sprite(proj.x, proj.y, "bolter_sheet", frame)
+        .setDepth(4)
+        .setScale(0.4)
+        .setTint(tint);
       this.projectileEntities[projId] = bullet;
       this.projLastPos[projId] = { x: proj.x, y: proj.y };
       cb.onChange(proj, () => {
@@ -548,13 +674,16 @@ export class GameScene extends Phaser.Scene {
           bullet.setRotation(a);
         }
         this.projLastPos[projId] = { x: proj.x, y: proj.y };
-    });
+      });
     });
 
     cb.onRemove("projectiles", (_p: any, projId: string) => {
       const entity = this.projectileEntities[projId];
       const pos = this.projLastPos[projId];
-      if (entity) { entity.destroy(); delete this.projectileEntities[projId]; }
+      if (entity) {
+        entity.destroy();
+        delete this.projectileEntities[projId];
+      }
       if (pos) {
         spawnBulletHitVfx(this, pos.x, pos.y);
         delete this.projLastPos[projId];
@@ -582,27 +711,44 @@ export class GameScene extends Phaser.Scene {
 
     cb.onRemove("skillCasts", (_c: any, castId: string) => {
       const entity = this.clawEntities[castId];
-      if (entity) { (entity as any).destroy?.(); delete this.clawEntities[castId]; }
+      if (entity) {
+        (entity as any).destroy?.();
+        delete this.clawEntities[castId];
+      }
     });
 
     cb.onAdd("shockCasts", (shock: any, shockId: string) => {
       const color = shock.level >= 6 ? 0xb266ff : 0x4da6ff;
       const fillColor = shock.level >= 6 ? 0x6a1fb2 : 0x1a5cad;
       const segStr: string = shock.segments || "";
-      const segments: { x1: number; y1: number; x2: number; y2: number; delay: number }[] = [];
+      const segments: {
+        x1: number;
+        y1: number;
+        x2: number;
+        y2: number;
+        delay: number;
+      }[] = [];
       if (segStr.length > 0) {
         for (const part of segStr.split(";")) {
           const [x1, y1, x2, y2, delay] = part.split(",").map(Number);
           if (!isNaN(x1)) segments.push({ x1, y1, x2, y2, delay });
         }
       }
-      const hbRef = this.add.rectangle(shock.x, shock.y, 1, 1, 0xffffff, 0).setDepth(7);
-      (hbRef as any).castData = { skillId: "shock", x: shock.x, y: shock.y, angle: shock.aimAngle ?? 0, level: shock.level };
+      const hbRef = this.add
+        .rectangle(shock.x, shock.y, 1, 1, 0xffffff, 0)
+        .setDepth(7);
+      (hbRef as any).castData = {
+        skillId: "shock",
+        x: shock.x,
+        y: shock.y,
+        angle: shock.aimAngle ?? 0,
+        level: shock.level,
+      };
       this.clawEntities[shockId] = hbRef as any;
       this.time.delayedCall(500, () => {
         if (hbRef && hbRef.active) hbRef.destroy();
         delete this.clawEntities[shockId];
-    });
+      });
       const gap = this.VFX_GAPS.shock;
       const sAngle = shock.aimAngle ?? 0;
       for (const seg of segments) {
@@ -611,8 +757,10 @@ export class GameScene extends Phaser.Scene {
           let sx = seg.x1;
           let sy = seg.y1;
           if (Math.hypot(seg.x1 - shock.x, seg.y1 - shock.y) < 5) {
-            sx = shock.x + Math.cos(sAngle) * (this.PLAYER_COLLISION_RADIUS + gap);
-            sy = shock.y + Math.sin(sAngle) * (this.PLAYER_COLLISION_RADIUS + gap);
+            sx =
+              shock.x + Math.cos(sAngle) * (this.PLAYER_COLLISION_RADIUS + gap);
+            sy =
+              shock.y + Math.sin(sAngle) * (this.PLAYER_COLLISION_RADIUS + gap);
           }
           drawLightningBolt(this, sx, sy, seg.x2, seg.y2, color, fillColor);
         });
@@ -621,11 +769,20 @@ export class GameScene extends Phaser.Scene {
 
     cb.onRemove("shockCasts", (_s: any, shockId: string) => {
       const entity = this.clawEntities[shockId];
-      if (entity) { (entity as any).destroy?.(); delete this.clawEntities[shockId]; }
+      if (entity) {
+        (entity as any).destroy?.();
+        delete this.clawEntities[shockId];
+      }
     });
 
     cb.onAdd("groundCards", (card: any, cardId: string) => {
-      createGroundCardEntity(this, card, cardId, this.groundCards, this.groundCardCallbacks);
+      createGroundCardEntity(
+        this,
+        card,
+        cardId,
+        this.groundCards,
+        this.groundCardCallbacks,
+      );
     });
     // Track schema x/y → entity position. Registered once per room (not
     // inside onAdd) so re-spawning / re-adding a card doesn't accumulate
@@ -647,33 +804,56 @@ export class GameScene extends Phaser.Scene {
     });
 
     cb.onAdd("slams", (slam: any, slamId: string) => {
-      const sprite = spawnSlamSprite(this, slam.x, slam.y, slam.level, slam.angle, this.VFX_GAPS.slam);
+      const sprite = spawnSlamSprite(
+        this,
+        slam.x,
+        slam.y,
+        slam.level,
+        slam.angle,
+        this.VFX_GAPS.slam,
+      );
       this.slamEntities[slamId] = sprite;
       cb.onChange(slam, () => {
         const g = this.VFX_GAPS.slam;
-        sprite.setPosition(slam.x + Math.cos(slam.angle) * g, slam.y + Math.sin(slam.angle) * g);
+        sprite.setPosition(
+          slam.x + Math.cos(slam.angle) * g,
+          slam.y + Math.sin(slam.angle) * g,
+        );
         sprite.setData("remainingRange", slam.remainingRange);
-    });
+      });
     });
 
     cb.onRemove("slams", (_s: any, slamId: string) => {
       const entity = this.slamEntities[slamId];
-      if (entity) { entity.destroy(); delete this.slamEntities[slamId]; }
+      if (entity) {
+        entity.destroy();
+        delete this.slamEntities[slamId];
+      }
     });
 
     cb.onAdd("vortexes", (vortex: any, vortexId: string) => {
       const tier = (vortex.colorTier ?? "grey") as "grey" | "brown" | "purple";
-      const { container, spinEvent } = spawnVortex(this, vortex.x, vortex.y, vortex.radius, tier);
+      const { container, spinEvent } = spawnVortex(
+        this,
+        vortex.x,
+        vortex.y,
+        vortex.radius,
+        tier,
+      );
       this.vortexEntities[vortexId] = container;
       let exploded = false;
       cb.onChange(vortex, () => {
         container.setPosition(vortex.x, vortex.y);
-        if (vortex.phase === "explode" && vortex.explosionRadius > 0 && !exploded) {
+        if (
+          vortex.phase === "explode" &&
+          vortex.explosionRadius > 0 &&
+          !exploded
+        ) {
           exploded = true;
           spinEvent.remove();
           showVortexExplosion(this, vortex.x, vortex.y, vortex.explosionRadius);
         }
-    });
+      });
     });
 
     cb.onRemove("vortexes", (_v: any, vortexId: string) => {
@@ -695,33 +875,61 @@ export class GameScene extends Phaser.Scene {
 
   createLocalPlayer(player: any) {
     createCharacterAnimations(this);
-    const sprite = this.add.sprite(player.x, player.y, "player_sheet", 0).setDepth(4);
+    const sprite = this.add
+      .sprite(player.x, player.y, "player_sheet", 0)
+      .setDepth(4);
     sprite.setData("serverX", player.x);
     sprite.setData("serverY", player.y);
     this.currentPlayer = sprite;
     this.cameras.main.startFollow(sprite);
-    this.cameras.main.setBounds(0, 0, this.mapData.widthPx, this.mapData.heightPx);
+    this.cameras.main.setBounds(
+      0,
+      0,
+      this.mapData.widthPx,
+      this.mapData.heightPx,
+    );
     const cb = Callbacks.get(this.room as any) as any;
     cb.onChange(player, () => {
       this.currentPlayerState = player;
       const dx = Math.abs(sprite.x - player.x);
       const dy = Math.abs(sprite.y - player.y);
-      if (dx > 32 || dy > 32) { sprite.x = player.x; sprite.y = player.y; }
+      if (dx > 32 || dy > 32) {
+        sprite.x = player.x;
+        sprite.y = player.y;
+      }
       updateStatsHud(this.statsHud, player);
       updateXpBar(this.xpBar, player, {
-        onLevelUp: (level) => { this.showLevelUp(level); },
+        onLevelUp: (level) => {
+          this.showLevelUp(level);
+        },
         scene: this,
-        state: { lastKnownXp: this.lastKnownXp, lastKnownLevel: this.lastKnownLevel },
-    });
+        state: {
+          lastKnownXp: this.lastKnownXp,
+          lastKnownLevel: this.lastKnownLevel,
+        },
+      });
       this.lastKnownXp = Math.floor(player.currentXp ?? 0);
       this.lastKnownLevel = Math.floor(player.level ?? 1);
-      for (const skill of ["shock", "claw", "heal", "pulse", "slam", "dash", "vortex", "bolter", "shield"] as SkillId[]) {
+      for (const skill of [
+        "shock",
+        "claw",
+        "heal",
+        "pulse",
+        "slam",
+        "dash",
+        "vortex",
+        "bolter",
+        "shield",
+      ] as SkillId[]) {
         this.syncSkillLevel(player, skill);
       }
       this.syncSlotsFromServer(false);
       this.syncInventoryFromServer(false);
       sprite.setData("attack", player.attack ?? 100);
-      sprite.setData("slotCooldownEndsAt", Array.from(player.slotCooldownEndsAt ?? []));
+      sprite.setData(
+        "slotCooldownEndsAt",
+        Array.from(player.slotCooldownEndsAt ?? []),
+      );
       sprite.setData("slotHealKills", Array.from(player.slotHealKills ?? []));
       sprite.setData("hitFlashUntil", player.hitFlashUntil ?? 0);
       sprite.setData("shockUntil", player.shockUntil ?? 0);
@@ -736,15 +944,24 @@ export class GameScene extends Phaser.Scene {
         sprite.setData("flashShielded", !!player.lastHitShielded);
         sprite.setData("clientFlashUntil", Date.now() + 160);
         if (player.lastHitDamage > 0) {
-          spawnDamageNumber(this, this.damageTexts, sprite.x, sprite.y,
-            player.lastHitDamage, !!player.lastHitCrit,
-            (player as any).lastShieldDamage, (player as any).lastHpDamage);
+          spawnDamageNumber(
+            this,
+            this.damageTexts,
+            sprite.x,
+            sprite.y,
+            player.lastHitDamage,
+            !!player.lastHitCrit,
+            (player as any).lastShieldDamage,
+            (player as any).lastHpDamage,
+          );
         }
       }
     });
   }
   createRemotePlayer(player: any, sessionId: string) {
-    const sprite = this.add.sprite(player.x, player.y, "player_sheet", 0).setDepth(4);
+    const sprite = this.add
+      .sprite(player.x, player.y, "player_sheet", 0)
+      .setDepth(4);
     sprite.setData("serverX", player.x);
     sprite.setData("serverY", player.y);
     this.playerEntities[sessionId] = sprite;
@@ -762,18 +979,29 @@ export class GameScene extends Phaser.Scene {
     if (!this.currentPlayer) return;
     let moving = false;
     let newDirection = (this as any).lastDirection || "left";
-    if (this.inputPayload.left) { newDirection = "left"; moving = true; }
-    if (this.inputPayload.right) { newDirection = "right"; moving = true; }
-    if (this.inputPayload.up || this.inputPayload.down) { moving = true; }
+    if (this.inputPayload.left) {
+      newDirection = "left";
+      moving = true;
+    }
+    if (this.inputPayload.right) {
+      newDirection = "right";
+      moving = true;
+    }
+    if (this.inputPayload.up || this.inputPayload.down) {
+      moving = true;
+    }
     (this as any).lastDirection = newDirection;
     if (moving) {
-      const animKey = newDirection === "right" ? "player_walk_right" : "player_walk_left";
+      const animKey =
+        newDirection === "right" ? "player_walk_right" : "player_walk_left";
       const currentAnim = this.currentPlayer.anims.currentAnim;
-      if (!currentAnim || currentAnim.key !== animKey) this.currentPlayer.anims.play(animKey);
+      if (!currentAnim || currentAnim.key !== animKey)
+        this.currentPlayer.anims.play(animKey);
       this.currentPlayer.setFlipX(false);
     } else {
       const currentAnim = this.currentPlayer.anims.currentAnim;
-      if (!currentAnim || currentAnim.key !== "player_idle") this.currentPlayer.anims.play("player_idle");
+      if (!currentAnim || currentAnim.key !== "player_idle")
+        this.currentPlayer.anims.play("player_idle");
       this.currentPlayer.setFlipX(newDirection === "right");
     }
   }
@@ -791,16 +1019,42 @@ export class GameScene extends Phaser.Scene {
       showCooldownToast(this, this.statsHud?.hudImage?.y);
       return;
     }
-    this.room.send(1, { slot: i, angle });
+    // Per-skill targeting: a skill decides whether it uses the angle
+    // or is self-centered. The slot is irrelevant — this lets the same
+    // skill (e.g. shock) behave correctly in any HUD slot.
+    const targeting = getSkillTargeting(skill);
+    const finalAngle = targeting === "self" ? 0 : angle;
+    this.room.send(1, { slot: i, angle: finalAngle });
+  }
+
+  /**
+   * Compute the aim angle from the CURRENT mouse pointer (not a stale
+   * cached value). Called from keyboard cast paths so a skill that aims
+   * at the mouse always uses the mouse position at the moment of the
+   * keypress, even if `pointermove` hasn't fired recently.
+   */
+  private currentAimAngle(): number {
+    const p = this.input.activePointer;
+    if (!p || !this.currentPlayer) return this.aimAngle;
+    return Math.atan2(
+      p.worldY - this.currentPlayer.y,
+      p.worldX - this.currentPlayer.x,
+    );
   }
 
   private isSlotReady(i: number): boolean {
     if (!this.currentPlayer) return true;
-    const cds = (this.currentPlayer.data.get("slotCooldownEndsAt") as number[] | undefined) ?? [];
+    const cds =
+      (this.currentPlayer.data.get("slotCooldownEndsAt") as
+        | number[]
+        | undefined) ?? [];
     if ((cds[i] ?? 0) > Date.now()) return false;
     const sc = this.slotCards[i];
     if (sc && sc.skill === "heal" && sc.level < 6) {
-      const healKills = (this.currentPlayer.data.get("slotHealKills") as number[] | undefined) ?? [];
+      const healKills =
+        (this.currentPlayer.data.get("slotHealKills") as
+          | number[]
+          | undefined) ?? [];
       const threshold = sc.level <= 2 ? 4 : 3;
       return (healKills[i] ?? 0) >= threshold;
     }
@@ -808,9 +1062,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private syncSkillLevel(player: any, skill: SkillId): void {
-    const lvl = player.skillLevels && player.skillLevels.get
-      ? (player.skillLevels.get(skill) ?? 0)
-      : 0;
+    const lvl =
+      player.skillLevels && player.skillLevels.get
+        ? (player.skillLevels.get(skill) ?? 0)
+        : 0;
     if (lvl !== this.skillLevelCache[skill]) {
       this.skillLevelCache[skill] = lvl;
       for (let i = 0; i < this.hudCards.length; i++) {
@@ -829,14 +1084,20 @@ export class GameScene extends Phaser.Scene {
     this.slotPlusHints = [];
     for (let i = 0; i < this.statsHud.cardSlots.length; i++) {
       const c = slotCenter(this.statsHud, i);
-      const plus = this.add.text(c.x, c.y, "+", {
-        color: "#ffffff",
-        fontSize: "22px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      }).setOrigin(0.5).setScrollFactor(0).setDepth(101).setAlpha(0.55).setVisible(false);
+      const plus = this.add
+        .text(c.x, c.y, "+", {
+          color: "#ffffff",
+          fontSize: "22px",
+          fontFamily: "monospace",
+          fontStyle: "bold",
+          stroke: "#000000",
+          strokeThickness: 3,
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(101)
+        .setAlpha(0.55)
+        .setVisible(false);
       this.slotPlusHints.push(plus);
     }
     this.syncSlotsFromServer(false);
@@ -858,17 +1119,21 @@ export class GameScene extends Phaser.Scene {
         };
       }
     }
-    const same = !rebuildAlways && this.slotsSyncedOnce &&
+    const same =
+      !rebuildAlways &&
+      this.slotsSyncedOnce &&
       slots.every((s, i) => {
         const cur = this.slotCards[i];
         if (!s && !cur) return true;
         if (!s || !cur) return false;
-        return s.skill === cur.skill &&
+        return (
+          s.skill === cur.skill &&
           s.level === cur.level &&
           s.rarity === cur.rarity &&
           s.modIds.length === cur.modIds.length &&
-          s.modIds.every((m, j) => m === cur.modIds[j]);
-    });
+          s.modIds.every((m, j) => m === cur.modIds[j])
+        );
+      });
     if (!same) {
       for (const card of this.hudCards) card?.container.destroy();
       this.hudCards = Array(5).fill(null);
@@ -892,7 +1157,8 @@ export class GameScene extends Phaser.Scene {
     });
     obj.container.on("pointerover", () => {
       const i = this.hudCards.indexOf(obj);
-      if (i >= 0 && !this.dragCard) this.showBolterTooltip(this.statsHud.cardSlots[i]);
+      if (i >= 0 && !this.dragCard)
+        this.showBolterTooltip(this.statsHud.cardSlots[i]);
     });
     obj.container.on("pointerout", () => this.hideBolterTooltip());
   }
@@ -912,8 +1178,10 @@ export class GameScene extends Phaser.Scene {
     for (let i = 0; i < this.statsHud.cardSlots.length; i++) {
       const s = this.statsHud.cardSlots[i];
       if (
-        pointer.x >= s.x && pointer.x <= s.x + s.width &&
-        pointer.y >= s.y - 20 && pointer.y <= s.y + s.height + 30
+        pointer.x >= s.x &&
+        pointer.x <= s.x + s.width &&
+        pointer.y >= s.y - 20 &&
+        pointer.y <= s.y + s.height + 30
       ) {
         return i;
       }
@@ -928,8 +1196,10 @@ export class GameScene extends Phaser.Scene {
       const w = c.input?.hitArea?.width ?? this.statsHud.cardSlots[0].width;
       const h = c.input?.hitArea?.height ?? this.statsHud.cardSlots[0].height;
       if (
-        pointer.x >= c.x - w / 2 && pointer.x <= c.x + w / 2 &&
-        pointer.y >= c.y - h / 2 && pointer.y <= c.y + h / 2
+        pointer.x >= c.x - w / 2 &&
+        pointer.x <= c.x + w / 2 &&
+        pointer.y >= c.y - h / 2 &&
+        pointer.y <= c.y + h / 2
       ) {
         return true;
       }
@@ -959,21 +1229,28 @@ export class GameScene extends Phaser.Scene {
       level: lvl,
       rarity: card ? card.rarity : "common",
       modIds: card ? card.modIds : [],
-      modValues: card ? (card.modValues as number[] | undefined) ?? [] : [],
+      modValues: card ? ((card.modValues as number[] | undefined) ?? []) : [],
     });
     panel.setScrollFactor(0).setDepth(300);
     const cam = this.cameras.main;
     let px = slot.x + slot.width / 2;
-    px = Math.max(panel.width / 2 + 4, Math.min(cam.width - panel.width / 2 - 4, px));
+    px = Math.max(
+      panel.width / 2 + 4,
+      Math.min(cam.width - panel.width / 2 - 4, px),
+    );
     const hudTop = this.statsHud ? this.statsHud.hudImage.y : slot.y;
     let py = hudTop - panel.height / 2 - 30;
-    if (py < panel.height / 2 + 4) py = slot.y + slot.height + panel.height / 2 + 10;
+    if (py < panel.height / 2 + 4)
+      py = slot.y + slot.height + panel.height / 2 + 10;
     panel.setPosition(px, py);
     this.bolterTooltip = panel;
   }
 
   private hideBolterTooltip(): void {
-    if (this.bolterTooltip) { this.bolterTooltip.destroy(); this.bolterTooltip = null; }
+    if (this.bolterTooltip) {
+      this.bolterTooltip.destroy();
+      this.bolterTooltip = null;
+    }
   }
 
   private updateCardDrag(pointer: Phaser.Input.Pointer): void {
@@ -997,7 +1274,8 @@ export class GameScene extends Phaser.Scene {
       this.hudCards[d.fromSlot] = null;
       this.dragCard = null;
       const invEmpty = !this.invCardsData[invDrop];
-      if (this.room) this.room.send(invEmpty ? 14 : 19, { slot: d.fromSlot, inv: invDrop });
+      if (this.room)
+        this.room.send(invEmpty ? 14 : 19, { slot: d.fromSlot, inv: invDrop });
       this.syncSlotsFromServer(true);
       this.syncInventoryFromServer(true);
       this.updatePlusHints();
@@ -1039,8 +1317,10 @@ export class GameScene extends Phaser.Scene {
         this.tweens.killTweensOf(c.container);
         this.tweens.add({
           targets: c.container,
-          x: ctr.x, y: ctr.y,
-          duration: 140, ease: "Quad.easeOut",
+          x: ctr.x,
+          y: ctr.y,
+          duration: 140,
+          ease: "Quad.easeOut",
         });
         c.targetSlot = i;
       }
@@ -1049,8 +1329,10 @@ export class GameScene extends Phaser.Scene {
     this.tweens.killTweensOf(d.obj.container);
     this.tweens.add({
       targets: d.obj.container,
-      x: final.x, y: final.y,
-      duration: 140, ease: "Quad.easeOut",
+      x: final.x,
+      y: final.y,
+      duration: 140,
+      ease: "Quad.easeOut",
     });
     d.obj.targetSlot = dropSlot;
     this.dragCard = null;
@@ -1096,12 +1378,18 @@ export class GameScene extends Phaser.Scene {
         };
       }
     }
-    const same = !rebuildAlways && fresh.every((s, i) => {
-      const cur = this.invCardsData[i];
-      if (!s && !cur) return true;
-      if (!s || !cur) return false;
-      return s.skill === cur.skill && s.level === cur.level && s.rarity === cur.rarity;
-    });
+    const same =
+      !rebuildAlways &&
+      fresh.every((s, i) => {
+        const cur = this.invCardsData[i];
+        if (!s && !cur) return true;
+        if (!s || !cur) return false;
+        return (
+          s.skill === cur.skill &&
+          s.level === cur.level &&
+          s.rarity === cur.rarity
+        );
+      });
     if (!same) {
       this.invCardsData = fresh;
       if (this.invScreen?.isVisible()) this.invScreen.rebuildCards();
@@ -1181,7 +1469,11 @@ export class GameScene extends Phaser.Scene {
     const secsLeft = Math.max(1, Math.ceil((until - now) / 1000));
     if (secsLeft === this.spawnCountdownLastSec) return;
     this.spawnCountdownLastSec = secsLeft;
-    this.spawnCountdownToast = showSpawnCountdownToast(this, this.spawnCountdownToast, secsLeft);
+    this.spawnCountdownToast = showSpawnCountdownToast(
+      this,
+      this.spawnCountdownToast,
+      secsLeft,
+    );
   }
 
   private updateEliteHud(): void {
@@ -1190,7 +1482,9 @@ export class GameScene extends Phaser.Scene {
       this.lastEliteAlive = eliteAlive;
       announce(
         this,
-        eliteAlive ? "AN ELITE ENEMY HAS AWAKENED" : "ELITE SLAIN - EXIT UNLOCKED",
+        eliteAlive
+          ? "AN ELITE ENEMY HAS AWAKENED"
+          : "ELITE SLAIN - EXIT UNLOCKED",
         eliteAlive ? "#ffd700" : "#66ff66",
       );
     }
@@ -1200,10 +1494,16 @@ export class GameScene extends Phaser.Scene {
   private renderLayeredMap(): void {
     const map = this.mapData;
     const { tileSize, tilesetColumns, tilesetKey, firstgid, cols, rows } = map;
-    const tilesetImg = this.textures.get(tilesetKey).getSourceImage() as HTMLImageElement;
+    const tilesetImg = this.textures
+      .get(tilesetKey)
+      .getSourceImage() as HTMLImageElement;
     const baseKey = "layered_baselayer";
     if (this.textures.exists(baseKey)) this.textures.remove(baseKey);
-    const baseCanvas = this.textures.createCanvas(baseKey, cols * tileSize, rows * tileSize);
+    const baseCanvas = this.textures.createCanvas(
+      baseKey,
+      cols * tileSize,
+      rows * tileSize,
+    );
     const baseCtx = baseCanvas.getContext();
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
@@ -1212,14 +1512,28 @@ export class GameScene extends Phaser.Scene {
         const frameIndex = tileId - firstgid;
         const fc = frameIndex % tilesetColumns;
         const fr = Math.floor(frameIndex / tilesetColumns);
-        baseCtx.drawImage(tilesetImg, fc * tileSize, fr * tileSize, tileSize, tileSize, c * tileSize, r * tileSize, tileSize, tileSize);
+        baseCtx.drawImage(
+          tilesetImg,
+          fc * tileSize,
+          fr * tileSize,
+          tileSize,
+          tileSize,
+          c * tileSize,
+          r * tileSize,
+          tileSize,
+          tileSize,
+        );
       }
     }
     baseCanvas.refresh();
     this.add.image(0, 0, baseKey).setOrigin(0, 0).setDepth(0);
     const interKey = "layered_interactive";
     if (this.textures.exists(interKey)) this.textures.remove(interKey);
-    const interCanvas = this.textures.createCanvas(interKey, cols * tileSize, rows * tileSize);
+    const interCanvas = this.textures.createCanvas(
+      interKey,
+      cols * tileSize,
+      rows * tileSize,
+    );
     const interCtx = interCanvas.getContext();
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
@@ -1228,7 +1542,17 @@ export class GameScene extends Phaser.Scene {
         const frameIndex = tileId - firstgid;
         const fc = frameIndex % tilesetColumns;
         const fr = Math.floor(frameIndex / tilesetColumns);
-        interCtx.drawImage(tilesetImg, fc * tileSize, fr * tileSize, tileSize, tileSize, c * tileSize, r * tileSize, tileSize, tileSize);
+        interCtx.drawImage(
+          tilesetImg,
+          fc * tileSize,
+          fr * tileSize,
+          tileSize,
+          tileSize,
+          c * tileSize,
+          r * tileSize,
+          tileSize,
+          tileSize,
+        );
       }
     }
     interCanvas.refresh();
@@ -1242,17 +1566,24 @@ export class GameScene extends Phaser.Scene {
     gfx.lineStyle(3, 0xff0000, 0.7);
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        if (map.collisionGrid[r * cols + c]) gfx.strokeRect(c * tileSize, r * tileSize, tileSize, tileSize);
+        if (map.collisionGrid[r * cols + c])
+          gfx.strokeRect(c * tileSize, r * tileSize, tileSize, tileSize);
       }
     }
     gfx.lineStyle(2, 0xffff00, 0.9);
     const sp = map.spawnPoint;
-    gfx.strokeRect(sp.x - tileSize / 2, sp.y - tileSize / 2, tileSize, tileSize);
+    gfx.strokeRect(
+      sp.x - tileSize / 2,
+      sp.y - tileSize / 2,
+      tileSize,
+      tileSize,
+    );
     gfx.lineStyle(2, 0x00ffff, 0.9);
     const ex = map.exitPoint;
     gfx.strokeRect(ex.x, ex.y, ex.width, ex.height);
     gfx.lineStyle(2, 0xff00ff, 0.7);
-    for (const zone of map.enemySpawnZones) gfx.strokeRect(zone.x, zone.y, zone.width, zone.height);
+    for (const zone of map.enemySpawnZones)
+      gfx.strokeRect(zone.x, zone.y, zone.width, zone.height);
     gfx.lineStyle(1, 0xffffff, 0.3);
     gfx.strokeRect(0, 0, map.widthPx, map.heightPx);
     gfx.setVisible(this.showHitboxes);
@@ -1260,24 +1591,43 @@ export class GameScene extends Phaser.Scene {
   }
 
   private createDebugHUD(): void {
-    this.debugFPS = this.add.text(10, 10, "FPS: 0", {
-      color: "#00ff00", fontSize: "14px", fontFamily: "monospace",
-      stroke: "#000000", strokeThickness: 3,
-    }).setScrollFactor(0).setDepth(100);
-    this.hitboxToggleButton = this.add.text(10, 32, "[F3] Hitboxes: OFF", {
-      color: "#ffaa00", fontSize: "12px", fontFamily: "monospace",
-      stroke: "#000000", strokeThickness: 3,
-    }).setScrollFactor(0).setDepth(100).setInteractive({ useHandCursor: true })
+    this.debugFPS = this.add
+      .text(10, 10, "FPS: 0", {
+        color: "#00ff00",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setScrollFactor(0)
+      .setDepth(100);
+    this.hitboxToggleButton = this.add
+      .text(10, 32, "[F3] Hitboxes: OFF", {
+        color: "#ffaa00",
+        fontSize: "12px",
+        fontFamily: "monospace",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setScrollFactor(0)
+      .setDepth(100)
+      .setInteractive({ useHandCursor: true })
       .on("pointerdown", () => this.toggleHitboxes());
   }
 
   private toggleHitboxes(): void {
     this.showHitboxes = !this.showHitboxes;
     if (this.debugHitboxes) this.debugHitboxes.setVisible(this.showHitboxes);
-    if (this.statsHud?.hudHitboxHP) this.statsHud.hudHitboxHP.setVisible(this.showHitboxes);
-    this.statsHud?.hudHitboxCards.forEach((hb) => hb.setVisible(this.showHitboxes));
-    if (this.debugEntityHitboxes) this.debugEntityHitboxes.setVisible(this.showHitboxes);
-    this.hitboxToggleButton.setText(this.showHitboxes ? "[F3] Hitboxes: ON" : "[F3] Hitboxes: OFF");
+    if (this.statsHud?.hudHitboxHP)
+      this.statsHud.hudHitboxHP.setVisible(this.showHitboxes);
+    this.statsHud?.hudHitboxCards.forEach((hb) =>
+      hb.setVisible(this.showHitboxes),
+    );
+    if (this.debugEntityHitboxes)
+      this.debugEntityHitboxes.setVisible(this.showHitboxes);
+    this.hitboxToggleButton.setText(
+      this.showHitboxes ? "[F3] Hitboxes: ON" : "[F3] Hitboxes: OFF",
+    );
   }
 
   // ---- Death screen ----
@@ -1288,12 +1638,28 @@ export class GameScene extends Phaser.Scene {
       () => {
         if (this.mapId !== "map1") {
           this.deathScreen = hideDeathScreen(this.deathScreen);
-          try { this.room?.leave(); } catch (_e) { /* ignore */ }
+          try {
+            this.room?.leave();
+          } catch (_e) {
+            /* ignore */
+          }
           this.room = null;
-          for (const id in this.playerEntities) { this.playerEntities[id]?.destroy(); delete this.playerEntities[id]; }
-          for (const id in this.enemyEntities) { this.enemyEntities[id]?.destroy(); delete this.enemyEntities[id]; }
-          for (const id in this.projectileEntities) { this.projectileEntities[id]?.destroy(); delete this.projectileEntities[id]; }
-          for (const id in this.clawEntities) { this.clawEntities[id]?.destroy(); delete this.clawEntities[id]; }
+          for (const id in this.playerEntities) {
+            this.playerEntities[id]?.destroy();
+            delete this.playerEntities[id];
+          }
+          for (const id in this.enemyEntities) {
+            this.enemyEntities[id]?.destroy();
+            delete this.enemyEntities[id];
+          }
+          for (const id in this.projectileEntities) {
+            this.projectileEntities[id]?.destroy();
+            delete this.projectileEntities[id];
+          }
+          for (const id in this.clawEntities) {
+            this.clawEntities[id]?.destroy();
+            delete this.clawEntities[id];
+          }
           this.scene.restart({ fadeIn: true });
           return;
         }
@@ -1301,10 +1667,12 @@ export class GameScene extends Phaser.Scene {
         this.slotCards = Array(5).fill(null);
         this.hudCards = Array(5).fill(null);
         this.slotsSyncedOnce = false;
-      this.hideBolterTooltip();
+        this.hideBolterTooltip();
         this.deathScreen = hideDeathScreen(this.deathScreen);
       },
-      () => { /* Quit no-op */ },
+      () => {
+        /* Quit no-op */
+      },
     );
   }
 
@@ -1323,25 +1691,37 @@ export class GameScene extends Phaser.Scene {
     const FADE_MS = 400;
     cam.once("camerafadeoutcomplete", () => {
       const destroyMap = (entities: Record<string, any>) => {
-        for (const id in entities) { entities[id]?.destroy?.(); delete entities[id]; }
+        for (const id in entities) {
+          entities[id]?.destroy?.();
+          delete entities[id];
+        }
       };
       destroyMap(this.enemyEntities);
       destroyMap(this.projectileEntities);
       destroyMap(this.clawEntities);
       destroyMap(this.slamEntities);
       destroyMap(this.vortexEntities);
-      for (const [id, bar] of Object.entries(this.enemyHpBars)) { bar?.destroy?.(); delete this.enemyHpBars[id]; }
+      for (const [id, bar] of Object.entries(this.enemyHpBars)) {
+        bar?.destroy?.();
+        delete this.enemyHpBars[id];
+      }
       this.enemyLastPos = {};
       this.projLastPos = {};
       this.entityHitSeqs = {};
       resetGroundCards(this, this.groundCards);
       this.dragCard = null;
-      this.children.list.filter((obj) =>
-        (obj as any).texture &&
-        ((obj as any).texture.key === "layered_baselayer" ||
-          (obj as any).texture.key === "layered_interactive")
-      ).forEach((obj) => obj.destroy());
-      if (this.debugHitboxes) { this.debugHitboxes.destroy(); this.debugHitboxes = null; }
+      this.children.list
+        .filter(
+          (obj) =>
+            (obj as any).texture &&
+            ((obj as any).texture.key === "layered_baselayer" ||
+              (obj as any).texture.key === "layered_interactive"),
+        )
+        .forEach((obj) => obj.destroy());
+      if (this.debugHitboxes) {
+        this.debugHitboxes.destroy();
+        this.debugHitboxes = null;
+      }
       this.mapId = nextMapId;
       this.mapData = cfg.mapData;
       this.renderLayeredMap();
@@ -1350,11 +1730,24 @@ export class GameScene extends Phaser.Scene {
       const spawn = this.mapData.spawnPoint;
       for (const id in this.playerEntities) {
         const s = this.playerEntities[id];
-        if (s?.active) { s.x = spawn.x; s.y = spawn.y; s.setData("serverX", spawn.x); s.setData("serverY", spawn.y); }
+        if (s?.active) {
+          s.x = spawn.x;
+          s.y = spawn.y;
+          s.setData("serverX", spawn.x);
+          s.setData("serverY", spawn.y);
+        }
       }
-      if (this.currentPlayer) { this.currentPlayer.x = spawn.x; this.currentPlayer.y = spawn.y; }
+      if (this.currentPlayer) {
+        this.currentPlayer.x = spawn.x;
+        this.currentPlayer.y = spawn.y;
+      }
       this.cameras.main.centerOn(spawn.x, spawn.y);
-      this.cameras.main.setBounds(0, 0, this.mapData.widthPx, this.mapData.heightPx);
+      this.cameras.main.setBounds(
+        0,
+        0,
+        this.mapData.widthPx,
+        this.mapData.heightPx,
+      );
       rebuildMapInfoTooltip(this, this.mapInfo);
       cam.fadeIn(FADE_MS, 0, 0, 0);
       this.transitioning = false;
@@ -1366,7 +1759,8 @@ export class GameScene extends Phaser.Scene {
   fixedTick(): void {
     this.currentTick++;
     const now = Date.now();
-    if (Phaser.Input.Keyboard.JustDown(this.hitboxToggleKey)) this.toggleHitboxes();
+    if (Phaser.Input.Keyboard.JustDown(this.hitboxToggleKey))
+      this.toggleHitboxes();
     this.debugFPS.setText("FPS: " + Math.round(this.game.loop.actualFps));
     if (!this.currentPlayer || !this.room) return;
     this.inputPayload.left = this.wasdKeys.left.isDown;
@@ -1378,21 +1772,37 @@ export class GameScene extends Phaser.Scene {
     this.updatePlayerAnimation();
 
     const dt = this.fixedTimeStep / 1000;
-    let dirX = 0, dirY = 0;
+    let dirX = 0,
+      dirY = 0;
     if (this.inputPayload.left) dirX -= 1;
     if (this.inputPayload.right) dirX += 1;
     if (this.inputPayload.up) dirY -= 1;
     if (this.inputPayload.down) dirY += 1;
     const length = Math.sqrt(dirX * dirX + dirY * dirY);
-    if (length > 0) { dirX /= length; dirY /= length; }
+    if (length > 0) {
+      dirX /= length;
+      dirY /= length;
+    }
     this.currentPlayer.x += dirX * this.moveSpeed * dt;
     this.currentPlayer.y += dirY * this.moveSpeed * dt;
-    this.currentPlayer.x = Phaser.Math.Clamp(this.currentPlayer.x, 0, this.mapData.widthPx);
-    this.currentPlayer.y = Phaser.Math.Clamp(this.currentPlayer.y, 0, this.mapData.heightPx);
+    this.currentPlayer.x = Phaser.Math.Clamp(
+      this.currentPlayer.x,
+      0,
+      this.mapData.widthPx,
+    );
+    this.currentPlayer.y = Phaser.Math.Clamp(
+      this.currentPlayer.y,
+      0,
+      this.mapData.heightPx,
+    );
     const resolved = resolveTileCollision(
-      this.currentPlayer.x, this.currentPlayer.y,
+      this.currentPlayer.x,
+      this.currentPlayer.y,
       this.PLAYER_COLLISION_RADIUS,
-      this.mapData.collisionGrid, this.mapData.cols, this.mapData.rows, this.mapData.tileSize,
+      this.mapData.collisionGrid,
+      this.mapData.cols,
+      this.mapData.rows,
+      this.mapData.tileSize,
     );
     this.currentPlayer.x = resolved.x;
     this.currentPlayer.y = resolved.y;
@@ -1403,7 +1813,11 @@ export class GameScene extends Phaser.Scene {
       this.currentPlayer.active &&
       (this.currentPlayer.x !== 0 || this.currentPlayer.y !== 0) &&
       this.isOnExitTile();
-    this.exitLockedToast = showExitLockedToast(this, this.exitLockedToast, !!(onExit && !(this.room as any)?.state?.exitUnlocked));
+    this.exitLockedToast = showExitLockedToast(
+      this,
+      this.exitLockedToast,
+      !!(onExit && !(this.room as any)?.state?.exitUnlocked),
+    );
 
     // ---- Entity visuals: interpolation, anims, HP bars, hit flash ----
     updateEntityVisuals(this as any);
@@ -1412,9 +1826,16 @@ export class GameScene extends Phaser.Scene {
     if (this.invDrag) this.updateInvCardDrag(this.input.activePointer);
 
     this.sendViewport();
-    updateSlotCooldowns(this, this.statsHud, this.hudCards, this.slotCards, this.currentPlayer);
+    updateSlotCooldowns(
+      this,
+      this.statsHud,
+      this.hudCards,
+      this.slotCards,
+      this.currentPlayer,
+    );
     if (this.dragCard) this.updateCardDrag(this.input.activePointer);
-    else if (this.groundCards.grab) updateGroundGrab(this.groundCards, this.input.activePointer);
+    else if (this.groundCards.grab)
+      updateGroundGrab(this.groundCards, this.input.activePointer);
 
     this.updateSpawnCountdown();
     this.updateEliteHud();
@@ -1449,8 +1870,10 @@ export class GameScene extends Phaser.Scene {
     while (this.elapsedTime >= this.fixedTimeStep) {
       this.elapsedTime -= this.fixedTimeStep;
       this.fixedTick();
-      if (++catchUpTicks >= 5) { this.elapsedTime = 0; break; }
+      if (++catchUpTicks >= 5) {
+        this.elapsedTime = 0;
+        break;
+      }
     }
   }
 }
-

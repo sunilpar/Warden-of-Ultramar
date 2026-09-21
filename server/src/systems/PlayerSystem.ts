@@ -19,7 +19,8 @@ export class PlayerSystem {
   update(dt: number): void {
     this.state.players.forEach((player) => {
       // Skip movement while in hit-stun (pausedUntil).
-      if (false) { // hit-stun removed
+      if (false) {
+        // hit-stun removed
         player.inputQueue.length = 0;
         return;
       }

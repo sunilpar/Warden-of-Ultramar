@@ -107,7 +107,10 @@ export class ProjectileSystem {
     critDamage: number = 1.5,
   ): boolean {
     const def = BOLTER_DEF;
-    const speed = typeof def.projectileSpeed === "function" ? def.projectileSpeed(skillLevel) : def.projectileSpeed;
+    const speed =
+      typeof def.projectileSpeed === "function"
+        ? def.projectileSpeed(skillLevel)
+        : def.projectileSpeed;
     const vx = Math.cos(angle) * speed;
     const vy = Math.sin(angle) * speed;
     if (Math.hypot(vx, vy) < 0.0001) return false;
@@ -153,7 +156,11 @@ export class ProjectileSystem {
   /** True if the projectile center is inside a solid tile. */
   private hitsWall(proj: Projectile): boolean {
     // Sample the tile at the projectile center against the collision grid.
-    const res = this.mapSystem.resolveTileCollision(proj.x, proj.y, proj.radius);
+    const res = this.mapSystem.resolveTileCollision(
+      proj.x,
+      proj.y,
+      proj.radius,
+    );
     // If resolution pushed the projectile, it was overlapping a wall.
     return Math.hypot(res.x - proj.x, res.y - proj.y) > 0.01;
   }
@@ -172,7 +179,18 @@ export class ProjectileSystem {
         if (hit !== null) return;
         if (proj.hitSet.has(id)) return;
         if (enemy.isDead) return;
-        if (this.rectOverlap(proj.x, proj.y, r, r, enemy.x, enemy.y, enemy.hitboxW, enemy.hitboxH)) {
+        if (
+          this.rectOverlap(
+            proj.x,
+            proj.y,
+            r,
+            r,
+            enemy.x,
+            enemy.y,
+            enemy.hitboxW,
+            enemy.hitboxH,
+          )
+        ) {
           hit = id;
         }
       });
@@ -185,7 +203,18 @@ export class ProjectileSystem {
       if (hit !== null) return;
       if (proj.hitSet.has(id)) return;
       if (player.isDead) return;
-      if (this.rectOverlap(proj.x, proj.y, r, r, player.x, player.y, player.hitboxW, player.hitboxH)) {
+      if (
+        this.rectOverlap(
+          proj.x,
+          proj.y,
+          r,
+          r,
+          player.x,
+          player.y,
+          player.hitboxW,
+          player.hitboxH,
+        )
+      ) {
         hit = id;
       }
     });
@@ -195,7 +224,18 @@ export class ProjectileSystem {
       if (hit !== null) return;
       if (proj.hitSet.has(id)) return;
       if (enemy.isDead) return;
-      if (this.rectOverlap(proj.x, proj.y, r, r, enemy.x, enemy.y, enemy.hitboxW, enemy.hitboxH)) {
+      if (
+        this.rectOverlap(
+          proj.x,
+          proj.y,
+          r,
+          r,
+          enemy.x,
+          enemy.y,
+          enemy.hitboxW,
+          enemy.hitboxH,
+        )
+      ) {
         hit = id;
       }
     });
@@ -204,7 +244,11 @@ export class ProjectileSystem {
 
   /** Apply the projectile's damage to a target id (player or enemy). */
   private applyDamage(proj: Projectile, targetId: string): void {
-    const { damage, isCrit } = applyCrit(proj.damage, proj.critRate, proj.critDamage);
+    const { damage, isCrit } = applyCrit(
+      proj.damage,
+      proj.critRate,
+      proj.critDamage,
+    );
     const player = this.state.players.get(targetId);
     if (player) {
       player.takeDamage(damage, "bolter", undefined, isCrit);
@@ -221,12 +265,15 @@ export class ProjectileSystem {
    * (ax,ay) center with half (aw,ah); (bx,by) center with half (bw,bh).
    */
   private rectOverlap(
-    ax: number, ay: number, aw: number, ah: number,
-    bx: number, by: number, bw: number, bh: number,
+    ax: number,
+    ay: number,
+    aw: number,
+    ah: number,
+    bx: number,
+    by: number,
+    bw: number,
+    bh: number,
   ): boolean {
-    return (
-      Math.abs(ax - bx) <= aw + bw &&
-      Math.abs(ay - by) <= ah + bh
-    );
+    return Math.abs(ax - bx) <= aw + bw && Math.abs(ay - by) <= ah + bh;
   }
 }
