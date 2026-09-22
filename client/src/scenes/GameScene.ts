@@ -23,6 +23,9 @@ import {
   type SkillId,
   asRarity,
   cardFrameForLevel,
+  CARD_ART_INSET_RATIO,
+  CARD_ART_ALPHA,
+  rarityBaseFrame,
   BOLTER_COLORS,
   bolterColorTier,
   bolterBulletFrameForLevel,
@@ -391,7 +394,24 @@ export class GameScene extends Phaser.Scene {
     this.groundCardCallbacks = {
       canGrab: () => !this.dragCard && !this.invDrag,
       getPlayer: () => this.currentPlayer as any,
-      getSlotTemplate: () => this.hudCards[0],
+      // Fallback template is used only as a size source when the player
+      // has no card in HUD slot 0. Without it, beginGrab bails out and
+      // ground-card pickup is silently disabled until slot 0 is filled.
+      getSlotTemplate: () =>
+        this.hudCards[0] ?? ({
+          container: {
+            width: this.statsHud.cardSlots[0].width,
+            height: this.statsHud.cardSlots[0].height,
+          } as unknown as Phaser.GameObjects.Container,
+          base: null as any,
+          img: null as any,
+          cdFill: null as any,
+          targetSlot: -1,
+          skill: "shock",
+          rarity: "common",
+          modIds: [],
+          modValues: [],
+        } as HudCardObj),
       sendPickupToSlot: (cardId, slot) => this.room?.send(11, { cardId, slot }),
       sendPickupToInventory: (cardId, inv) =>
         this.room?.send(17, { cardId, inv }),
@@ -1392,22 +1412,52 @@ export class GameScene extends Phaser.Scene {
       });
     if (!same) {
       this.invCardsData = fresh;
-      if (this.invScreen?.isVisible()) this.invScreen.rebuildCards();
+      if (this.invScreen?.isVisible()) this.invScreen.syncFromState();
     }
   }
 
   beginInvCardDrag(i: number): void {
     if (this.invDrag || this.dragCard || this.groundCards.grab) return;
+    const sc = this.invCardsData[i];
+    if (!sc) return;
+    const slot0 = this.statsHud.cardSlots[0];
+    const slotW = slot0.width;
+    const slotH = slot0.height;
+    const inset = slotW * CARD_ART_INSET_RATIO;
+    const base = this.add
+      .image(0, 0, "card_sheet", rarityBaseFrame(sc.rarity))
+      .setDisplaySize(slotW, slotH);
+    const img = this.add
+      .image(0, 0, "card_sheet", cardFrameForLevel(sc.skill, sc.level))
+      .setDisplaySize(slotW - inset * 2, slotH - inset * 2)
+      .setAlpha(CARD_ART_ALPHA);
+    const cdFill = this.add
+      .rectangle(0, 0, slotW, slotH, 0xffffff, 0.45)
+      .setOrigin(0, 0)
+      .setVisible(false);
+    cdFill.setData("baseH", slotH);
+    cdFill.setData("baseW", slotW);
+    cdFill.x = -slotW / 2;
+    const container = this.add
+      .container(this.input.activePointer.x, this.input.activePointer.y, [
+        base,
+        img,
+        cdFill,
+      ])
+      .setScrollFactor(0)
+      .setDepth(2000);
+    container.setScale(1.08);
     this.invDrag = {
       obj: {
-        skill: (this.invCardsData[i]?.skill ?? "shock") as SkillId,
-        container: this.add.container(0, 0),
-        base: this.add.image(0, 0, "card_sheet"),
-        img: this.add.image(0, 0, "card_sheet"),
-        cdFill: this.add.rectangle(0, 0, 1, 1),
+        skill: sc.skill,
+        container,
+        base,
+        img,
+        cdFill,
         targetSlot: i,
-        rarity: this.invCardsData[i]?.rarity ?? "common",
-        modIds: this.invCardsData[i]?.modIds ?? [],
+        rarity: sc.rarity,
+        modIds: sc.modIds,
+        modValues: sc.modValues,
       },
       fromInv: i,
       hoverInv: i,
