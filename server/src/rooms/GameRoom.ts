@@ -77,6 +77,31 @@ import {
   type ModifierId,
 } from "../config/modifiers";
 import { cardModMetadata } from "../config/cardMods";
+import {
+  rollThreeOffers,
+  rolledMapStatId,
+  tierForMapsCleared,
+  readAppliedStats,
+  getActiveDropRateMult,
+  getActiveRarityBias,
+  applyActiveMapStatsToPlayer,
+  applyActiveMapStatsToEnemy,
+  type RolledMapStat,
+} from "../config/mapStats";
+import { MapStat } from "../schema/MapStat";
+
+/** Serialized map-stat offer sent over the wire to the picker UI. */
+export interface SerializedMapStatOffer {
+  index: number;
+  defId: string;
+  goodName: string;
+  badName: string;
+  goodEffect: string;
+  badEffect: string;
+  goodValue: number;
+  badValue: number;
+  durationMaps: number;
+}
 
 /** Starter cards handed to FRESH players (all 5 slots filled). */
 const STARTER_CARDS: { skill: SkillId; level: number }[] = [
@@ -113,6 +138,10 @@ export class GameRoom extends Room {
   private activeModifiers: ModifierId[] = [];
   /** True while a map transition is in progress (blocks re-trigger). */
   private transitioning: boolean = false;
+  /** Per-player pending 3 offers sent to each player at the exit point. */
+  private currentMapStatOffers = new Map<string, SerializedMapStatOffer[]>();
+  /** Count of alive players who have a picker open. 0 = no picker active. */
+  private mapStatPickersOpen: number = 0;
   /** Last reported viewport (world rect) per player session. */
   private viewports = new Map<
     string,
@@ -170,6 +199,13 @@ export class GameRoom extends Room {
     this.enemySystem.setPulseSystem(this.pulseSystem);
 
     // ---- Per-map bookkeeping + synced state reset ----
+    // Clear any lingering picker state so the next exit opens a
+    // fresh picker (defensive: pickMapStatAndTransition already
+    // clears this on a successful pick, but if a player dropped
+    // the room mid-pick or the pick was never sent we still want
+    // the next exit to work).
+    this.currentMapStatOffers.clear();
+    this.mapStatPickersOpen = 0;
     this.spawnedZones.clear();
     this.enemiesKilled = 0;
     this.eliteSpawned = false;
@@ -190,10 +226,35 @@ export class GameRoom extends Room {
 
     // ---- Reposition existing players at the new map's spawn ----
     const spawn = this.mapSystem.getSpawnPoint();
+    const applied = readAppliedStats(this.state.activeMapStats.values());
     this.state.players.forEach((p) => {
       p.x = spawn.x;
       p.y = spawn.y;
       p.inputQueue.length = 0;
+      // CRITICAL: undo every map-derived bonus before re-applying,
+      // otherwise each map transition would compound them. We do
+      // NOT touch player base stats (attack, baseMoveSpeed, etc.)
+      // - those are level-derived and survive map transitions.
+      p.damageMultiplier = Math.max(0, p.damageMultiplier - this.appliedGoodSum(applied, "damage_mult"));
+      p.speedMultiplier = Math.max(0, p.speedMultiplier - this.appliedGoodSum(applied, "move_speed_mult"));
+      p.critRate = Math.max(0, p.critRate - this.appliedGoodSum(applied, "crit_rate"));
+      p.critDamage = Math.max(1, p.critDamage - this.appliedGoodSum(applied, "crit_damage"));
+      p.defence = Math.max(0, p.defence - this.appliedGoodSum(applied, "defence"));
+      // Reverse any prior maxHealth multiplicative bonus by dividing.
+      // (applyActiveMapStatsToPlayer multiplies inside, so we mirror
+      // that here so transitions never stack.)
+      const hpUndo = this.appliedGoodSum(applied, "max_health_mult");
+      if (hpUndo !== 0) {
+        // Inverse of (1+hpUndo) applied to maxHealth once.
+        const prevMax = p.maxHealth / (1 + hpUndo);
+        p.maxHealth = Math.max(1, Math.round(prevMax));
+        p.currentHealth = Math.min(
+          p.maxHealth,
+          Math.max(1, Math.round(p.currentHealth / (1 + hpUndo))),
+        );
+      }
+      p.mapCooldownReduction = 0;
+      applyActiveMapStatsToPlayer(p, applied);
     });
 
     // ---- Map metadata for client display ----
@@ -281,8 +342,24 @@ export class GameRoom extends Room {
    * any player stat change.
    */
   private refreshLootContext(): void {
+    const applied = readAppliedStats(this.state.activeMapStats.values());
+    const base = this.getHighestPlayerDropRate();
+    const plunder = getActiveDropRateMult(applied); // additive 0..1
+    // rarityBias: a flat additive weight shift toward better rarities.
+    // We model it by shifting the rarities from 'rare' upward.
+    const rb = getActiveRarityBias(applied);
+    const rarityBias: Partial<Record<
+      "common" | "uncommon" | "rare" | "epic" | "legendary" | "unique",
+      number
+    >> = {
+      rare: rb,
+      epic: rb * 0.7,
+      legendary: rb * 0.4,
+      unique: rb * 0.2,
+    };
     this.lootSystem.setLootContext({
-      dropRate: this.getHighestPlayerDropRate(),
+      dropRate: base + plunder,
+      rarityBias,
     });
   }
 
@@ -359,11 +436,125 @@ export class GameRoom extends Room {
     if (alive === 0) return;
     if (onExit < alive) return;
 
+    // ---- Everyone is on the exit: open the map-stat picker. The first
+    //      player to send a "pick" message locks in the choice; the rest
+    //      see a broadcast "picked" event and the room transitions.
+    //      Each player gets THEIR OWN set of 3 rolled offers (so up to
+    //      N*3 cards total, where N = alive players). ----
+    if (this.mapStatPickersOpen === 0) {
+      this.mapStatPickersOpen = alive;
+      const tier = tierForMapsCleared(this.state.mapsCleared);
+      // Flat list: every alive player gets the SAME shared pool of
+      // `alive * 3` offers, so the picker UI can list them all in
+      // one scrollable card and any player can pick any index.
+      const allOffers: RolledMapStat[] = [];
+      while (allOffers.length < alive * 3) {
+        allOffers.push(...rollThreeOffers(tier));
+      }
+      const serialized = allOffers.map((o, i) => ({
+        index: i,
+        defId: rolledMapStatId(o),
+        goodName: o.good.name,
+        badName: o.bad.name,
+        goodEffect: o.good.effect,
+        badEffect: o.bad.effect,
+        goodValue: o.goodValue,
+        badValue: o.badValue,
+        durationMaps: o.durationMaps,
+      }));
+      // The picker validates by index (flat), so we no longer need
+      // the per-player map. Stash the array directly.
+      this.currentMapStatOffers = new Map();
+      this.currentMapStatOffers.set("__shared__", serialized);
+      this.broadcast("mapStatOffer", {
+        tier,
+        offers: serialized,
+        playerCount: alive,
+      });
+    }
+    return;
+  }
+
+  /** Sum the GOOD-side values of a single effect across an AppliedMapStat list. */
+  private appliedGoodSum(
+    active: import("../config/mapStats").AppliedMapStat[],
+    effect: import("../config/mapStats").StatEffect,
+  ): number {
+    let s = 0;
+    for (const a of active) if (a.goodEffect === effect) s += a.goodValue;
+    return s;
+  }
+
+  /**
+   * Apply the picked map stat to the room and trigger the transition.
+   * Called when a player sends message 20.
+   */
+  private pickMapStatAndTransition(
+    client: { sessionId: string },
+    offerIndex: number,
+  ): void {
+    if (this.transitioning) return;
+    const offers = this.currentMapStatOffers.get("__shared__");
+    // -1 = "no mods" (transition without applying a stat).
+    // Otherwise: validate the index is in range.
+    if (offerIndex !== -1) {
+      if (!offers || offerIndex < 0 || offerIndex >= offers.length) return;
+    }
+    const offer = offerIndex === -1 ? null : offers![offerIndex];
+
+    // Add the picked stat to the room's active list (if any).
+    if (offer) {
+      const stat = new MapStat();
+      stat.defId = offer.defId;
+      stat.goodName = offer.goodName;
+      stat.badName = offer.badName;
+      stat.goodEffect = offer.goodEffect;
+      stat.badEffect = offer.badEffect;
+      stat.goodValue = offer.goodValue;
+      stat.badValue = offer.badValue;
+      stat.durationMaps = offer.durationMaps;
+      this.state.activeMapStats.set(`stat_${this.state.activeMapStats.size + 1}`, stat);
+      this.broadcast("mapStatPicked", {
+        pickerId: client.sessionId,
+        defId: offer.defId,
+        goodName: offer.goodName,
+        badName: offer.badName,
+        goodValue: offer.goodValue,
+        badValue: offer.badValue,
+        durationMaps: offer.durationMaps,
+      });
+    } else {
+      this.broadcast("mapStatPicked", {
+        pickerId: client.sessionId,
+        defId: "none",
+        goodName: "(no mods)",
+        badName: "",
+        goodValue: 0,
+        badValue: 0,
+        durationMaps: 0,
+      });
+    }
+    this.currentMapStatOffers.clear();
+    this.mapStatPickersOpen = 0;
+
+    // ---- Decrement remaining duration on every active stat ----
+    // Stats whose timer hits 0 expire immediately (and won't
+    // affect the next map). Stats with >1 maps remain in effect.
+    const expired: string[] = [];
+    this.state.activeMapStats.forEach((st, sid) => {
+      st.durationMaps -= 1;
+      if (st.durationMaps <= 0) expired.push(sid);
+    });
+    for (const sid of expired) this.state.activeMapStats.delete(sid);
+    // One more map cleared -> the next picker tier scales up.
+    this.state.mapsCleared += 1;
+
     // ---- Everyone is on the exit: transition now ----
     this.transitioning = true;
-    const nextMapId = def.next;
+    const nextMapId = MAPS[this.mapId].next;
+    const modLabel = offer ? `${offer.goodName}+${offer.badName}` : "(no mods)";
     console.log(
-      `[MAP] All ${alive} players on exit — transitioning ${this.mapId} -> ${nextMapId}`,
+      `[MAP] Exit picked ${modLabel} — transitioning ${this.mapId} -> ${nextMapId}`,
     );
 
     // Transition XP reward (was client-driven message 5). map2 -> map1
@@ -422,6 +613,10 @@ export class GameRoom extends Room {
         const spawnedEnemy = this.state.enemies.get(spawnId);
         if (spawnedEnemy) {
           applyEnemyModifiers(spawnedEnemy, this.activeModifiers);
+          applyActiveMapStatsToEnemy(
+            spawnedEnemy,
+            readAppliedStats(this.state.activeMapStats.values()),
+          );
           // Loot roll: may attach a modded card to this enemy.
           this.refreshLootContext();
           const card = this.lootSystem.rollEnemyCard(spawnedEnemy);
@@ -563,6 +758,10 @@ export class GameRoom extends Room {
       GAME_CONFIG.ELITE.SIZE_MULTIPLIER,
     );
     applyEnemyModifiers(elite, this.activeModifiers);
+    applyActiveMapStatsToEnemy(
+      elite,
+      readAppliedStats(this.state.activeMapStats.values()),
+    );
     this.eliteSpawned = true;
     this.state.eliteAlive = true;
     console.log(
@@ -1035,6 +1234,12 @@ export class GameRoom extends Room {
       } else if (!invCard && hudCard) {
         player.setInventoryCard(inv, player.clearSlotCard(slot)!);
       }
+    },
+
+    // ---- Pick one of the map-stat offers (sent at the exit picker) ----
+    // msg: { index: number } (0..2 into the per-player offer list)
+    20: (client: Client, msg: { index: number }) => {
+      this.pickMapStatAndTransition(client, msg?.index | 0);
     },
   };
 

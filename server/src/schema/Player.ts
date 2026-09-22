@@ -101,6 +101,9 @@ export class Player extends Schema {
    * context (room uses the HIGHEST player's dropRate).
    */
   @type("number") dropRate: number = 0;
+  /** Transient flat cooldown reduction (0..0.6) added by active map stats.
+   *  Cleared every map transition; read by slotCooldownReduction(). */
+  mapCooldownReduction: number = 0;
 
   // ---- Shock status (synced) ----
   /** Server timestamp (ms) until which the player is shocked (takes more damage, slowed). */
@@ -670,8 +673,10 @@ export class Player extends Schema {
    */
   slotCooldownReduction(i: number): number {
     const c = this.slotCard(i);
-    if (!c) return 0;
-    return Math.min(0.6, this.sumModValues(c, "inc_cooldown", 0));
+    const cardCD = c ? this.sumModValues(c, "inc_cooldown", 0) : 0;
+    // Map stats (Rejuvinated) add a flat room-wide reduction on top of
+    // any card-sourced inc_cooldown. Total capped at 60% reduction.
+    return Math.min(0.6, cardCD + this.mapCooldownReduction);
   }
 
   /**

@@ -14,6 +14,7 @@ import { Slam } from "./Slam";
 import { Vortex } from "./Vortex";
 import { GroundCard } from "./GroundCard";
 import { ShockCast } from "./ShockCast";
+import { MapStat } from "./MapStat";
 
 export class RoomState extends Schema {
   @type({ map: Player }) players = new MapSchema<Player>();
@@ -41,4 +42,15 @@ export class RoomState extends Schema {
   @type("boolean") exitUnlocked: boolean = false;
   /** True while this map's elite enemy is alive (client boss HUD). */
   @type("boolean") eliteAlive: boolean = false;
+  /**
+   * Map stats carried over from prior transitions (each one good+bad,
+   * with a remaining duration in maps). The LootSystem + enemy/player
+   * systems query this list at runtime to apply their bonuses.
+   */
+  @type({ map: MapStat }) activeMapStats = new MapSchema<MapStat>();
+  /**
+   * How many maps this room has cleared so far. Used by the picker
+   * to compute the offer tier (every 2 clears bumps the tier).
+   */
+  @type("number") mapsCleared: number = 0;
 }

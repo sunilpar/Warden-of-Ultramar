@@ -64,6 +64,11 @@ import {
 } from "../ui/hud/mapInfoButton";
 import { createConfirmPopup } from "../ui/confirmPopup";
 import {
+  createMapStatPicker,
+  type MapStatOffer,
+  type MapStatPickerRefs,
+} from "../ui/mapStatPicker";
+import {
   showDeathScreen,
   hideDeathScreen,
   type DeathScreenRefs,
@@ -127,6 +132,8 @@ export class GameScene extends Phaser.Scene {
   projLastPos: { [id: string]: { x: number; y: number } } = {};
 
   private statsHud!: StatsHudRefs;
+  private mapStatPicker!: MapStatPickerRefs;
+  private pendingMapStatOffers: MapStatOffer[] = [];
   private xpBar!: XpBarRefs;
   private mapInfo!: MapInfoRefs;
   private groundCards!: GroundCardsState;
@@ -358,6 +365,7 @@ export class GameScene extends Phaser.Scene {
       () => (this.room?.metadata?.modifiers as any[]) ?? [],
     );
     const confirmPopup = createConfirmPopup(this);
+    this.mapStatPicker = createMapStatPicker(this);
     this.charScreen = createCharacterScreen({
       scene: this,
       confirmPopup,
@@ -890,6 +898,29 @@ export class GameScene extends Phaser.Scene {
 
     (this.room as any).onMessage("mapTransition", (nextMapId: string) => {
       this.performMapSwap(nextMapId);
+    });
+    (this.room as any).onMessage(
+      "mapStatOffer",
+      (msg: { tier: number; offers: MapStatOffer[]; playerCount: number }) => {
+        this.pendingMapStatOffers = msg.offers ?? [];
+        this.mapStatPicker.show(msg.tier ?? 1, this.pendingMapStatOffers, {
+          onCancel: () => {
+            // Close-only: this player steps out of the choice.
+            // Others can still pick. No message to server.
+          },
+          onNoMods: () => {
+            if (!this.room) return;
+            this.room.send(20, { index: -1 });
+          },
+          onChoose: (i) => {
+            if (!this.room) return;
+            this.room.send(20, { index: i });
+          },
+        });
+      },
+    );
+    (this.room as any).onMessage("mapStatPicked", (_msg: any) => {
+      this.mapStatPicker.hide();
     });
   }
 
