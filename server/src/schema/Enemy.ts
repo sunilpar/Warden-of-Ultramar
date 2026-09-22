@@ -289,10 +289,21 @@ export class Enemy extends Schema {
     return 1 + this.sumModValues("inc_atk_damage", 0.03);
   }
 
-  /** Radius multiplier (unique: wide_sweep -> 2x radius / 0.5x damage). */
+  /**
+   * Radius multiplier (inc_aoe rolled values * unique wide_sweep 2x).
+   * Mirrors Player.slotRadiusMult so enemy cast radii scale the same way.
+   */
   cardRadiusMult(skill: SkillId): number {
     if (!this.hasCardFor(skill)) return 1;
-    return this.card!.modIds.includes("wide_sweep") ? 2.0 : 1;
+    let mult = 1 + this.sumModValues("inc_aoe", 0);
+    if (this.card!.modIds.includes("wide_sweep")) mult *= 2.0;
+    return mult;
+  }
+
+  /** Additive defence bonus from this enemy's card (sums inc_defence). */
+  cardDefenceBonus(skill: SkillId): number {
+    if (!this.hasCardFor(skill)) return 0;
+    return this.sumModValues("inc_defence", 0);
   }
 
   /** Damage multiplier from the unique wide_sweep (0.5 when present). */
@@ -408,10 +419,12 @@ export class Enemy extends Schema {
     if (Date.now() < this.invincibleUntil) return 0;
     // Defence reduces incoming damage. Crits bypass only 50% of defence.
     // Shock reduces defence by 20% (can go negative = bonus damage).
+    // Card bonus (inc_defence) adds on top, capped at 0.95.
     const isShocked = Date.now() < this.shockUntil;
     const shockMod = isShocked ? -0.2 : 0.0;
+    const baseDefence = Math.min(0.95, this.defence + this.cardDefenceBonus(sourceSkillId!));
     const effectiveDefence =
-      (isCrit ? this.defence * 0.5 : this.defence) + shockMod;
+      (isCrit ? baseDefence * 0.5 : baseDefence) + shockMod;
     const mitigated = rawDamage * (1.0 - effectiveDefence);
     let dmg = mitigated * this.incomingDamageMultiplier;
     let shieldAbsorbed = 0;

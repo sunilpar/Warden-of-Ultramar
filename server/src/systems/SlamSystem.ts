@@ -8,7 +8,13 @@
  */
 import { RoomState } from "../schema/RoomState";
 import { Slam, type SlamFaction } from "../schema/Slam";
-import { SLAM_DEF, applyCrit, computeSkillDamage } from "../config/skillDefs";
+import {
+  SLAM_DEF,
+  applyCrit,
+  computeSkillDamage,
+  getSlamHalfWidth,
+  getSlamHalfHeight,
+} from "../config/skillDefs";
 import type { CollisionResolver } from "./EnemySystem";
 
 export class SlamSystem {
@@ -65,6 +71,7 @@ export class SlamSystem {
     casterDamageMultiplier: number = 1.0,
     critRate: number = 0,
     critDamage: number = 1.5,
+    cardRadiusMult: number = 1,
   ): boolean {
     const range = SLAM_DEF.range(skillLevel);
     const vx = Math.cos(angle) * SLAM_DEF.speed;
@@ -78,6 +85,9 @@ export class SlamSystem {
     slam.vy = vy;
     slam.angle = angle;
     slam.level = skillLevel;
+    // inc_aoe scales the rectangular hitbox multiplicatively.
+    slam.halfWidth = Math.round(getSlamHalfWidth(skillLevel) * cardRadiusMult);
+    slam.halfHeight = Math.round(getSlamHalfHeight(skillLevel) * cardRadiusMult);
     slam.faction = faction;
     slam.ownerId = ownerId;
     slam.remainingRange = range;

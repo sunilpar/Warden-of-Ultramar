@@ -116,6 +116,9 @@ export class EnemySystem {
     this.pendingSlams = this.pendingSlams.filter((s) => s.castAt > now);
     for (const s of ready) {
       if (this.slamSystem) {
+        const enemy = this.state.enemies.get(s.ownerId);
+        // Enemies with no card / no slam card get radiusMult=1.
+        const radiusMult = enemy ? enemy.cardRadiusMult("slam") : 1;
         this.slamSystem.castSlam(
           s.ownerId,
           "enemy",
@@ -127,6 +130,7 @@ export class EnemySystem {
           s.damageMultiplier,
           s.critRate,
           s.critDamage,
+          radiusMult,
         );
       }
     }

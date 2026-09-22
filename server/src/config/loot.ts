@@ -20,6 +20,64 @@
 
 import { type SkillId } from "./skillDefs";
 
+/**
+ * Card type categories. A skill declares which categories it belongs to;
+ * a mod declares which categories it is eligible to roll on. A mod rolls on
+ * a card when its categories overlap with the card's skill categories
+ * (or when the mod is "universal").
+ *
+ * - "damage"   : skill deals damage (bolter, pulse, claw, shock)
+ * - "support"  : skill provides utility (dash, vortex, heal, shield)
+ * - "aoe"      : skill has a scalable radius (slam, heal @ L6+)
+ * - "universal": mod may roll on any skill (currently cooldown reduction)
+ *
+ * Heal is special-cased: its "aoe" tag is only honored at L6+ because the
+ * skill has zero radius before then. The eligibility helper drops the
+ * "aoe" category from heal cards below L6.
+ */
+export type SkillCategory = "damage" | "support" | "aoe" | "universal";
+
+/** Categories each skill belongs to. Used to filter the mod pool per drop.
+ *  `shield` is a passive slot (not a card-cast skill) and never rolls mods
+ *  from the generic pools; inc_shield_amount targets it explicitly via the
+ *  appliesTo skill-list, not via categories. */
+export const SKILL_CATEGORIES: Record<SkillId, SkillCategory[]> = {
+  bolter: ["damage"],
+  pulse:  ["damage"],
+  claw:   ["damage"],
+  shock:  ["damage"],
+  slam:   ["damage", "aoe"],
+  dash:   ["support"],
+  vortex: ["support"],
+  heal:   ["support", "aoe"],
+  shield: ["support"],
+};
+
+/**
+ * Returns the categories a card of (skill, level) is eligible for.
+ * Heal at L1-5 has zero radius, so it is treated as support-only.
+ */
+export function eligibleCategories(skill: SkillId, level: number): SkillCategory[] {
+  if (skill === "heal" && level < 6) {
+    return ["support"];
+  }
+  return SKILL_CATEGORIES[skill];
+}
+
+/** True iff `mod` is allowed to roll on a card of (skill, level). */
+export function modEligibleForSkill(
+  mod: { appliesTo: SkillId[]; categories: SkillCategory[] },
+  skill: SkillId,
+  level: number,
+): boolean {
+  // Explicit skill list (uniques, shield-only) takes precedence.
+  if (mod.appliesTo.length > 0) {
+    return mod.appliesTo.includes(skill);
+  }
+  const cardCats = eligibleCategories(skill, level);
+  return mod.categories.some((c) => cardCats.includes(c));
+}
+
 export type ModSlot = "prefix" | "suffix" | "unique";
 export type Rarity =
   | "common"
@@ -34,19 +92,22 @@ export interface CardModDef {
   /** Display name (client tooltip). */
   name: string;
   slot: ModSlot;
-  /** Skills this mod may roll on. Empty = any skill. */
+  /** Skills this mod may roll on (skill-list filter, used for uniques / shield-only). Empty = use `categories`. */
   appliesTo: SkillId[];
+  /** Skill-type categories this mod is eligible for. Empty + non-empty appliesTo = skill-list-only. */
+  categories: SkillCategory[];
   /** Tier (future tuning; unused for now). */
   tier: number;
 }
 
-/** Prefix pool (offensive): crit rate / crit damage. */
+/** Prefix pool (offensive): crit rate / crit damage. Damage-only. */
 export const PREFIX_POOL: CardModDef[] = [
   {
     id: "inc_crit_rate",
     name: "Increased Crit Rate",
     slot: "prefix",
     appliesTo: [],
+    categories: ["damage"],
     tier: 1,
   },
   {
@@ -54,17 +115,27 @@ export const PREFIX_POOL: CardModDef[] = [
     name: "Increased Crit Damage",
     slot: "prefix",
     appliesTo: [],
+    categories: ["damage"],
     tier: 1,
   },
 ];
 
-/** Suffix pool (defensive/utility): attack damage / shield amount. */
+/**
+ * Suffix pool (defensive/utility): damage / cooldown / shield / aoe / defence.
+ * Categories drive eligibility:
+ *   - inc_atk_damage   : damage
+ *   - inc_cooldown     : universal (any card)
+ *   - inc_shield_amount: shield only (skill-list filter, appliesTo)
+ *   - inc_aoe          : aoe (slam, heal L6+)
+ *   - inc_defence      : support (dash, vortex, heal)
+ */
 export const SUFFIX_POOL: CardModDef[] = [
   {
     id: "inc_atk_damage",
     name: "Increased Damage",
     slot: "suffix",
     appliesTo: [],
+    categories: ["damage"],
     tier: 1,
   },
   {
@@ -72,6 +143,7 @@ export const SUFFIX_POOL: CardModDef[] = [
     name: "Increased Cooldown Reduction",
     slot: "suffix",
     appliesTo: [],
+    categories: ["universal"],
     tier: 1,
   },
   {
@@ -79,6 +151,23 @@ export const SUFFIX_POOL: CardModDef[] = [
     name: "Increased Shield",
     slot: "suffix",
     appliesTo: ["shield"],
+    categories: [],
+    tier: 1,
+  },
+  {
+    id: "inc_aoe",
+    name: "Increased Area of Effect",
+    slot: "suffix",
+    appliesTo: [],
+    categories: ["aoe"],
+    tier: 1,
+  },
+  {
+    id: "inc_defence",
+    name: "Increased Defence",
+    slot: "suffix",
+    appliesTo: [],
+    categories: ["support"],
     tier: 1,
   },
 ];
@@ -90,6 +179,7 @@ export const UNIQUE_POOL: CardModDef[] = [
     name: "Wide Sweep",
     slot: "unique",
     appliesTo: ["pulse", "vortex"],
+    categories: [],
     tier: 1,
   },
 ];

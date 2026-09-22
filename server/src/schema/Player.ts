@@ -357,10 +357,12 @@ export class Player extends Schema {
     if (Date.now() < this.invincibleUntil) return 0;
     // Defence reduces incoming damage. Crits bypass only 50% of defence.
     // Shock reduces defence by 20% (can go negative = bonus damage).
+    // Card bonus (inc_defence) adds on top of the base defence, capped at 0.95.
     const isShocked = Date.now() < this.shockUntil;
     const shockMod = isShocked ? -0.2 : 0.0;
+    const baseDefence = Math.min(0.95, this.defence + this.cardDefenceBonus());
     const effectiveDefence =
-      (isCrit ? this.defence * 0.5 : this.defence) + shockMod;
+      (isCrit ? baseDefence * 0.5 : baseDefence) + shockMod;
     const mitigated = rawDamage * (1.0 - effectiveDefence);
     let dmg = mitigated * this.incomingDamageMultiplier;
     let shielded = false;
@@ -672,11 +674,27 @@ export class Player extends Schema {
     return Math.min(0.6, this.sumModValues(c, "inc_cooldown", 0));
   }
 
-  /** Radius multiplier from the card in slot i (unique wide_sweep -> 2x). */
+  /**
+   * Radius multiplier from the card in slot i.
+   * Combines: inc_aoe rolled values (multiplicative) + unique wide_sweep (2x).
+   * A card with inc_aoe v=0.20 AND wide_sweep returns 1.20 * 2.0 = 2.4x.
+   */
   slotRadiusMult(i: number): number {
     const c = this.slotCard(i);
     if (!c) return 1;
-    return c.modIds.includes("wide_sweep") ? 2.0 : 1;
+    let mult = 1 + this.sumModValues(c, "inc_aoe", 0);
+    if (c.modIds.includes("wide_sweep")) mult *= 2.0;
+    return mult;
+  }
+
+  /** Additive defence bonus from ALL equipped cards (sums inc_defence). */
+  cardDefenceBonus(): number {
+    let bonus = 0;
+    for (const card of this.equippedSlots) {
+      if (!card || !card.skill) continue;
+      bonus += this.sumModValues(card, "inc_defence", 0);
+    }
+    return bonus;
   }
 
   /** Damage multiplier from the unique wide_sweep in slot i (0.5 when present). */

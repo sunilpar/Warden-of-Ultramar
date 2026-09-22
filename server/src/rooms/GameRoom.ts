@@ -655,6 +655,7 @@ export class GameRoom extends Room {
           skillCritRate("slam", level, player.critRate) +
             player.slotCritRateBonus(slot),
           player.critDamage + player.slotCritDamageBonus(slot),
+          player.slotRadiusMult(slot),
         );
         player.startSlotCooldown(slot, SKILL_DEFS.slam.cooldown);
       } else if (skill === "pulse") {

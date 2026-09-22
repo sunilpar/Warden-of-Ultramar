@@ -311,7 +311,10 @@ export class LootSystem {
    *   inc_crit_rate    -> critRate    += v
    *   inc_crit_damage  -> critDamage  += v
    *   inc_atk_damage   -> damageMult  *= (1 + v)
-   *   inc_cooldown     -> ignored here (handled in Player.cardCooldownReduction)
+   *   inc_aoe          -> radiusMult  *= (1 + v)
+   *   inc_cooldown     -> ignored here (handled in Player.slotCooldownReduction)
+   *   inc_defence      -> ignored here (handled in Player.cardDefenceBonus)
+   *   inc_shield_amount-> ignored here (handled in Player.cardShieldBonus)
    *   wide_sweep       -> fixed unique: radiusMult *= 2, damageMult *= 0.5
    */
   applyCardMods(card: CardInstance | null, skill: SkillId): CardStats {

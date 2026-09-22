@@ -86,6 +86,24 @@ export const MOD_TIER_RANGES: Record<string, ModTierRanges> = {
     4: { min: 220, max: 320 },
     5: { min: 320, max: 450 },
   },
+  // Increased area of effect (fraction). Applied as a radius multiplier at
+  // cast time (1 + v). Rolls on slam and heal L6+.
+  inc_aoe: {
+    1: { min: 0.01, max: 0.05 },
+    2: { min: 0.05, max: 0.10 },
+    3: { min: 0.10, max: 0.20 },
+    4: { min: 0.20, max: 0.30 },
+    5: { min: 0.30, max: 0.40 },
+  },
+  // Increased defence (additive damage-reduction fraction). Added on top of
+  // the player's base defence in takeDamage(), capped at 0.95.
+  inc_defence: {
+    1: { min: 0.01, max: 0.03 },
+    2: { min: 0.03, max: 0.06 },
+    3: { min: 0.06, max: 0.12 },
+    4: { min: 0.12, max: 0.18 },
+    5: { min: 0.18, max: 0.25 },
+  },
 };
 
 /** Unique mods are tier-less (fixed effects) — they simply skip ranges. */

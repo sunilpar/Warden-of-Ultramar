@@ -22,7 +22,9 @@ export type CardModId =
   | "inc_atk_damage"
   | "inc_cooldown"
   | "inc_shield_amount"
-  | "wide_sweep";
+  | "wide_sweep"
+  | "inc_aoe"
+  | "inc_defence";
 
 export type CardModKind = "percent" | "flat" | "composite";
 
@@ -41,6 +43,8 @@ export const CARD_MOD_DISPLAY: Record<CardModId, CardModDisplay> = {
   inc_cooldown: { id: "inc_cooldown", label: "Cooldown Reduction", color: "#4da6ff", kind: "percent", fallbackValue: 0.03 },
   inc_shield_amount: { id: "inc_shield_amount", label: "Shield", color: "#33b5ff", kind: "flat", fallbackValue: 60 },
   wide_sweep: { id: "wide_sweep", label: "2x Radius, 1/2 Damage", color: "#b266ff", kind: "composite", fallbackValue: 0 },
+  inc_aoe: { id: "inc_aoe", label: "Area of Effect", color: "#88ddff", kind: "percent", fallbackValue: 0.03 },
+  inc_defence: { id: "inc_defence", label: "Defence", color: "#88aaff", kind: "percent", fallbackValue: 0.02 },
 };
 
 /** Format a single mod line using a mod's display entry + its rolled value. */
