@@ -68,6 +68,7 @@ import {
   type MapStatOffer,
   type MapStatPickerRefs,
 } from "../ui/mapStatPicker";
+import { createEliteIndicator } from "../ui/hud/eliteIndicator";
 import {
   showDeathScreen,
   hideDeathScreen,
@@ -164,6 +165,8 @@ export class GameScene extends Phaser.Scene {
   private spawnCountdownLastSec = -1;
   private eliteEnemyId: string | null = null;
   private lastEliteAlive = false;
+  private eliteIndicator: ReturnType<typeof createEliteIndicator> | null = null;
+  private _lastEliteDiag: string | null = null;
   private wasDead = false;
   private slotsSyncedOnce = false;
   private lastKnownXp = -1;
@@ -252,6 +255,7 @@ export class GameScene extends Phaser.Scene {
     this.spawnCountdownToast = null;
     this.spawnCountdownLastSec = -1;
     this.eliteEnemyId = null;
+    this.eliteIndicator?.setVisible(false);
     this.lastEliteAlive = false;
     this.lastKnownXp = -1;
     this.lastKnownLevel = -1;
@@ -367,6 +371,11 @@ export class GameScene extends Phaser.Scene {
       () => GameScene.MAP_CONFIGS[this.mapId]?.mapInfoKey ?? "game_room",
       () => (this.room?.metadata?.modifiers as any[]) ?? [],
       () => this.pullActiveMapStats(),
+    );
+    this.eliteIndicator = createEliteIndicator(
+      this,
+      () => !!(this.room as any)?.state?.eliteAlive,
+      () => this.getEliteWorldPos(),
     );
     const confirmPopup = createConfirmPopup(this);
     this.mapStatPicker = createMapStatPicker(this);
@@ -703,7 +712,10 @@ export class GameScene extends Phaser.Scene {
       const dx = enemy?.x ?? this.enemyLastPos[enemyId]?.x ?? 0;
       const dy = enemy?.y ?? this.enemyLastPos[enemyId]?.y ?? 0;
       spawnBloodSplat(this, dx, dy);
-      if (enemyId === this.eliteEnemyId) this.eliteEnemyId = null;
+      if (enemyId === this.eliteEnemyId) {
+        this.eliteEnemyId = null;
+        this.eliteIndicator?.setVisible(false);
+      }
       const entity = this.enemyEntities[enemyId];
       if (entity) {
         entity.destroy();
@@ -1610,6 +1622,33 @@ export class GameScene extends Phaser.Scene {
         eliteAlive ? "#ffd700" : "#66ff66",
       );
     }
+    this.eliteIndicator?.update(this.cameras.main);
+  }
+
+  /** Read the elite enemy's current world position from the synced state. */
+  private getEliteWorldPos(): { x: number; y: number } | null {
+    if (!this.eliteEnemyId) {
+      if (this._lastEliteDiag !== 'no-id') {
+        console.log('[ELITE_INDICATOR] no eliteEnemyId yet');
+        this._lastEliteDiag = 'no-id';
+      }
+      return null;
+    }
+    const enemies = (this.room as any)?.state?.enemies;
+    if (!enemies) return null;
+    const e = enemies.get ? enemies.get(this.eliteEnemyId) : enemies[this.eliteEnemyId];
+    if (!e) {
+      if (this._lastEliteDiag !== 'no-entity') {
+        console.log('[ELITE_INDICATOR] eliteEnemyId set but entity missing:', this.eliteEnemyId);
+        this._lastEliteDiag = 'no-entity';
+      }
+      return null;
+    }
+    if (this._lastEliteDiag !== 'ok') {
+      console.log('[ELITE_INDICATOR] tracking elite', this.eliteEnemyId, 'at', e.x, e.y);
+      this._lastEliteDiag = 'ok';
+    }
+    return { x: e.x, y: e.y };
   }
 
   // ---- Layered map + debug hitbox rendering ----
