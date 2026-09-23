@@ -12,6 +12,7 @@ import {
   type SkillId,
 } from "../../config/skillDefs";
 import { buildCardTooltipPanel } from "../cardTooltip";
+import { EFFECT_LABEL, fmtValue, type ActiveMapStatView } from "../mapStatPicker";
 import { buildOutlineFrame } from "../uiOutline";
 import type { HudCardObj, SlotCard } from "../hud/statsHud";
 
@@ -30,6 +31,7 @@ export interface InventoryScreenRefs {
   slotCenter: (i: number) => { x: number; y: number };
   hideTooltip: () => void;
   close: () => void;
+  refreshMapStats: () => void;
   getData: () => (SlotCard | null)[];
 }
 
@@ -42,6 +44,8 @@ export interface InventoryScreenCallbacks {
   sendInvSwap: (from: number, to: number) => void;
   sendInvToSlot: (inv: number, slot: number) => void;
   sendInvDrop: (inv: number) => void;
+  /** Active map mods (picked at map exits) rendered below the grid. */
+  getMapStats?: () => ActiveMapStatView[];
   isDragFree: () => boolean;
   onDragStart?: (invSlot: number) => void;
   onDragEnd?: (pointer: Phaser.Input.Pointer) => void;
@@ -121,6 +125,64 @@ export function createInventoryScreen(cb: InventoryScreenCallbacks): InventorySc
     }
   }
   container.add(cellG);
+
+  // ---- Active map mods (picked at map exits), below the card grid ----
+  const modsTop = shelfTop + gridH + 20;
+  container.add(
+    scene.add
+      .text(px + 20, modsTop, "ACTIVE MAP MODS", {
+        color: "#ffd700",
+        fontSize: "13px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0),
+  );
+  let modLines: Phaser.GameObjects.Text[] = [];
+  const refreshMapStats = () => {
+    for (const l of modLines) l.destroy();
+    modLines = [];
+    const stats = cb.getMapStats ? cb.getMapStats() : [];
+    let y = modsTop + 20;
+    if (stats.length === 0) {
+      const t = scene.add
+        .text(px + 20, y, "None", {
+          color: "#888888",
+          fontSize: "11px",
+          fontFamily: "monospace",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      container.add(t);
+      modLines.push(t);
+      return;
+    }
+    for (const s of stats) {
+      const good = `+${fmtValue(s.goodEffect, s.goodValue)} ${EFFECT_LABEL[s.goodEffect] ?? s.goodEffect}`;
+      const bad = `+${fmtValue(s.badEffect, s.badValue)} enemy ${EFFECT_LABEL[s.badEffect] ?? s.badEffect}`;
+      const line = `${s.goodName} but ${s.badName}: ${good} / ${bad} (${s.durationMaps} map${s.durationMaps === 1 ? "" : "s"} left)`;
+      const t = scene.add
+        .text(px + 20, y, "● " + line, {
+          color: "#88ff88",
+          fontSize: "11px",
+          fontFamily: "monospace",
+          wordWrap: { width: PANEL_W - 40 },
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      container.add(t);
+      modLines.push(t);
+      y += t.height + 4;
+    }
+  };
+
 
   let data: (SlotCard | null)[] = Array(20).fill(null);
   let cards: (HudCardObj | null)[] = Array(20).fill(null);
@@ -255,6 +317,7 @@ export function createInventoryScreen(cb: InventoryScreenCallbacks): InventorySc
   let visible = false;
   const open = () => {
     syncFromState();
+    refreshMapStats();
     container.setPosition(offX, 0).setVisible(true);
     scene.tweens.add({
       targets: container,
@@ -313,6 +376,7 @@ export function createInventoryScreen(cb: InventoryScreenCallbacks): InventorySc
     slotCenter,
     hideTooltip,
     close,
+    refreshMapStats,
     getData: () => data,
   };
 }

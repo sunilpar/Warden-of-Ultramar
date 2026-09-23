@@ -270,6 +270,9 @@ export class GameScene extends Phaser.Scene {
     });
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       if (!this.currentPlayer || !this.room) return;
+      // Map-stat picker is open: block skill casting so clicks on the
+      // mod rows / buttons don't also fire a cast underneath.
+      if (this.mapStatPicker?.root?.visible) return;
       if (this.dragCard || this.invDrag || this.groundCards.grab) return;
       if (pointerOverGroundCard(this.groundCards, pointer)) return;
       if (this.pointerOverHudCard(pointer)) return;
@@ -363,6 +366,7 @@ export class GameScene extends Phaser.Scene {
       this,
       () => GameScene.MAP_CONFIGS[this.mapId]?.mapInfoKey ?? "game_room",
       () => (this.room?.metadata?.modifiers as any[]) ?? [],
+      () => this.pullActiveMapStats(),
     );
     const confirmPopup = createConfirmPopup(this);
     this.mapStatPicker = createMapStatPicker(this);
@@ -384,6 +388,7 @@ export class GameScene extends Phaser.Scene {
       slotW: this.statsHud.cardSlots[0].width,
       slotH: this.statsHud.cardSlots[0].height,
       pullState: () => this.pullInventoryState(),
+      getMapStats: () => this.pullActiveMapStats(),
       sendSlotToInv: (slot, inv, empty) =>
         this.room?.send(empty ? 14 : 19, { slot, inv }),
       sendInvSwap: (from, to) => this.room?.send(18, { from, to }),
@@ -465,6 +470,28 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.bindRoomStateListeners();
+    // Rebuild the map-info tooltip now that live room state exists
+    // (covers mid-session joins) and whenever active map mods change.
+    rebuildMapInfoTooltip(this, this.mapInfo);
+    console.log('[MAPSTAT] registered listeners, current state:',
+      (this.room as any)?.state?.activeMapStats
+        ? Array.from((this.room as any).state.activeMapStats.entries())
+        : 'no stats field');
+    {
+      const cb2 = Callbacks.get(this.room as any) as any;
+      const refreshMapModUI = () => {
+        const cur = this.pullActiveMapStats();
+        console.log(`[MAPSTAT] refresh triggered, ${cur.length} active:`,
+          cur.map(s => s.goodName + "+" + s.badName + "(" + s.durationMaps + ")").join(", "));
+        rebuildMapInfoTooltip(this, this.mapInfo);
+        this.invScreen?.refreshMapStats();
+      };
+      cb2.onAdd("activeMapStats", refreshMapModUI);
+      cb2.onRemove("activeMapStats", refreshMapModUI);
+      // durationMaps decrements each map - keep the 'maps left'
+      // counters in the tooltip/inventory accurate.
+      cb2.onChange("activeMapStats", refreshMapModUI);
+    }
 
     if (isFadeIn && cover) {
       this.cameras.main.fadeIn(400, 0, 0, 0);
@@ -490,6 +517,15 @@ export class GameScene extends Phaser.Scene {
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
     }
+  }
+
+  /** Active map mods synced from the room (inventory + map tooltip). */
+  pullActiveMapStats(): any[] {
+    const stats = (this.room as any)?.state?.activeMapStats;
+    if (!stats) return [];
+    const out: any[] = [];
+    stats.forEach((s: any) => out.push(s));
+    return out;
   }
 
   bindRoomStateListeners() {
@@ -920,6 +956,11 @@ export class GameScene extends Phaser.Scene {
       },
     );
     (this.room as any).onMessage("mapStatPicked", (_msg: any) => {
+      this.mapStatPicker.hide();
+    });
+    (this.room as any).onMessage("mapStatCancelled", (_msg: any) => {
+      // Server reset the picker (someone stepped off the exit). Close
+      // the local popup so a future re-entry can re-open it.
       this.mapStatPicker.hide();
     });
   }

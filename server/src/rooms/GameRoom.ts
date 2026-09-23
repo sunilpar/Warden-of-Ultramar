@@ -434,6 +434,19 @@ export class GameRoom extends Room {
       if (inside) onExit++;
     });
     if (alive === 0) return;
+
+    // ---- If the picker is currently open but at least one alive player
+    //      has stepped OFF the exit (e.g. after clicking Cancel or No
+    //      Mods), reset the picker so a future re-entry can re-open it.
+    //      Without this, Cancel leaves the room stuck on the exit
+    //      forever. ----
+    if (this.mapStatPickersOpen > 0 && onExit < alive) {
+      this.mapStatPickersOpen = 0;
+      this.currentMapStatOffers.clear();
+      this.broadcast("mapStatCancelled", {});
+      return;
+    }
+
     if (onExit < alive) return;
 
     // ---- Everyone is on the exit: open the map-stat picker. The first
@@ -513,7 +526,13 @@ export class GameRoom extends Room {
       stat.goodValue = offer.goodValue;
       stat.badValue = offer.badValue;
       stat.durationMaps = offer.durationMaps;
-      this.state.activeMapStats.set(`stat_${this.state.activeMapStats.size + 1}`, stat);
+      // Pick a key that won't collide if an earlier stat just expired.
+      // We use Date.now() + a random suffix so two picks in the same
+      // tick don't overwrite each other, and post-expiration picks
+      // never reuse a stale id.
+      const statKey = `stat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      this.state.activeMapStats.set(statKey, stat);
+      console.log(`[MAPSTAT] Added ${statKey}: ${stat.goodName}+${stat.badName} dur=${stat.durationMaps}`);
       this.broadcast("mapStatPicked", {
         pickerId: client.sessionId,
         defId: offer.defId,

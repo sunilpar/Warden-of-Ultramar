@@ -6,7 +6,7 @@
  *
  *   [ Cancel ]       - close this player's popup only (others can pick)
  *   [ No Mods ]      - confirm -> transition everyone with no stat
- *   [ Choose Mod ]   - confirm -> transition with the selected mod
+ *   [ Continue with Mod ]   - confirm -> transition with the selected mod
  *
  * Each row is clickable to select it; only one is selected at a time.
  * Selected row is highlighted.
@@ -21,6 +21,17 @@ import Phaser from "phaser";
 export interface MapStatOffer {
   index: number;
   defId: string;
+  goodName: string;
+  badName: string;
+  goodEffect: string;
+  badEffect: string;
+  goodValue: number;
+  badValue: number;
+  durationMaps: number;
+}
+
+/** Minimal view of one ACTIVE map mod (from room.state.activeMapStats). */
+export interface ActiveMapStatView {
   goodName: string;
   badName: string;
   goodEffect: string;
@@ -51,7 +62,7 @@ export interface MapStatPickerRefs {
   hide: () => void;
 }
 
-const EFFECT_LABEL: Record<string, string> = {
+export const EFFECT_LABEL: Record<string, string> = {
   damage_mult: "Damage",
   crit_rate: "Crit Rate",
   crit_damage: "Crit Damage",
@@ -67,7 +78,7 @@ function fmtPct(v: number): string {
   return `${Math.round(v * 100)}%`;
 }
 
-function fmtValue(effect: string, value: number): string {
+export function fmtValue(effect: string, value: number): string {
   if (effect === "rarity_bias") return `+${value.toFixed(0)}`;
   return fmtPct(value);
 }
@@ -90,24 +101,27 @@ function showConfirm(
 ): void {
   const W = scene.cameras.main.width;
   const H = scene.cameras.main.height;
-  const root = scene.add.container(0, 0).setDepth(800).setScrollFactor(0);
-  const overlay = scene.add
-    .rectangle(0, 0, W, H, 0x000000, 0.7)
-    .setOrigin(0, 0)
+  // Build everything INSIDE one container at depth 900 so the popup
+  // always sits above the picker (depth 600) and any other UI.
+  const root = scene.add
+    .container(W / 2, H / 2)
+    .setDepth(900)
     .setScrollFactor(0);
-  const cW = 420;
-  const cH = 130;
-  const cx = Math.round((W - cW) / 2);
-  const cy = Math.round((H - cH) / 2);
+  const overlay = scene.add
+    .rectangle(0, 0, W * 2, H * 2, 0x000000, 0.7)
+    .setOrigin(0.5)
+    .setScrollFactor(0);
+  const cW = 460;
+  const cH = 160;
   const bg = scene.add.graphics().setScrollFactor(0);
   bg.fillStyle(0x12121e, 0.97);
-  bg.fillRoundedRect(cx, cy, cW, cH, 12);
+  bg.fillRoundedRect(-cW / 2, -cH / 2, cW, cH, 12);
   bg.lineStyle(2, 0xffe066, 1);
-  bg.strokeRoundedRect(cx, cy, cW, cH, 12);
+  bg.strokeRoundedRect(-cW / 2, -cH / 2, cW, cH, 12);
   const text = scene.add
-    .text(W / 2, cy + 18, message, {
+    .text(0, -cH / 2 + 18, message, {
       color: "#ffffff",
-      fontSize: "14px",
+      fontSize: "15px",
       fontFamily: "monospace",
       align: "center",
       wordWrap: { width: cW - 40 },
@@ -117,9 +131,9 @@ function showConfirm(
     .setOrigin(0.5, 0)
     .setScrollFactor(0);
   const yes = scene.add
-    .text(W / 2 - 60, cy + cH - 32, "[ YES ]", {
+    .text(-70, cH / 2 - 32, "[ YES ]", {
       color: "#66bb6a",
-      fontSize: "16px",
+      fontSize: "18px",
       fontFamily: "monospace",
       fontStyle: "bold",
       stroke: "#000000",
@@ -129,9 +143,9 @@ function showConfirm(
     .setScrollFactor(0)
     .setInteractive({ useHandCursor: true });
   const no = scene.add
-    .text(W / 2 + 60, cy + cH - 32, "[ NO ]", {
+    .text(70, cH / 2 - 32, "[ NO ]", {
       color: "#ef5350",
-      fontSize: "16px",
+      fontSize: "18px",
       fontFamily: "monospace",
       fontStyle: "bold",
       stroke: "#000000",
@@ -140,10 +154,26 @@ function showConfirm(
     .setOrigin(0.5)
     .setScrollFactor(0)
     .setInteractive({ useHandCursor: true });
-  root.add([overlay, bg, text, yes, no]);
+  // Invisible full-area hit so clicks outside the popup but inside the
+  // overlay do not fall through to the picker / scene underneath.
+  const overlayHit = scene.add
+    .rectangle(0, 0, W * 2, H * 2, 0x000000, 0)
+    .setOrigin(0.5)
+    .setScrollFactor(0)
+    .setInteractive();
+  root.add([overlayHit, overlay, bg, text, yes, no]);
+  // Pop-in animation so the popup is visually obvious.
+  root.setScale(0.6);
+  scene.tweens.add({
+    targets: root,
+    scale: 1,
+    duration: 140,
+    ease: "Back.easeOut",
+  });
   const close = () => {
     yes.removeAllListeners();
     no.removeAllListeners();
+    overlayHit.removeAllListeners();
     root.destroy();
   };
   yes.on("pointerdown", () => {
@@ -255,6 +285,7 @@ export function createMapStatPicker(scene: Phaser.Scene): MapStatPickerRefs {
     draw(false);
     const hit = scene.add
       .rectangle(x + btnW / 2, btnY + btnH / 2, btnW, btnH, 0x000000, 0)
+      .setOrigin(0.5)
       .setScrollFactor(0)
       .setInteractive({ useHandCursor: true });
     const text = scene.add
@@ -306,7 +337,7 @@ export function createMapStatPicker(scene: Phaser.Scene): MapStatPickerRefs {
   );
   const chooseBtn = makeButton(
     btnStartX + (btnW + btnGap) * 2,
-    "[ Choose Mod ]",
+    "[ Continue with Mod ]",
     "#66bb6a",
     () => {
       if (selectedIndex < 0) {
@@ -320,7 +351,7 @@ export function createMapStatPicker(scene: Phaser.Scene): MapStatPickerRefs {
       const { title: modTitle } = describeOffer(offer);
       showConfirm(
         scene,
-        `Are you sure you want to move further with the mod:\n"${modTitle}"?`,
+        `Are you sure you want to proceed further with\n${modTitle}?`,
         () => {
           const idx = selectedIndex;
           hide();
@@ -332,10 +363,39 @@ export function createMapStatPicker(scene: Phaser.Scene): MapStatPickerRefs {
 
   // ---- Selection state ----
   let selectedIndex: number = -1;
+  let hoverIndex: number = -1;
   let currentOffers: MapStatOffer[] = [];
-  // We re-render rows on selection change so we can highlight the
-  // chosen one. Keep references so we can destroy them when re-rendering.
+  // We re-render rows on selection/hover change so we can highlight the
+  // chosen / hovered row. Keep references so we can destroy them when
+  // re-rendering.
   const rowObjects: Phaser.GameObjects.GameObject[] = [];
+
+  /** Redraw only the bg + radio visuals of a single row (used for hover). */
+  const redrawRowVisuals = (
+    i: number,
+    bg: Phaser.GameObjects.Graphics,
+    radio: Phaser.GameObjects.Graphics,
+    titleText: Phaser.GameObjects.Text,
+  ) => {
+    const y = i * rowH;
+    const isSel = i === selectedIndex;
+    const isHover = i === hoverIndex;
+    // Background colour: selected = bright blue, hovered = mid blue,
+    // otherwise dark.
+    const bgFill = isSel ? 0x3a4b5f : isHover ? 0x22304a : 0x121824;
+    const bgStroke = isSel ? 0xffe066 : isHover ? 0x6a8aaa : 0x2a3a4a;
+    bg.clear();
+    bg.fillStyle(bgFill, 1);
+    bg.fillRoundedRect(4, y + 4, listW - 8, rowH - 8, 6);
+    bg.lineStyle(2, bgStroke, 1);
+    bg.strokeRoundedRect(4, y + 4, listW - 8, rowH - 8, 6);
+    radio.clear();
+    radio.fillStyle(isSel ? 0xffe066 : 0x000000, 1);
+    radio.fillCircle(28, y + rowH / 2, 9);
+    radio.lineStyle(2, 0xffe066, 1);
+    radio.strokeCircle(28, y + rowH / 2, 9);
+    titleText.setColor(isSel ? "#ffe066" : "#ffffff");
+  };
 
   const renderList = () => {
     // Clear old rows.
@@ -357,18 +417,7 @@ export function createMapStatPicker(scene: Phaser.Scene): MapStatPickerRefs {
 
       const isSel = i === selectedIndex;
       const bg = scene.add.graphics();
-      bg.fillStyle(isSel ? 0x3a4b5f : 0x121824, 1);
-      bg.fillRoundedRect(4, y + 4, listW - 8, rowH - 8, 6);
-      bg.lineStyle(2, isSel ? 0xffe066 : 0x2a3a4a, 1);
-      bg.strokeRoundedRect(4, y + 4, listW - 8, rowH - 8, 6);
-      list.add(bg);
-
       const radio = scene.add.graphics();
-      radio.fillStyle(isSel ? 0xffe066 : 0x000000, 1);
-      radio.fillCircle(28, y + rowH / 2, 9);
-      radio.lineStyle(2, 0xffe066, 1);
-      radio.strokeCircle(28, y + rowH / 2, 9);
-      list.add(radio);
 
       const titleText = scene.add
         .text(50, y + 10, t, {
@@ -380,8 +429,6 @@ export function createMapStatPicker(scene: Phaser.Scene): MapStatPickerRefs {
           strokeThickness: 3,
         })
         .setOrigin(0, 0);
-      list.add(titleText);
-
       const descText = scene.add
         .text(50, y + 34, d, {
           color: "#a8c0d8",
@@ -392,15 +439,57 @@ export function createMapStatPicker(scene: Phaser.Scene): MapStatPickerRefs {
           wordWrap: { width: listW - 60 },
         })
         .setOrigin(0, 0);
-      list.add(descText);
+
+      // Initial visuals (bg + radio drawn via the helper so they are
+      // consistent with the hover update path).
+      redrawRowVisuals(i, bg, radio, titleText);
+      // Render order: bg FIRST so it renders UNDER the text. Adding it
+      // after the text would paint the bg fill over the title/desc.
+      list.add([bg, titleText, descText, radio]);
 
       // Clickable hit area covering the whole row.
+      // NOTE: scrollFactor(0) is REQUIRED for input to work here. The
+      // game camera scrolls with the player, and Phaser 3.55 hit-tests
+      // container children using the child's OWN scrollFactor. Without
+      // this, the clickable area drifts off-screen with the camera and
+      // rows become unclickable (the buttons below already do this).
       const hit = scene.add
         .rectangle(listW / 2, y + rowH / 2, listW - 8, rowH - 8, 0x000000, 0)
+        .setOrigin(0.5)
+        .setScrollFactor(0)
         .setInteractive({ useHandCursor: true });
       hit.on("pointerdown", () => {
+        if (selectedIndex === i) return;
         selectedIndex = i;
-        renderList();
+        // Defer the row rebuild to the NEXT frame so the in-flight
+        // pointerdown/pointerup events complete against the original
+        // (still-alive) hit rectangle. Re-rendering synchronously
+        // destroys the row mid-click, which can cause some pointer
+        // event paths to drop the gesture entirely.
+        scene.time.delayedCall(0, () => {
+          if (root.visible) renderList();
+        });
+      });
+      // Hover feedback (no full re-render - just redraw the affected
+      // rows so the highlight follows the cursor smoothly).
+      hit.on("pointerover", () => {
+        if (hoverIndex === i) return;
+        const prev = hoverIndex;
+        hoverIndex = i;
+        if (prev >= 0 && rowObjects[prev * 5]) {
+          redrawRowVisuals(
+            prev,
+            rowObjects[prev * 5] as Phaser.GameObjects.Graphics,
+            rowObjects[prev * 5 + 1] as Phaser.GameObjects.Graphics,
+            rowObjects[prev * 5 + 2] as Phaser.GameObjects.Text,
+          );
+        }
+        redrawRowVisuals(i, bg, radio, titleText);
+      });
+      hit.on("pointerout", () => {
+        if (hoverIndex !== i) return;
+        hoverIndex = -1;
+        redrawRowVisuals(i, bg, radio, titleText);
       });
       list.add(hit);
       rowObjects.push(bg, radio, titleText, descText, hit);

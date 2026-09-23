@@ -3,18 +3,21 @@
  */
 import Phaser from "phaser";
 import { MAP_INFO } from "../../config/modifiers";
+import { EFFECT_LABEL, fmtValue, type ActiveMapStatView } from "../mapStatPicker";
 
 export interface MapInfoRefs {
   button: Phaser.GameObjects.Image;
   tooltip: Phaser.GameObjects.Container;
   getInfoKey: () => string;
   getModifiers: () => Array<{ id: string; title?: string; description?: string }>;
+  getMapStats: () => ActiveMapStatView[];
 }
 
 export function createMapInfoButton(
   scene: Phaser.Scene,
   getInfoKey: () => string,
   getModifiers: () => Array<{ id: string; title?: string; description?: string }>,
+  getMapStats: () => ActiveMapStatView[],
 ): MapInfoRefs {
   const W = scene.cameras.main.width;
   const ICON_SIZE = 40;
@@ -36,6 +39,7 @@ export function createMapInfoButton(
     tooltip,
     getInfoKey,
     getModifiers,
+    getMapStats,
   };
   buildTooltipContent(scene, refs);
   button.on("pointerover", () => tooltip.setVisible(true));
@@ -56,6 +60,11 @@ export function rebuildMapInfoTooltip(
       .setVisible(wasVisible)
       .setScrollFactor(0);
     refs.tooltip = fresh;
+    // Remove stale hover listeners first: this rebuild now runs on
+    // every activeMapStats add/remove, and re-binding without
+    // removing would stack duplicate listeners on the button.
+    refs.button.off("pointerover");
+    refs.button.off("pointerout");
     refs.button.on("pointerover", () => refs.tooltip.setVisible(true));
     refs.button.on("pointerout", () => refs.tooltip.setVisible(false));
   }
@@ -133,6 +142,46 @@ function buildTooltipContent(
           padding,
           tooltipY,
           "\u25cf " + (m.title ?? m.id) + (m.description ? " - " + m.description : ""),
+          {
+            color: "#88ff88",
+            fontSize: "11px",
+            fontFamily: "monospace",
+            wordWrap: { width: tooltipW - padding * 2 },
+            stroke: "#000000",
+            strokeThickness: 2,
+          },
+        )
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      refs.tooltip.add(t);
+      tooltipY += t.height + 2;
+    }
+  }
+  // ---- Active map mods (picked at map exits) ----
+  const stats = refs.getMapStats();
+  if (stats.length > 0) {
+    tooltipY += 6;
+    const statsHeader = scene.add
+      .text(padding, tooltipY, "Active Map Mods", {
+        color: "#ffd700",
+        fontSize: "12px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 2,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0);
+    refs.tooltip.add(statsHeader);
+    tooltipY += statsHeader.height + 4;
+    for (const s of stats) {
+      const good = `+${fmtValue(s.goodEffect, s.goodValue)} ${EFFECT_LABEL[s.goodEffect] ?? s.goodEffect}`;
+      const bad = `+${fmtValue(s.badEffect, s.badValue)} enemy ${EFFECT_LABEL[s.badEffect] ?? s.badEffect}`;
+      const t = scene.add
+        .text(
+          padding,
+          tooltipY,
+          `● ${s.goodName} but ${s.badName}: ${good} / ${bad} (${s.durationMaps} map${s.durationMaps === 1 ? "" : "s"})`,
           {
             color: "#88ff88",
             fontSize: "11px",
