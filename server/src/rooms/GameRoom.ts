@@ -5,7 +5,7 @@
  * of players). Maps are DATA (config/mapRegistry.ts): when this map's
  * elite is dead and ALL alive players reach the exit, the SAME room
  * swaps to the next map in place — connections and Player objects
- * (cards/XP/inventory) are never torn down. Rotation: map1 -> map1...
+ * (cards/XP/inventory) are never torn down. Rotation: map1 -> map2 -> map1...
  *
  * Handles:
  *   - Player join/leave
@@ -595,9 +595,9 @@ export class GameRoom extends Room {
       `[MAP] Exit picked ${modLabel} — transitioning ${this.mapId} -> ${nextMapId}`,
     );
 
-    // Transition XP reward (was client-driven message 5). Clearing a map
-    // awards 500 XP (previous behavior; map2's 1000 XP bonus removed).
-    const transitionXp = 500;
+    // Transition XP reward (was client-driven message 5). map2 -> map1
+    // awards 1000 XP, map1 -> map2 awards 500 XP (previous behavior).
+    const transitionXp = this.mapId === "map2" ? 1000 : 500;
     this.state.players.forEach((p) => {
       if (!p.isDead) p.addXp(transitionXp);
     });

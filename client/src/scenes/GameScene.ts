@@ -18,6 +18,7 @@ import { BACKEND_URL } from "../backend";
 
 import { LAYERED_MAP, resolveTileCollision } from "../maps/layeredMapData";
 import type { LayeredMapData } from "../maps/layeredMapData";
+import { LAYERED_MAP_2 } from "../maps/layeredMap2Data";
 import {
   type SkillId,
   asRarity,
@@ -221,6 +222,7 @@ export class GameScene extends Phaser.Scene {
     { mapData: LayeredMapData; mapInfoKey: string }
   > = {
     map1: { mapData: LAYERED_MAP, mapInfoKey: "game_room" },
+    map2: { mapData: LAYERED_MAP_2, mapInfoKey: "game_room_2" },
   };
 
   constructor(config: Phaser.Types.Scenes.SettingsConfig) {
@@ -951,9 +953,16 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    (this.room as any).onMessage("mapTransition", (nextMapId: string) => {
-      this.performMapSwap(nextMapId);
-    });
+    (this.room as any).onMessage(
+      "mapTransition",
+      (msg: { from?: string; to?: string } | string) => {
+        // Server sends { from, to }; fall back to the payload itself for
+        // backward compatibility with plain-string sends.
+        const nextMapId =
+          typeof msg === "string" ? msg : ((msg as any)?.to ?? "");
+        this.performMapSwap(nextMapId);
+      },
+    );
     (this.room as any).onMessage(
       "mapStatOffer",
       (msg: { tier: number; offers: MapStatOffer[]; playerCount: number }) => {
@@ -1815,6 +1824,33 @@ export class GameScene extends Phaser.Scene {
     this.deathScreen.container = showDeathScreen(
       this,
       () => {
+        if (this.mapId !== "map1") {
+          this.deathScreen = hideDeathScreen(this.deathScreen);
+          try {
+            this.room?.leave();
+          } catch (_e) {
+            /* ignore */
+          }
+          this.room = null;
+          for (const id in this.playerEntities) {
+            this.playerEntities[id]?.destroy();
+            delete this.playerEntities[id];
+          }
+          for (const id in this.enemyEntities) {
+            this.enemyEntities[id]?.destroy();
+            delete this.enemyEntities[id];
+          }
+          for (const id in this.projectileEntities) {
+            this.projectileEntities[id]?.destroy();
+            delete this.projectileEntities[id];
+          }
+          for (const id in this.clawEntities) {
+            this.clawEntities[id]?.destroy();
+            delete this.clawEntities[id];
+          }
+          this.scene.restart({ fadeIn: true });
+          return;
+        }
         if (this.room) this.room.send(4, {});
         this.slotCards = Array(5).fill(null);
         this.hudCards = Array(5).fill(null);

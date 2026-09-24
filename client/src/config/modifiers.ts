@@ -61,4 +61,8 @@ export const MAP_INFO: Record<string, { name: string; description: string }> = {
     name: "Sector 1: Outskirts",
     description: "The entrance to the hive. Tyranids and Orcks roam freely.",
   },
+  game_room_2: {
+    name: "Sector 2: Deep Hive",
+    description: "The tunnels deepen. Swift movement is afoot.",
+  },
 };

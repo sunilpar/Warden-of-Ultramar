@@ -8,7 +8,7 @@ import { GameRoom } from "./rooms/GameRoom";
 const server = defineServer({
   rooms: {
     // ONE room type = one game session. Maps rotate INSIDE the room
-    // (map1 -> map1 ...) — see config/mapRegistry.ts.
+        // (map1 -> map2 -> map1 ...) — see config/mapRegistry.ts.
     game_room: defineRoom(GameRoom),
   },
 
