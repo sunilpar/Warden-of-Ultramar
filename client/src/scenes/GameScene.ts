@@ -18,7 +18,6 @@ import { BACKEND_URL } from "../backend";
 
 import { LAYERED_MAP, resolveTileCollision } from "../maps/layeredMapData";
 import type { LayeredMapData } from "../maps/layeredMapData";
-import { LAYERED_MAP_2 } from "../maps/layeredMap2Data";
 import {
   type SkillId,
   asRarity,
@@ -222,7 +221,6 @@ export class GameScene extends Phaser.Scene {
     { mapData: LayeredMapData; mapInfoKey: string }
   > = {
     map1: { mapData: LAYERED_MAP, mapInfoKey: "game_room" },
-    map2: { mapData: LAYERED_MAP_2, mapInfoKey: "game_room_2" },
   };
 
   constructor(config: Phaser.Types.Scenes.SettingsConfig) {
@@ -420,7 +418,8 @@ export class GameScene extends Phaser.Scene {
       // has no card in HUD slot 0. Without it, beginGrab bails out and
       // ground-card pickup is silently disabled until slot 0 is filled.
       getSlotTemplate: () =>
-        this.hudCards[0] ?? ({
+        this.hudCards[0] ??
+        ({
           container: {
             width: this.statsHud.cardSlots[0].width,
             height: this.statsHud.cardSlots[0].height,
@@ -482,16 +481,24 @@ export class GameScene extends Phaser.Scene {
     // Rebuild the map-info tooltip now that live room state exists
     // (covers mid-session joins) and whenever active map mods change.
     rebuildMapInfoTooltip(this, this.mapInfo);
-    console.log('[MAPSTAT] registered listeners, current state:',
+    console.log(
+      "[MAPSTAT] registered listeners, current state:",
       (this.room as any)?.state?.activeMapStats
         ? Array.from((this.room as any).state.activeMapStats.entries())
-        : 'no stats field');
+        : "no stats field",
+    );
     {
       const cb2 = Callbacks.get(this.room as any) as any;
       const refreshMapModUI = () => {
         const cur = this.pullActiveMapStats();
-        console.log(`[MAPSTAT] refresh triggered, ${cur.length} active:`,
-          cur.map(s => s.goodName + "+" + s.badName + "(" + s.durationMaps + ")").join(", "));
+        console.log(
+          `[MAPSTAT] refresh triggered, ${cur.length} active:`,
+          cur
+            .map(
+              (s) => s.goodName + "+" + s.badName + "(" + s.durationMaps + ")",
+            )
+            .join(", "),
+        );
         rebuildMapInfoTooltip(this, this.mapInfo);
         this.invScreen?.refreshMapStats();
       };
@@ -1628,25 +1635,36 @@ export class GameScene extends Phaser.Scene {
   /** Read the elite enemy's current world position from the synced state. */
   private getEliteWorldPos(): { x: number; y: number } | null {
     if (!this.eliteEnemyId) {
-      if (this._lastEliteDiag !== 'no-id') {
-        console.log('[ELITE_INDICATOR] no eliteEnemyId yet');
-        this._lastEliteDiag = 'no-id';
+      if (this._lastEliteDiag !== "no-id") {
+        console.log("[ELITE_INDICATOR] no eliteEnemyId yet");
+        this._lastEliteDiag = "no-id";
       }
       return null;
     }
     const enemies = (this.room as any)?.state?.enemies;
     if (!enemies) return null;
-    const e = enemies.get ? enemies.get(this.eliteEnemyId) : enemies[this.eliteEnemyId];
+    const e = enemies.get
+      ? enemies.get(this.eliteEnemyId)
+      : enemies[this.eliteEnemyId];
     if (!e) {
-      if (this._lastEliteDiag !== 'no-entity') {
-        console.log('[ELITE_INDICATOR] eliteEnemyId set but entity missing:', this.eliteEnemyId);
-        this._lastEliteDiag = 'no-entity';
+      if (this._lastEliteDiag !== "no-entity") {
+        console.log(
+          "[ELITE_INDICATOR] eliteEnemyId set but entity missing:",
+          this.eliteEnemyId,
+        );
+        this._lastEliteDiag = "no-entity";
       }
       return null;
     }
-    if (this._lastEliteDiag !== 'ok') {
-      console.log('[ELITE_INDICATOR] tracking elite', this.eliteEnemyId, 'at', e.x, e.y);
-      this._lastEliteDiag = 'ok';
+    if (this._lastEliteDiag !== "ok") {
+      console.log(
+        "[ELITE_INDICATOR] tracking elite",
+        this.eliteEnemyId,
+        "at",
+        e.x,
+        e.y,
+      );
+      this._lastEliteDiag = "ok";
     }
     return { x: e.x, y: e.y };
   }
@@ -1797,33 +1815,6 @@ export class GameScene extends Phaser.Scene {
     this.deathScreen.container = showDeathScreen(
       this,
       () => {
-        if (this.mapId !== "map1") {
-          this.deathScreen = hideDeathScreen(this.deathScreen);
-          try {
-            this.room?.leave();
-          } catch (_e) {
-            /* ignore */
-          }
-          this.room = null;
-          for (const id in this.playerEntities) {
-            this.playerEntities[id]?.destroy();
-            delete this.playerEntities[id];
-          }
-          for (const id in this.enemyEntities) {
-            this.enemyEntities[id]?.destroy();
-            delete this.enemyEntities[id];
-          }
-          for (const id in this.projectileEntities) {
-            this.projectileEntities[id]?.destroy();
-            delete this.projectileEntities[id];
-          }
-          for (const id in this.clawEntities) {
-            this.clawEntities[id]?.destroy();
-            delete this.clawEntities[id];
-          }
-          this.scene.restart({ fadeIn: true });
-          return;
-        }
         if (this.room) this.room.send(4, {});
         this.slotCards = Array(5).fill(null);
         this.hudCards = Array(5).fill(null);

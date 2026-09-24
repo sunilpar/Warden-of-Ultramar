@@ -5,7 +5,7 @@
  * of players). Maps are DATA (config/mapRegistry.ts): when this map's
  * elite is dead and ALL alive players reach the exit, the SAME room
  * swaps to the next map in place — connections and Player objects
- * (cards/XP/inventory) are never torn down. Rotation: map1 -> map2 -> map1...
+ * (cards/XP/inventory) are never torn down. Rotation: map1 -> map1...
  *
  * Handles:
  *   - Player join/leave
@@ -235,11 +235,26 @@ export class GameRoom extends Room {
       // otherwise each map transition would compound them. We do
       // NOT touch player base stats (attack, baseMoveSpeed, etc.)
       // - those are level-derived and survive map transitions.
-      p.damageMultiplier = Math.max(0, p.damageMultiplier - this.appliedGoodSum(applied, "damage_mult"));
-      p.speedMultiplier = Math.max(0, p.speedMultiplier - this.appliedGoodSum(applied, "move_speed_mult"));
-      p.critRate = Math.max(0, p.critRate - this.appliedGoodSum(applied, "crit_rate"));
-      p.critDamage = Math.max(1, p.critDamage - this.appliedGoodSum(applied, "crit_damage"));
-      p.defence = Math.max(0, p.defence - this.appliedGoodSum(applied, "defence"));
+      p.damageMultiplier = Math.max(
+        0,
+        p.damageMultiplier - this.appliedGoodSum(applied, "damage_mult"),
+      );
+      p.speedMultiplier = Math.max(
+        0,
+        p.speedMultiplier - this.appliedGoodSum(applied, "move_speed_mult"),
+      );
+      p.critRate = Math.max(
+        0,
+        p.critRate - this.appliedGoodSum(applied, "crit_rate"),
+      );
+      p.critDamage = Math.max(
+        1,
+        p.critDamage - this.appliedGoodSum(applied, "crit_damage"),
+      );
+      p.defence = Math.max(
+        0,
+        p.defence - this.appliedGoodSum(applied, "defence"),
+      );
       // Reverse any prior maxHealth multiplicative bonus by dividing.
       // (applyActiveMapStatsToPlayer multiplies inside, so we mirror
       // that here so transitions never stack.)
@@ -348,10 +363,12 @@ export class GameRoom extends Room {
     // rarityBias: a flat additive weight shift toward better rarities.
     // We model it by shifting the rarities from 'rare' upward.
     const rb = getActiveRarityBias(applied);
-    const rarityBias: Partial<Record<
-      "common" | "uncommon" | "rare" | "epic" | "legendary" | "unique",
-      number
-    >> = {
+    const rarityBias: Partial<
+      Record<
+        "common" | "uncommon" | "rare" | "epic" | "legendary" | "unique",
+        number
+      >
+    > = {
       rare: rb,
       epic: rb * 0.7,
       legendary: rb * 0.4,
@@ -532,7 +549,9 @@ export class GameRoom extends Room {
       // never reuse a stale id.
       const statKey = `stat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       this.state.activeMapStats.set(statKey, stat);
-      console.log(`[MAPSTAT] Added ${statKey}: ${stat.goodName}+${stat.badName} dur=${stat.durationMaps}`);
+      console.log(
+        `[MAPSTAT] Added ${statKey}: ${stat.goodName}+${stat.badName} dur=${stat.durationMaps}`,
+      );
       this.broadcast("mapStatPicked", {
         pickerId: client.sessionId,
         defId: offer.defId,
@@ -576,9 +595,9 @@ export class GameRoom extends Room {
       `[MAP] Exit picked ${modLabel} — transitioning ${this.mapId} -> ${nextMapId}`,
     );
 
-    // Transition XP reward (was client-driven message 5). map2 -> map1
-    // awards 1000 XP, map1 -> map2 awards 500 XP (previous behavior).
-    const transitionXp = this.mapId === "map2" ? 1000 : 500;
+    // Transition XP reward (was client-driven message 5). Clearing a map
+    // awards 500 XP (previous behavior; map2's 1000 XP bonus removed).
+    const transitionXp = 500;
     this.state.players.forEach((p) => {
       if (!p.isDead) p.addXp(transitionXp);
     });

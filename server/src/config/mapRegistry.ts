@@ -9,13 +9,13 @@
  * objects (cards/XP/inventory) are never torn down. Per-map state
  * (enemies, ground cards, bookkeeping) resets.
  *
- * Rotation: map1 -> map2 -> map1 -> ... (see `next`).
+ * Rotation: map1 -> map1 -> ... (see `next`). map2 was removed; it will be
+ * re-added when a new map 2 JSON is provided.
  */
 import { LAYERED_MAP } from "./layeredMap";
-import { LAYERED_MAP_2 } from "./layeredMap2";
 import type { ModifierId } from "./modifiers";
 
-export type MapId = "map1" | "map2";
+export type MapId = "map1";
 
 /** The per-map data every room system needs to run a map. */
 export interface MapDef {
@@ -30,9 +30,8 @@ export interface MapDef {
 }
 
 /**
- * The subset of LayeredMapConfig/LayeredMap2Config the systems use.
- * Both layeredMap.ts and layeredMap2.ts must produce this shape
- * (exitPoint is added to both configs).
+ * The subset of LayeredMapConfig the systems use.
+ * layeredMap.ts must produce this shape (exitPoint included).
  */
 export interface LayeredMapData {
   tileSize: number;
@@ -59,15 +58,6 @@ export const MAPS: Record<MapId, MapDef> = {
     info: {
       name: "Sector 1: Outskirts",
       description: "The entrance to the hive. Tyranids and Orcks roam freely.",
-    },
-    next: "map2",
-  },
-  map2: {
-    data: LAYERED_MAP_2 as LayeredMapData,
-    modifiers: ["swift_movement"],
-    info: {
-      name: "Sector 2: Deep Hive",
-      description: "The tunnels deepen. Swift movement is afoot.",
     },
     next: "map1",
   },

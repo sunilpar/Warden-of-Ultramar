@@ -5,7 +5,7 @@
  * Currently only map1.json is loaded.
  *
  * HOW TO ADD A NEW MAP:
- *   1. Create maps/map2.json (same structure as map1.json)
+ *   1. Create maps/<mapName>.json (same structure as map1.json)
  *   2. Import and registerMap() it below
  */
 

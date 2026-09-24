@@ -27,7 +27,7 @@ export class RoomState extends Schema {
   /** Cards dropped onto the map ground (loot-ready). */
   @type({ map: GroundCard }) groundCards = new MapSchema<GroundCard>();
   /**
-   * The map this room is currently running ("map1" | "map2" | ...).
+   * The map this room is currently running ("map1" | ...).
    * One room = one game session; maps swap INSIDE the room (no room
    * change). Clients watch this field to rebuild their tilemap.
    */
