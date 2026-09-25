@@ -1,14 +1,14 @@
 /**
- * Elite Edge Indicator
- * ====================
- * When the map's elite enemy is alive but OFF-screen (outside the local
- * player's camera viewport), show a chunky yellow arrow pinned to the
- * nearest viewport edge that points toward the elite. When the elite
- * enters the viewport, the marker hides automatically.
+ * Elite/Exit Edge Indicator
+ * =========================
+ * When a tracked target (elite enemy, map exit) is active but OFF-screen
+ * (outside the local player's camera viewport), show a chunky arrow pinned
+ * to the nearest viewport edge that points toward the target. When the
+ * target enters the viewport, the marker hides automatically.
  *
  * Geometry is built once inside a single Container so children inherit
  * its scrollFactor(0). No sprite is needed - just a thick arrow + a
- * "Elite" label that rotates as a unit.
+ * label that rotates as a unit.
  */
 import Phaser from "phaser";
 
@@ -20,27 +20,41 @@ export interface EliteIndicatorRefs {
   destroy(): void;
 }
 
+export interface EdgeIndicatorOptions {
+  /** Arrow + label fill color (0xRRGGBB). Default: gold (elite). */
+  color?: number;
+  /** CSS color string for the text label. Default: gold (elite). */
+  labelColor?: string;
+  /** Label text below the arrow. Default: "Elite". */
+  label?: string;
+}
+
 export function createEliteIndicator(
   scene: Phaser.Scene,
   isAlive: () => boolean,
   getEliteWorldPos: () => { x: number; y: number } | null,
+  opts: EdgeIndicatorOptions = {},
 ): EliteIndicatorRefs {
+  const color = opts.color ?? 0xffd700;
+  const labelColor = opts.labelColor ?? "#ffd700";
+  const labelText = opts.label ?? "Elite";
+
   // High depth so it sits ABOVE the map-info button and other HUD chrome.
   const DEPTH = 500;
 
-  // ---- Yellow arrow body (points UP - we rotate the whole container) ----
+  // ---- Arrow body (points UP - we rotate the whole container) ----
   // Big and bold so it reads at a glance.
   const ARROW = scene.add.graphics();
-  ARROW.fillStyle(0xffd700, 1);
+  ARROW.fillStyle(color, 1);
   ARROW.lineStyle(3, 0x000000, 1);
   // Triangle pointing up: base at y=14, tip at y=-22 (bigger than before).
   ARROW.fillTriangle(-18, 14, 18, 14, 0, -22);
   ARROW.strokeTriangle(-18, 14, 18, 14, 0, -22);
 
-  // ---- "Elite" label below the arrow ----
+  // ---- Label below the arrow ----
   const label = scene.add
-    .text(0, 30, "Elite", {
-      color: "#ffd700",
+    .text(0, 30, labelText, {
+      color: labelColor,
       fontSize: "16px",
       fontFamily: "monospace",
       fontStyle: "bold",

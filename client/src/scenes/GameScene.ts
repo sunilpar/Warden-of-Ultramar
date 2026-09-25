@@ -166,6 +166,8 @@ export class GameScene extends Phaser.Scene {
   private eliteEnemyId: string | null = null;
   private lastEliteAlive = false;
   private eliteIndicator: ReturnType<typeof createEliteIndicator> | null = null;
+  /** Green edge indicator pointing at the map exit once the elite dies. */
+  private exitIndicator: ReturnType<typeof createEliteIndicator> | null = null;
   private _lastEliteDiag: string | null = null;
   private wasDead = false;
   private slotsSyncedOnce = false;
@@ -376,6 +378,14 @@ export class GameScene extends Phaser.Scene {
       this,
       () => !!(this.room as any)?.state?.eliteAlive,
       () => this.getEliteWorldPos(),
+    );
+    // Exit indicator: green arrow toward the map exit, active once the
+    // elite is dead and the exit unlocks (server-synced flag).
+    this.exitIndicator = createEliteIndicator(
+      this,
+      () => !!(this.room as any)?.state?.exitUnlocked,
+      () => this.getExitWorldPos(),
+      { color: 0x66ff66, labelColor: "#66ff66", label: "Exit" },
     );
     const confirmPopup = createConfirmPopup(this);
     this.mapStatPicker = createMapStatPicker(this);
@@ -1639,6 +1649,14 @@ export class GameScene extends Phaser.Scene {
       );
     }
     this.eliteIndicator?.update(this.cameras.main);
+    this.exitIndicator?.update(this.cameras.main);
+  }
+
+  /** Center of the current map's exit zone (for the exit edge indicator). */
+  private getExitWorldPos(): { x: number; y: number } | null {
+    const ex = this.mapData?.exitPoint;
+    if (!ex || (ex.width === 0 && ex.height === 0)) return null;
+    return { x: ex.x + ex.width / 2, y: ex.y + ex.height / 2 };
   }
 
   /** Read the elite enemy's current world position from the synced state. */
