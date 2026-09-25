@@ -83,6 +83,26 @@ export function fmtValue(effect: string, value: number): string {
   return fmtPct(value);
 }
 
+/**
+ * Two-line description of an ACTIVE map stat (HUD tooltip + inventory):
+ *   title:  "Furious and Tanky"
+ *   desc:   "+30% player Damage but +20% enemy Defence (+2 maps)"
+ * where "+N maps" is the remaining duration. This mirrors describeOffer
+ * (used by the picker) so wording stays consistent before/after picking.
+ */
+export function describeActiveStat(s: ActiveMapStatView): {
+  title: string;
+  desc: string;
+} {
+  const goodLine = `+${fmtValue(s.goodEffect, s.goodValue)} player ${EFFECT_LABEL[s.goodEffect] ?? s.goodEffect}`;
+  const badLine = `+${fmtValue(s.badEffect, s.badValue)} enemy ${EFFECT_LABEL[s.badEffect] ?? s.badEffect}`;
+  const remaining = `(+${s.durationMaps} map${s.durationMaps === 1 ? "" : "s"})`;
+  return {
+    title: `${s.goodName} and ${s.badName}`,
+    desc: `${goodLine} but ${badLine} ${remaining}`,
+  };
+}
+
 /** Compose the combined title and full description for an offer. */
 function describeOffer(o: MapStatOffer): { title: string; desc: string } {
   const title = `${o.goodName} and ${o.badName}`;

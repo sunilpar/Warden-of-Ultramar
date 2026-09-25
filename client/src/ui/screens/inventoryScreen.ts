@@ -12,7 +12,7 @@ import {
   type SkillId,
 } from "../../config/skillDefs";
 import { buildCardTooltipPanel } from "../cardTooltip";
-import { EFFECT_LABEL, fmtValue, type ActiveMapStatView } from "../mapStatPicker";
+import { describeActiveStat, type ActiveMapStatView } from "../mapStatPicker";
 import { buildOutlineFrame } from "../uiOutline";
 import type { HudCardObj, SlotCard } from "../hud/statsHud";
 
@@ -51,7 +51,9 @@ export interface InventoryScreenCallbacks {
   onDragEnd?: (pointer: Phaser.Input.Pointer) => void;
 }
 
-export function createInventoryScreen(cb: InventoryScreenCallbacks): InventoryScreenRefs {
+export function createInventoryScreen(
+  cb: InventoryScreenCallbacks,
+): InventoryScreenRefs {
   const { scene } = cb;
   const W = scene.cameras.main.width;
   const H = scene.cameras.main.height;
@@ -163,26 +165,37 @@ export function createInventoryScreen(cb: InventoryScreenCallbacks): InventorySc
       return;
     }
     for (const s of stats) {
-      const good = `+${fmtValue(s.goodEffect, s.goodValue)} ${EFFECT_LABEL[s.goodEffect] ?? s.goodEffect}`;
-      const bad = `+${fmtValue(s.badEffect, s.badValue)} enemy ${EFFECT_LABEL[s.badEffect] ?? s.badEffect}`;
-      const line = `${s.goodName} but ${s.badName}: ${good} / ${bad} (${s.durationMaps} map${s.durationMaps === 1 ? "" : "s"} left)`;
-      const t = scene.add
-        .text(px + 20, y, "● " + line, {
+      const { title, desc } = describeActiveStat(s);
+      const titleText = scene.add
+        .text(px + 20, y, "● " + title, {
           color: "#88ff88",
           fontSize: "11px",
           fontFamily: "monospace",
-          wordWrap: { width: PANEL_W - 40 },
+          fontStyle: "bold",
           stroke: "#000000",
           strokeThickness: 2,
         })
         .setOrigin(0, 0)
         .setScrollFactor(0);
-      container.add(t);
-      modLines.push(t);
-      y += t.height + 4;
+      container.add(titleText);
+      modLines.push(titleText);
+      y += titleText.height;
+      const descText = scene.add
+        .text(px + 32, y, desc, {
+          color: "#a8d8a8",
+          fontSize: "11px",
+          fontFamily: "monospace",
+          wordWrap: { width: PANEL_W - 52 },
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      container.add(descText);
+      modLines.push(descText);
+      y += descText.height + 5;
     }
   };
-
 
   let data: (SlotCard | null)[] = Array(20).fill(null);
   let cards: (HudCardObj | null)[] = Array(20).fill(null);

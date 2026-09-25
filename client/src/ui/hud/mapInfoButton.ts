@@ -3,20 +3,28 @@
  */
 import Phaser from "phaser";
 import { MAP_INFO } from "../../config/modifiers";
-import { EFFECT_LABEL, fmtValue, type ActiveMapStatView } from "../mapStatPicker";
+import { describeActiveStat, type ActiveMapStatView } from "../mapStatPicker";
 
 export interface MapInfoRefs {
   button: Phaser.GameObjects.Image;
   tooltip: Phaser.GameObjects.Container;
   getInfoKey: () => string;
-  getModifiers: () => Array<{ id: string; title?: string; description?: string }>;
+  getModifiers: () => Array<{
+    id: string;
+    title?: string;
+    description?: string;
+  }>;
   getMapStats: () => ActiveMapStatView[];
 }
 
 export function createMapInfoButton(
   scene: Phaser.Scene,
   getInfoKey: () => string,
-  getModifiers: () => Array<{ id: string; title?: string; description?: string }>,
+  getModifiers: () => Array<{
+    id: string;
+    title?: string;
+    description?: string;
+  }>,
   getMapStats: () => ActiveMapStatView[],
 ): MapInfoRefs {
   const W = scene.cameras.main.width;
@@ -71,10 +79,7 @@ export function rebuildMapInfoTooltip(
   buildTooltipContent(scene, refs);
 }
 
-function buildTooltipContent(
-  scene: Phaser.Scene,
-  refs: MapInfoRefs,
-): void {
+function buildTooltipContent(scene: Phaser.Scene, refs: MapInfoRefs): void {
   const tooltipW = 320;
   const padding = 12;
   let tooltipY = padding;
@@ -141,7 +146,9 @@ function buildTooltipContent(
         .text(
           padding,
           tooltipY,
-          "\u25cf " + (m.title ?? m.id) + (m.description ? " - " + m.description : ""),
+          "\u25cf " +
+            (m.title ?? m.id) +
+            (m.description ? " - " + m.description : ""),
           {
             color: "#88ff88",
             fontSize: "11px",
@@ -175,26 +182,33 @@ function buildTooltipContent(
     refs.tooltip.add(statsHeader);
     tooltipY += statsHeader.height + 4;
     for (const s of stats) {
-      const good = `+${fmtValue(s.goodEffect, s.goodValue)} ${EFFECT_LABEL[s.goodEffect] ?? s.goodEffect}`;
-      const bad = `+${fmtValue(s.badEffect, s.badValue)} enemy ${EFFECT_LABEL[s.badEffect] ?? s.badEffect}`;
-      const t = scene.add
-        .text(
-          padding,
-          tooltipY,
-          `● ${s.goodName} but ${s.badName}: ${good} / ${bad} (${s.durationMaps} map${s.durationMaps === 1 ? "" : "s"})`,
-          {
-            color: "#88ff88",
-            fontSize: "11px",
-            fontFamily: "monospace",
-            wordWrap: { width: tooltipW - padding * 2 },
-            stroke: "#000000",
-            strokeThickness: 2,
-          },
-        )
+      const { title, desc } = describeActiveStat(s);
+      const titleText = scene.add
+        .text(padding, tooltipY, `● ${title}`, {
+          color: "#88ff88",
+          fontSize: "11px",
+          fontFamily: "monospace",
+          fontStyle: "bold",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
         .setOrigin(0, 0)
         .setScrollFactor(0);
-      refs.tooltip.add(t);
-      tooltipY += t.height + 2;
+      refs.tooltip.add(titleText);
+      tooltipY += titleText.height;
+      const descText = scene.add
+        .text(padding + 12, tooltipY, `${desc}`, {
+          color: "#a8d8a8",
+          fontSize: "11px",
+          fontFamily: "monospace",
+          wordWrap: { width: tooltipW - padding * 2 - 12 },
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0);
+      refs.tooltip.add(descText);
+      tooltipY += descText.height + 4;
     }
   }
   const tooltipH = tooltipY + padding;

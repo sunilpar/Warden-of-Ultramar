@@ -138,6 +138,13 @@ export class GameRoom extends Room {
   private activeModifiers: ModifierId[] = [];
   /** True while a map transition is in progress (blocks re-trigger). */
   private transitioning: boolean = false;
+  /**
+   * Snapshot of the map stats that were in effect on the map being left
+   * (taken BEFORE expiry deletions). initMap undoes exactly these from
+   * players, then re-applies only what is still active - so expired
+   * stats are fully removed and nothing compounds across transitions.
+   */
+  private lastAppliedStats: import("../config/mapStats").AppliedMapStat[] = [];
   /** Per-player pending 3 offers sent to each player at the exit point. */
   private currentMapStatOffers = new Map<string, SerializedMapStatOffer[]>();
   /** Count of alive players who have a picker open. 0 = no picker active. */
@@ -226,7 +233,12 @@ export class GameRoom extends Room {
 
     // ---- Reposition existing players at the new map's spawn ----
     const spawn = this.mapSystem.getSpawnPoint();
-    const applied = readAppliedStats(this.state.activeMapStats.values());
+    // Undo the stats that were in effect on the PREVIOUS map (snapshot
+    // taken before expiry), then re-apply only what is STILL active.
+    // This correctly removes expired stats' bonuses - reading the
+    // current state after deletion would skip them entirely.
+    const undoFrom = this.lastAppliedStats;
+    const stillActive = readAppliedStats(this.state.activeMapStats.values());
     this.state.players.forEach((p) => {
       p.x = spawn.x;
       p.y = spawn.y;
@@ -237,39 +249,40 @@ export class GameRoom extends Room {
       // - those are level-derived and survive map transitions.
       p.damageMultiplier = Math.max(
         0,
-        p.damageMultiplier - this.appliedGoodSum(applied, "damage_mult"),
+        p.damageMultiplier - this.appliedGoodSum(undoFrom, "damage_mult"),
       );
       p.speedMultiplier = Math.max(
         0,
-        p.speedMultiplier - this.appliedGoodSum(applied, "move_speed_mult"),
+        p.speedMultiplier - this.appliedGoodSum(undoFrom, "move_speed_mult"),
       );
       p.critRate = Math.max(
         0,
-        p.critRate - this.appliedGoodSum(applied, "crit_rate"),
+        p.critRate - this.appliedGoodSum(undoFrom, "crit_rate"),
       );
       p.critDamage = Math.max(
         1,
-        p.critDamage - this.appliedGoodSum(applied, "crit_damage"),
+        p.critDamage - this.appliedGoodSum(undoFrom, "crit_damage"),
       );
       p.defence = Math.max(
         0,
-        p.defence - this.appliedGoodSum(applied, "defence"),
+        p.defence - this.appliedGoodSum(undoFrom, "defence"),
       );
-      // Reverse any prior maxHealth multiplicative bonus by dividing.
-      // (applyActiveMapStatsToPlayer multiplies inside, so we mirror
-      // that here so transitions never stack.)
-      const hpUndo = this.appliedGoodSum(applied, "max_health_mult");
-      if (hpUndo !== 0) {
-        // Inverse of (1+hpUndo) applied to maxHealth once.
-        const prevMax = p.maxHealth / (1 + hpUndo);
-        p.maxHealth = Math.max(1, Math.round(prevMax));
+      // Reverse prior max_health_mult bonuses. applyActiveMapStatsToPlayer
+      // multiplies per-stat: newMax = round(max * Π(1+v_i)). Undo by
+      // dividing by the same product, mirroring how they were applied.
+      let hpDiv = 1;
+      for (const a of undoFrom) {
+        if (a.goodEffect === "max_health_mult") hpDiv *= 1 + a.goodValue;
+      }
+      if (hpDiv !== 1) {
+        p.maxHealth = Math.max(1, Math.round(p.maxHealth / hpDiv));
         p.currentHealth = Math.min(
           p.maxHealth,
-          Math.max(1, Math.round(p.currentHealth / (1 + hpUndo))),
+          Math.max(1, Math.round(p.currentHealth / hpDiv)),
         );
       }
       p.mapCooldownReduction = 0;
-      applyActiveMapStatsToPlayer(p, applied);
+      applyActiveMapStatsToPlayer(p, stillActive);
     });
 
     // ---- Map metadata for client display ----
@@ -532,6 +545,17 @@ export class GameRoom extends Room {
     }
     const offer = offerIndex === -1 ? null : offers![offerIndex];
 
+    // Snapshot what is currently in effect BEFORE adding the new pick:
+    // initMap must undo exactly what players currently carry (the new
+    // pick hasn't been applied yet, so it must not be in the snapshot).
+    this.lastAppliedStats = readAppliedStats(
+      this.state.activeMapStats.values(),
+    );
+
+    // Key of the newly picked stat (empty when "no mods"). Used below
+    // to skip it during the duration decrement.
+    let newStatKey = "";
+
     // Add the picked stat to the room's active list (if any).
     if (offer) {
       const stat = new MapStat();
@@ -547,10 +571,10 @@ export class GameRoom extends Room {
       // We use Date.now() + a random suffix so two picks in the same
       // tick don't overwrite each other, and post-expiration picks
       // never reuse a stale id.
-      const statKey = `stat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      this.state.activeMapStats.set(statKey, stat);
+      newStatKey = `stat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      this.state.activeMapStats.set(newStatKey, stat);
       console.log(
-        `[MAPSTAT] Added ${statKey}: ${stat.goodName}+${stat.badName} dur=${stat.durationMaps}`,
+        `[MAPSTAT] Added ${newStatKey}: ${stat.goodName}+${stat.badName} dur=${stat.durationMaps}`,
       );
       this.broadcast("mapStatPicked", {
         pickerId: client.sessionId,
@@ -575,11 +599,14 @@ export class GameRoom extends Room {
     this.currentMapStatOffers.clear();
     this.mapStatPickersOpen = 0;
 
-    // ---- Decrement remaining duration on every active stat ----
-    // Stats whose timer hits 0 expire immediately (and won't
-    // affect the next map). Stats with >1 maps remain in effect.
+    // ---- Decrement remaining duration on PRE-EXISTING stats only ----
+    // The stat picked just now (if any) counts the NEXT map as its
+    // first, so it must NOT be decremented (identified by the unique
+    // statKey captured above). Stats whose timer hits 0 expire
+    // immediately (and won't affect the next map).
     const expired: string[] = [];
     this.state.activeMapStats.forEach((st, sid) => {
+      if (sid === newStatKey) return; // skip the newly picked one
       st.durationMaps -= 1;
       if (st.durationMaps <= 0) expired.push(sid);
     });
@@ -1304,6 +1331,12 @@ export class GameRoom extends Room {
     player.recomputeSkillLevels();
     player.recomputeShield();
     applyPlayerModifiers(player, this.activeModifiers);
+    // Apply the room's ACTIVE map stats (picked at map exits) so
+    // mid-session joiners carry the same bonuses as everyone else.
+    applyActiveMapStatsToPlayer(
+      player,
+      readAppliedStats(this.state.activeMapStats.values()),
+    );
     const spawn = this.mapSystem.getSpawnPoint();
     player.x = spawn.x;
     player.y = spawn.y;
