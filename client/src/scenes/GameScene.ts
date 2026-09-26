@@ -395,6 +395,11 @@ export class GameScene extends Phaser.Scene {
       getPlayer: () => this.currentPlayerState,
       sendStatSpend: (stat: string) => this.room?.send(6, { stat }),
       sendCardUpgrade: (slot: number) => this.room?.send(7, { slot }),
+      sendStatBatch: (payload: {
+        stats: Record<string, number>;
+        shieldLevels: number;
+        cards: { slot: number; levels: number }[];
+      }) => this.room?.send(21, payload),
     });
     this.charScreen.setHideMapInfoTooltip(() => {
       if (this.mapInfo?.tooltip) this.mapInfo.tooltip.setVisible(false);
@@ -407,7 +412,6 @@ export class GameScene extends Phaser.Scene {
       slotW: this.statsHud.cardSlots[0].width,
       slotH: this.statsHud.cardSlots[0].height,
       pullState: () => this.pullInventoryState(),
-      getMapStats: () => this.pullActiveMapStats(),
       sendSlotToInv: (slot, inv, empty) =>
         this.room?.send(empty ? 14 : 19, { slot, inv }),
       sendInvSwap: (from, to) => this.room?.send(18, { from, to }),
@@ -512,13 +516,28 @@ export class GameScene extends Phaser.Scene {
             .join(", "),
         );
         rebuildMapInfoTooltip(this, this.mapInfo);
-        this.invScreen?.refreshMapStats();
       };
       cb2.onAdd("activeMapStats", refreshMapModUI);
       cb2.onRemove("activeMapStats", refreshMapModUI);
-      // durationMaps decrements each map - keep the 'maps left'
-      // counters in the tooltip/inventory accurate.
-      cb2.onChange("activeMapStats", refreshMapModUI);
+      // durationMaps decrements each map. cb.onChange("activeMapStats", ...)
+      // only fires when the MapSchema ITSELF changes (never - we only
+      // mutate entries), so we register onChange on each ENTRY as it
+      // is added; that DOES fire when durationMaps is decremented and
+      // keeps the "maps left" counters in the tooltip/inventory in sync.
+      // onChange() returns an unsubscribe function so we cleanly detach
+      // when the entry is removed.
+      const entryUnsubs = new Map<string, () => void>();
+      cb2.onAdd("activeMapStats", (stat: any, key: string) => {
+        const unsub = cb2.onChange(stat, refreshMapModUI);
+        entryUnsubs.set(key, unsub);
+      });
+      cb2.onRemove("activeMapStats", (_stat: any, key: string) => {
+        const unsub = entryUnsubs.get(key);
+        if (unsub) {
+          unsub();
+          entryUnsubs.delete(key);
+        }
+      });
     }
 
     if (isFadeIn && cover) {
@@ -891,11 +910,10 @@ export class GameScene extends Phaser.Scene {
       const entity = this.groundCards.entities.get(cardId);
       if (entity) entity.destroy();
       this.groundCards.entities.delete(cardId);
-      if (this.groundCards.pendingPickups.has(cardId)) {
-        this.groundCards.pendingPickups.delete(cardId);
-        this.groundCards.pendingPickupSlots.delete(cardId);
-        this.syncSlotsFromServer(true);
-      }
+      // Refresh HUD/inventory because the card may have just been
+      // swapped INTO a slot/inv slot by the server.
+      this.syncSlotsFromServer(true);
+      this.syncInventoryFromServer(true);
     });
 
     cb.onAdd("slams", (slam: any, slamId: string) => {

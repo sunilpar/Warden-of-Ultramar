@@ -80,12 +80,12 @@ import { cardModMetadata } from "../config/cardMods";
 import {
   rollThreeOffers,
   rolledMapStatId,
-  tierForMapsCleared,
   readAppliedStats,
   getActiveDropRateMult,
   getActiveRarityBias,
   applyActiveMapStatsToPlayer,
   applyActiveMapStatsToEnemy,
+  tierForLevel,
   type RolledMapStat,
 } from "../config/mapStats";
 import { MapStat } from "../schema/MapStat";
@@ -486,7 +486,11 @@ export class GameRoom extends Room {
     //      N*3 cards total, where N = alive players). ----
     if (this.mapStatPickersOpen === 0) {
       this.mapStatPickersOpen = alive;
-      const tier = tierForMapsCleared(this.state.mapsCleared);
+      // Roll map-stat values at the tier of the HIGHEST-LEVEL player
+      // in the room. tierForLevel is the same function used for enemy
+      // loot drops (L0-9=t1, ..., L40+=t5), so a level-100 player
+      // gets tier-5 (top-tier) offers instead of base-tier ones.
+      const tier = tierForLevel(this.getHighestPlayerLevel());
       // Flat list: every alive player gets the SAME shared pool of
       // `alive * 3` offers, so the picker UI can list them all in
       // one scrollable card and any player can pick any index.
@@ -793,15 +797,18 @@ export class GameRoom extends Room {
    */
   private maybeSpawnElite(): void {
     if (this.eliteSpawned) return;
-    const target = this.getTargetEnemyCount();
-    if (
-      this.enemiesKilled <
-      Math.ceil(target * GAME_CONFIG.ELITE.SPAWN_KILL_THRESHOLD)
-    ) {
-      return;
-    }
     const zones = MAPS[this.mapId].data.enemySpawnZones;
     if (zones.length === 0) return;
+    // Threshold is based on the map's ACTUAL spawnable pool (one enemy
+    // per zone, zones never respawn) - NOT getTargetEnemyCount(), which
+    // can exceed the pool on maps with few zones (e.g. map2's 15 zones
+    // vs a 20+ target), making the elite unreachable and locking the exit.
+    const threshold = Math.ceil(
+      zones.length * GAME_CONFIG.ELITE.SPAWN_KILL_THRESHOLD,
+    );
+    if (this.enemiesKilled < threshold) {
+      return;
+    }
     const zone = zones[Math.floor(Math.random() * zones.length)];
     const eliteLevel =
       this.getHighestPlayerLevel() + GAME_CONFIG.ELITE.LEVEL_BONUS;
@@ -1102,6 +1109,90 @@ export class GameRoom extends Room {
       );
     },
 
+    // ---- Batch upgrade from the C tab (SAVE button) ----
+    // Applies ALL of a player's pending point allocations in one shot,
+    // after the single confirmation popup. Caps (defence 95%, shield
+    // card L10, card L10) are respected on the server.
+    // msg: {
+    //   stats:    { [statId]: count, ... }   // health/attack/defence/critRate/critDamage/moveSpeed
+    //   shieldLevels: number                  // shield card slot upgrades
+    //   cards:    { slot: number, levels: number }[]   // per HUD slot
+    // }
+    21: (
+      client: Client,
+      msg: {
+        stats?: Record<string, number>;
+        shieldLevels?: number;
+        cards?: { slot: number; levels: number }[];
+      },
+    ) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+
+      // ---- Count requested points ----
+      let requested = 0;
+      const stats = msg?.stats ?? {};
+      for (const v of Object.values(stats)) {
+        if (typeof v === "number" && v > 0) requested += v;
+      }
+      const shieldReq = Math.max(0, Math.floor(msg?.shieldLevels ?? 0));
+      requested += shieldReq;
+      const cards = Array.isArray(msg?.cards) ? msg.cards : [];
+      for (const c of cards) {
+        if (c && typeof c.levels === "number" && c.levels > 0)
+          requested += c.levels;
+      }
+      // Not enough skill points -> reject the whole batch.
+      if (requested <= 0) return;
+      if (requested > player.skillPoints) return;
+
+      // ---- Apply stat upgrades ----
+      for (const [stat, raw] of Object.entries(stats)) {
+        const count = Math.max(0, Math.floor(raw ?? 0));
+        for (let i = 0; i < count; i++) {
+          if (stat === "health") {
+            player.maxHealth += 500;
+            player.currentHealth += 500;
+          } else if (stat === "attack") {
+            player.attack += 20;
+          } else if (stat === "defence") {
+            player.defence = Math.min(0.95, player.defence + 0.02);
+          } else if (stat === "critRate") {
+            player.critRate += 0.02;
+          } else if (stat === "critDamage") {
+            player.critDamage += 0.2;
+          } else if (stat === "moveSpeed") {
+            player.speedMultiplier += 0.05;
+          }
+          // Unknown stats are silently ignored (already paid the SP).
+        }
+      }
+
+      // ---- Apply shield slot upgrades (cap at MAX_SHIELD_CARD_LEVEL = 10) ----
+      for (let i = 0; i < shieldReq; i++) {
+        if (player.shieldCardLevel >= Player.MAX_SHIELD_CARD_LEVEL) break;
+        player.upgradeShieldSlot();
+      }
+
+      // ---- Apply per-slot card upgrades (each card caps at level 10) ----
+      for (const c of cards) {
+        const slot = (c?.slot ?? -1) | 0;
+        const levels = Math.max(0, Math.floor(c?.levels ?? 0));
+        if (slot < 0 || slot >= NUM_CARD_SLOTS || levels <= 0) continue;
+        for (let i = 0; i < levels; i++) {
+          if (!player.upgradeSlotCard(slot)) break; // already at card L10
+        }
+      }
+
+      // ---- Bill the skill points ----
+      player.skillPoints -= requested;
+      player.recalcDerivedStats();
+      console.log(
+        `[UPGRADE] ${client.sessionId} applied batch (${requested} SP spent) ` +
+          `stats=${JSON.stringify(stats)} shield=${shieldReq} cards=${JSON.stringify(cards)}`,
+      );
+    },
+
     // ---- Drop the card in a HUD slot to the ground ----
     // msg: { slot: number }
     10: (client: Client, msg: { slot: number }) => {
@@ -1252,8 +1343,13 @@ export class GameRoom extends Room {
       if (dx * dx + dy * dy > 96 * 96) return;
       const card = gc.card;
       if (!card || !card.skill) return;
-      // Target inventory slot must be empty (no silent overwrite).
-      if (player.hasInventoryCard(inv)) return;
+      // Pickup should NEVER silently fail — if the target inventory slot
+      // is occupied, drop the old card to the ground and equip the new
+      // one in its place (swap semantics). Same rule as HUD pickup (11).
+      if (player.hasInventoryCard(inv)) {
+        const old = player.clearInventoryCard(inv);
+        if (old) this.dropCardToGround(player, old);
+      }
       player.setInventoryCard(inv, card);
       this.state.groundCards.delete(msg.cardId);
       console.log(

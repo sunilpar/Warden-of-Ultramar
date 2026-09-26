@@ -362,6 +362,9 @@ export function updateStatsHud(refs: StatsHudRefs, player: any): void {
     refs.hpBarFullWidth,
     Math.max(0.001, refs.hpBarFullHeight * ratio),
   );
+  // Show only the percentage so the bar fill always lines up cleanly
+  // (the raw current/max numbers were removed - they gave the wrong
+  // impression that HP was capped at a fixed value).
   refs.hpText.setText(Math.round(ratio * 100) + "%");
   if (refs.shieldFill) {
     const maxS = player.maxShield ?? 0;
@@ -386,8 +389,18 @@ export function updateStatsHud(refs: StatsHudRefs, player: any): void {
     const pct = (v: number) => Math.round(v * 100) + "%";
     refs.statsText.setText(
       [
-        "Lv " + Math.floor(player.level) + "  XP " + Math.floor(player.currentXp ?? 0) + "/" + Math.floor(player.xpToLevelUp ?? 0),
-        "ATK " + Math.round(player.attack) + "  CRIT " + pct(player.critRate) + " / " + pct(player.critDamage),
+        "Lv " +
+          Math.floor(player.level) +
+          "  XP " +
+          Math.floor(player.currentXp ?? 0) +
+          "/" +
+          Math.floor(player.xpToLevelUp ?? 0),
+        "ATK " +
+          Math.round(player.attack) +
+          "  CRIT " +
+          pct(player.critRate) +
+          " / " +
+          pct(player.critDamage),
       ].join("\n"),
     );
   }
@@ -424,12 +437,11 @@ export function updateSlotCooldowns(
 ): void {
   if (!currentPlayer) return;
   const now = Date.now();
-  const cds = (currentPlayer.data.get("slotCooldownEndsAt") as
-    | number[]
-    | undefined) ?? [];
-  const healKills = (currentPlayer.data.get("slotHealKills") as
-    | number[]
-    | undefined) ?? [];
+  const cds =
+    (currentPlayer.data.get("slotCooldownEndsAt") as number[] | undefined) ??
+    [];
+  const healKills =
+    (currentPlayer.data.get("slotHealKills") as number[] | undefined) ?? [];
   for (let i = 0; i < hudCards.length; i++) {
     const card = hudCards[i];
     if (!card) continue;

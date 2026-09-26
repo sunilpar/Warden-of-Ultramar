@@ -12,7 +12,6 @@ import {
   type SkillId,
 } from "../../config/skillDefs";
 import { buildCardTooltipPanel } from "../cardTooltip";
-import { describeActiveStat, type ActiveMapStatView } from "../mapStatPicker";
 import { buildOutlineFrame } from "../uiOutline";
 import type { HudCardObj, SlotCard } from "../hud/statsHud";
 
@@ -31,7 +30,6 @@ export interface InventoryScreenRefs {
   slotCenter: (i: number) => { x: number; y: number };
   hideTooltip: () => void;
   close: () => void;
-  refreshMapStats: () => void;
   getData: () => (SlotCard | null)[];
 }
 
@@ -44,8 +42,6 @@ export interface InventoryScreenCallbacks {
   sendInvSwap: (from: number, to: number) => void;
   sendInvToSlot: (inv: number, slot: number) => void;
   sendInvDrop: (inv: number) => void;
-  /** Active map mods (picked at map exits) rendered below the grid. */
-  getMapStats?: () => ActiveMapStatView[];
   isDragFree: () => boolean;
   onDragStart?: (invSlot: number) => void;
   onDragEnd?: (pointer: Phaser.Input.Pointer) => void;
@@ -76,6 +72,7 @@ export function createInventoryScreen(
     .setScrollFactor(0)
     .setDepth(399)
     .setVisible(false);
+  overlay.setInteractive();
   const panelBg = scene.add.graphics().setScrollFactor(0);
   panelBg.fillStyle(0x0a0a14, 0.95);
   panelBg.fillRect(px, py, PANEL_W, PANEL_H);
@@ -127,75 +124,6 @@ export function createInventoryScreen(
     }
   }
   container.add(cellG);
-
-  // ---- Active map mods (picked at map exits), below the card grid ----
-  const modsTop = shelfTop + gridH + 20;
-  container.add(
-    scene.add
-      .text(px + 20, modsTop, "ACTIVE MAP MODS", {
-        color: "#ffd700",
-        fontSize: "13px",
-        fontFamily: "monospace",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0, 0)
-      .setScrollFactor(0),
-  );
-  let modLines: Phaser.GameObjects.Text[] = [];
-  const refreshMapStats = () => {
-    for (const l of modLines) l.destroy();
-    modLines = [];
-    const stats = cb.getMapStats ? cb.getMapStats() : [];
-    let y = modsTop + 20;
-    if (stats.length === 0) {
-      const t = scene.add
-        .text(px + 20, y, "None", {
-          color: "#888888",
-          fontSize: "11px",
-          fontFamily: "monospace",
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(0, 0)
-        .setScrollFactor(0);
-      container.add(t);
-      modLines.push(t);
-      return;
-    }
-    for (const s of stats) {
-      const { title, desc } = describeActiveStat(s);
-      const titleText = scene.add
-        .text(px + 20, y, "● " + title, {
-          color: "#88ff88",
-          fontSize: "11px",
-          fontFamily: "monospace",
-          fontStyle: "bold",
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(0, 0)
-        .setScrollFactor(0);
-      container.add(titleText);
-      modLines.push(titleText);
-      y += titleText.height;
-      const descText = scene.add
-        .text(px + 32, y, desc, {
-          color: "#a8d8a8",
-          fontSize: "11px",
-          fontFamily: "monospace",
-          wordWrap: { width: PANEL_W - 52 },
-          stroke: "#000000",
-          strokeThickness: 2,
-        })
-        .setOrigin(0, 0)
-        .setScrollFactor(0);
-      container.add(descText);
-      modLines.push(descText);
-      y += descText.height + 5;
-    }
-  };
 
   let data: (SlotCard | null)[] = Array(20).fill(null);
   let cards: (HudCardObj | null)[] = Array(20).fill(null);
@@ -330,7 +258,6 @@ export function createInventoryScreen(
   let visible = false;
   const open = () => {
     syncFromState();
-    refreshMapStats();
     container.setPosition(offX, 0).setVisible(true);
     scene.tweens.add({
       targets: container,
@@ -377,6 +304,10 @@ export function createInventoryScreen(
     ?.on("down", () => {
       if (visible) close();
     });
+  // Outside-click closes the tab (matches the C-tab / character screen).
+  overlay.on("pointerdown", () => {
+    if (visible) close();
+  });
 
   return {
     container,
@@ -389,7 +320,6 @@ export function createInventoryScreen(
     slotCenter,
     hideTooltip,
     close,
-    refreshMapStats,
     getData: () => data,
   };
 }

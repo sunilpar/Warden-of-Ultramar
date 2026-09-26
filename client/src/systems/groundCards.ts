@@ -52,8 +52,6 @@ export interface GroundCardsState {
     entity: Phaser.GameObjects.Container;
     obj: HudCardObj;
   } | null;
-  pendingPickups: Set<string>;
-  pendingPickupSlots: Map<string, number>;
 }
 
 export interface GroundCardCallbacks {
@@ -76,8 +74,6 @@ export function createGroundCards(): GroundCardsState {
     tooltip: null,
     dwellTimer: null,
     grab: null,
-    pendingPickups: new Set(),
-    pendingPickupSlots: new Map(),
   };
 }
 
@@ -286,37 +282,38 @@ export function endGroundGrab(
   const g = state.grab;
   if (!g) return;
   state.grab = null;
+  // Re-check distance at DROP time. The player may have been pushed,
+  // teleported, or otherwise drifted out of range during the drag —
+  // in which case we redrop the card back at its original spot and
+  // tell the player. This is the ONLY failure mode: if the server
+  // accepts the pickup it always succeeds (msg 11 swaps; msg 17 now
+  // also swaps).
+  const player = cb.getPlayer();
+  if (player) {
+    const dx = g.card.x - player.x;
+    const dy = g.card.y - player.y;
+    if (dx * dx + dy * dy > PICKUP_RANGE_CLIENT_PX * PICKUP_RANGE_CLIENT_PX) {
+      cb.sendRedrop(g.cardId, g.card.x, g.card.y);
+      g.obj.container.destroy();
+      g.entity.setVisible(true);
+      showPickupFailedToast(scene, "TOO FAR TO GRAB");
+      cb.updatePlusHints();
+      return;
+    }
+  }
   const invIdx = cb.invAtPointer(pointer);
   if (invIdx >= 0) {
-    state.pendingPickups.add(g.cardId);
     cb.sendPickupToInventory(g.cardId, invIdx);
     g.obj.container.destroy();
     g.entity.setVisible(true);
-    const grabbedId = g.cardId;
-    scene.time.delayedCall(500, () => {
-      if (state.pendingPickups.has(grabbedId)) {
-        state.pendingPickups.delete(grabbedId);
-        showPickupFailedToast(scene, "PICKUP FAILED - TRY AGAIN");
-      }
-    });
     cb.updatePlusHints();
     return;
   }
   const slotIdx = cb.slotAtPointer(pointer);
   if (slotIdx >= 0) {
-    state.pendingPickups.add(g.cardId);
-    state.pendingPickupSlots.set(g.cardId, slotIdx);
     cb.sendPickupToSlot(g.cardId, slotIdx);
     g.obj.container.destroy();
     g.entity.setVisible(true);
-    const grabbedId = g.cardId;
-    scene.time.delayedCall(500, () => {
-      if (state.pendingPickups.has(grabbedId)) {
-        state.pendingPickups.delete(grabbedId);
-        state.pendingPickupSlots.delete(grabbedId);
-        showPickupFailedToast(scene, "PICKUP FAILED - TRY AGAIN");
-      }
-    });
   } else {
     cb.sendRedrop(g.cardId, pointer.worldX, pointer.worldY);
     g.obj.container.destroy();
@@ -353,7 +350,5 @@ export function resetGroundCards(
   for (const [, ent] of state.entities) ent.destroy();
   state.entities.clear();
   cancelTooltip(scene, state);
-  state.pendingPickups.clear();
-  state.pendingPickupSlots.clear();
   state.grab = null;
 }
