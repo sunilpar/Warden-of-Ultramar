@@ -2,13 +2,33 @@
  * Elite/Exit Edge Indicator
  * =========================
  * When a tracked target (elite enemy, map exit) is active but OFF-screen
- * (outside the local player's camera viewport), show a chunky arrow pinned
- * to the nearest viewport edge that points toward the target. When the
- * target enters the viewport, the marker hides automatically.
+ * (outside the local player's camera viewport), show a sprite + label
+ * pinned to the nearest viewport edge that points toward the target.
+ * When the target enters the viewport, the marker hides automatically.
  *
- * Geometry is built once inside a single Container so children inherit
- * its scrollFactor(0). No sprite is needed - just a thick arrow + a
- * label that rotates as a unit.
+ * The arrow sprite comes from a 2-frame sprite sheet
+ *   "indicators_sheet"  (32x32 per frame)
+ *   frame 0 = elite indicator (gold)
+ *   frame 1 = exit  indicator (green)
+ *
+ * SPRITE ORIENTATION
+ * ------------------
+ * The sprite is a pre-oriented pointer with the tip in the
+ * right-bottom corner (it is NOT authored pointing straight up).
+ * So we do NOT rotate the container — we just flip the sprite
+ * horizontally / vertically depending on which screen edge it is
+ * pinned to, so the tip points at the off-screen target.
+ *
+ *   edge pinned to   flip
+ *   ---------------  ---------------------------------
+ *   RIGHT edge       none (sprite as-is)
+ *   LEFT  edge       flip vertically (mirror Y axis)
+ *   TOP   edge       flip horizontally (mirror X axis)
+ *   BOTTOM edge      none
+ *
+ * This avoids the previous bug where the pointer's tip didn't line up
+ * with the off-screen target because we were rotating an already-rotated
+ * sprite.
  */
 import Phaser from "phaser";
 
@@ -21,8 +41,10 @@ export interface EliteIndicatorRefs {
 }
 
 export interface EdgeIndicatorOptions {
-  /** Arrow + label fill color (0xRRGGBB). Default: gold (elite). */
-  color?: number;
+  /** Sprite sheet key holding the arrow frames. */
+  spriteKey?: string;
+  /** Frame index inside the sprite sheet (0 = elite, 1 = exit). */
+  spriteFrame?: number;
   /** CSS color string for the text label. Default: gold (elite). */
   labelColor?: string;
   /** Label text below the arrow. Default: "Elite". */
@@ -35,25 +57,23 @@ export function createEliteIndicator(
   getEliteWorldPos: () => { x: number; y: number } | null,
   opts: EdgeIndicatorOptions = {},
 ): EliteIndicatorRefs {
-  const color = opts.color ?? 0xffd700;
+  const spriteKey = opts.spriteKey ?? "indicators_sheet";
+  const spriteFrame = opts.spriteFrame ?? 0;
   const labelColor = opts.labelColor ?? "#ffd700";
   const labelText = opts.label ?? "Elite";
 
   // High depth so it sits ABOVE the map-info button and other HUD chrome.
   const DEPTH = 500;
 
-  // ---- Arrow body (points UP - we rotate the whole container) ----
-  // Big and bold so it reads at a glance.
-  const ARROW = scene.add.graphics();
-  ARROW.fillStyle(color, 1);
-  ARROW.lineStyle(3, 0x000000, 1);
-  // Triangle pointing up: base at y=14, tip at y=-22 (bigger than before).
-  ARROW.fillTriangle(-18, 14, 18, 14, 0, -22);
-  ARROW.strokeTriangle(-18, 14, 18, 14, 0, -22);
+  // ---- Arrow sprite from the sprite sheet ----
+  const sprite = scene.add.image(0, 0, spriteKey, spriteFrame);
+  sprite.setOrigin(0.5, 0.5);
+  // Render at a chunky size so it reads at a glance.
+  sprite.setDisplaySize(48, 48);
 
   // ---- Label below the arrow ----
   const label = scene.add
-    .text(0, 30, labelText, {
+    .text(0, 28, labelText, {
       color: labelColor,
       fontSize: "16px",
       fontFamily: "monospace",
@@ -65,7 +85,7 @@ export function createEliteIndicator(
 
   // ---- Container, scrollFactor(0) sticks it to the viewport ----
   const root = scene.add
-    .container(0, 0, [ARROW, label])
+    .container(0, 0, [sprite, label])
     .setDepth(DEPTH)
     .setScrollFactor(0)
     .setVisible(false);
@@ -98,31 +118,73 @@ export function createEliteIndicator(
     const inX = elite.x >= camLeft && elite.x <= camRight;
     const inY = elite.y >= camTop && elite.y <= camBottom;
     if (inX && inY) {
-      // Elite is on screen - no marker needed.
+      // Target is on screen - no marker needed.
       if (root.visible) root.setVisible(false);
       return;
     }
 
-    // Clamp onto the nearest edge with a margin so the marker doesn't
-    // sit exactly on the screen border.
-    let worldX = Phaser.Math.Clamp(elite.x, camLeft, camRight);
-    let worldY = Phaser.Math.Clamp(elite.y, camTop, camBottom);
-    if (elite.x < camLeft) worldX = camLeft + margin;
-    else if (elite.x > camRight) worldX = camRight - margin;
-    if (elite.y < camTop) worldY = camTop + margin;
-    else if (elite.y > camBottom) worldY = camBottom - margin;
+    // ---- Decide which edge to clamp onto ----
+    // The X axis (left/right) wins when the target is farther from the
+    // screen in X than in Y; otherwise Y (top/bottom) wins. For
+    // pure-corner cases this gives the same edge a player would
+    // expect when looking at the screen.
+    const outLeft = elite.x < camLeft;
+    const outRight = elite.x > camRight;
+    const outTop = elite.y < camTop;
+    const outBottom = elite.y > camBottom;
+
+    const dxLeft = outLeft ? camLeft - elite.x : -Infinity;
+    const dxRight = outRight ? elite.x - camRight : -Infinity;
+    const dyTop = outTop ? camTop - elite.y : -Infinity;
+    const dyBottom = outBottom ? elite.y - camBottom : -Infinity;
+
+    let worldX: number;
+    let worldY: number;
+    let edge: "left" | "right" | "top" | "bottom";
+    {
+      const xDist = Math.max(dxLeft, dxRight);
+      const yDist = Math.max(dyTop, dyBottom);
+      if (xDist >= yDist) {
+        // Pin to the LEFT or RIGHT edge (X axis dominates).
+        if (outLeft) {
+          worldX = camLeft + margin;
+          edge = "left";
+        } else {
+          worldX = camRight - margin;
+          edge = "right";
+        }
+        worldY = Phaser.Math.Clamp(elite.y, camTop, camBottom);
+      } else {
+        // Pin to the TOP or BOTTOM edge (Y axis dominates).
+        if (outTop) {
+          worldY = camTop + margin;
+          edge = "top";
+        } else {
+          worldY = camBottom - margin;
+          edge = "bottom";
+        }
+        worldX = Phaser.Math.Clamp(elite.x, camLeft, camRight);
+      }
+    }
 
     // Convert world -> screen pixels.
     const sx = worldX - cam.scrollX;
     const sy = worldY - cam.scrollY;
     root.setPosition(sx, sy);
 
-    // Rotation: angle from screen center to elite world position. Arrow
-    // was authored pointing UP (-Y), so add +PI/2 to align.
-    const dx = elite.x - (cam.scrollX + cam.width / 2);
-    const dy = elite.y - (cam.scrollY + cam.height / 2);
-    const angle = Math.atan2(dy, dx);
-    root.setRotation(angle + Math.PI / 2);
+    // ---- Orient the sprite so the tip points at the off-screen target ----
+    // The sprite is authored with its tip in the right-bottom corner.
+    // RIGHT edge:  no flip       (sprite as-is)
+    // LEFT  edge:  flipY = true  (mirror vertically -> tip points left-bottom)
+    // TOP   edge:  flipX = true  (mirror horizontally -> tip points left-bottom)
+    // BOTTOM edge: no flip       (sprite as-is)
+    const flipX = edge === "top";
+    const flipY = edge === "left";
+    sprite.setFlipX(flipX);
+    sprite.setFlipY(flipY);
+    // Label stays right-side-up regardless of which edge we're on.
+    sprite.setRotation(0);
+    label.setRotation(0);
 
     if (!root.visible) root.setVisible(true);
   }

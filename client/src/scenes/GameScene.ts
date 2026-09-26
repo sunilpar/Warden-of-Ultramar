@@ -380,12 +380,13 @@ export class GameScene extends Phaser.Scene {
       () => this.getEliteWorldPos(),
     );
     // Exit indicator: green arrow toward the map exit, active once the
-    // elite is dead and the exit unlocks (server-synced flag).
+    // elite is dead and the exit unlocks (server-synced flag). Uses
+    // frame 1 of the "indicators_sheet" sprite sheet (elite uses 0).
     this.exitIndicator = createEliteIndicator(
       this,
       () => !!(this.room as any)?.state?.exitUnlocked,
       () => this.getExitWorldPos(),
-      { color: 0x66ff66, labelColor: "#66ff66", label: "Exit" },
+      { spriteFrame: 1, labelColor: "#66ff66", label: "Exit" },
     );
     const confirmPopup = createConfirmPopup(this);
     this.mapStatPicker = createMapStatPicker(this);

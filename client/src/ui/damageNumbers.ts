@@ -55,8 +55,13 @@ export function spawnDamageNumber(
   } else {
     txt.setPosition(x, startY).setActive(true).setVisible(true);
   }
-  const critPart = isCrit && shieldDamage > 0 ? "-" + Math.round(shieldDamage) : "";
-  const hpPart = hpDamage > 0 ? "-" + Math.round(hpDamage) : "-" + Math.round(amount);
+  // Damage is shown as a bare number — no leading minus sign. The
+  // colour (red / blue / gold) tells the player it's damage; the
+  // sign was redundant and noisy.
+  const critPart = isCrit && shieldDamage > 0 ? Math.round(shieldDamage).toString() : "";
+  const hpPart = hpDamage > 0
+    ? Math.round(hpDamage).toString()
+    : Math.round(amount).toString();
   const baseColor = isCrit
     ? "#ffd700"
     : shieldDamage > 0 && hpDamage === 0

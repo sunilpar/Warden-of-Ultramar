@@ -160,6 +160,16 @@ export class SceneSelector extends Phaser.Scene {
     // ---- Map info button icon ----
     this.load.image("map_info_icon", "assets/40k icon2.png");
 
+    // ---- Edge indicator sprite sheet ----
+    // 2x1 horizontal row of 32x32 frames:
+    //   frame 0 = elite indicator (gold)
+    //   frame 1 = exit indicator (green)
+    this.load.spritesheet(
+      "indicators_sheet",
+      "assets/indicators sprite sheet.png",
+      { frameWidth: 32, frameHeight: 32 },
+    );
+
     // ---- UI outline border tiles ----
     // 3 rows of 64x64: row 0 = corner (top-left), row 1 = horizontal edge,
     // row 2 = vertical edge. Other corners are flipped versions of row 0.
