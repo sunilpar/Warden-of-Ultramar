@@ -79,8 +79,10 @@ export const BAD_POOL: StatComponentDef[] = [
     tierMin: [0.05, 0.10, 0.15, 0.20, 0.25], tierMax: [0.10, 0.15, 0.20, 0.25, 0.30] },
 ];
 
-const DURATION_TIER_MIN: [number, number, number, number, number] = [1, 2, 4, 6, 8];
-const DURATION_TIER_MAX: [number, number, number, number, number] = [2, 4, 6, 8, 10];
+// Duration in maps: tier N rolls between N-1 and N maps, so tier 1
+// always lasts exactly 1 map and tier 5 (the ceiling) rolls 4-5.
+const DURATION_TIER_MIN: [number, number, number, number, number] = [1, 1, 2, 3, 4];
+const DURATION_TIER_MAX: [number, number, number, number, number] = [1, 2, 3, 4, 5];
 
 function clampTier(t: number): number {
   return Math.max(1, Math.min(MAX_TIER, Math.floor(t)));

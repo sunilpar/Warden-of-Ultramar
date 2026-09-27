@@ -45,12 +45,18 @@ import { buildCardTooltipPanel } from "../cardTooltip";
 import type { ConfirmPopupRefs } from "../confirmPopup";
 import { formatNumber } from "../damageNumbers";
 
-/** Per-stat deltas when one skill point is spent on that stat. */
+/**
+ * Per-stat deltas when one skill point is spent on that stat.
+ * `mapEffect` links the stat to the matching map-mod goodEffect so the
+ * "+ X%" bonus line can be shown when the toggle is on.
+ */
 interface StatDef {
   id: string;
   label: string;
   /** Optional cap (e.g. defence caps at 0.95). */
   cap?: number;
+  /** Matching goodEffect id from the map-mod pools (GOOD_POOL). */
+  mapEffect?: string;
   /** Format the displayed stat value with `pending` extra points. */
   format: (p: any, pending: number) => string;
 }
@@ -59,26 +65,34 @@ const STAT_DEFS: StatDef[] = [
   {
     id: "health",
     label: "Max Health",
+    // Map mod multiplies maxHealth by (1+v); display as +% bonus.
+    mapEffect: "max_health_mult",
     format: (p, n) => Math.round(p.maxHealth + n * 500).toString(),
   },
   {
     id: "attack",
     label: "Attack",
+    // damage_mult is applied via the (non-synced) damageMultiplier;
+    // show the +% bonus from active mods.
+    mapEffect: "damage_mult",
     format: (p, n) => Math.round(p.attack + n * 20).toString(),
   },
   {
     id: "critRate",
     label: "Crit Rate",
+    mapEffect: "crit_rate",
     format: (p, n) => Math.round((p.critRate + n * 0.02) * 100) + "%",
   },
   {
     id: "critDamage",
     label: "Crit Damage",
+    mapEffect: "crit_damage",
     format: (p, n) => Math.round((p.critDamage + n * 0.2) * 100) + "%",
   },
   {
     id: "moveSpeed",
     label: "Move Speed",
+    mapEffect: "move_speed_mult",
     format: (p, n) => {
       const base = p.baseMoveSpeed ?? 120;
       const mult = (p.speedMultiplier ?? 1.0) + n * 0.05;
@@ -89,10 +103,51 @@ const STAT_DEFS: StatDef[] = [
     id: "defence",
     label: "Defence",
     cap: 0.95,
+    mapEffect: "defence",
     format: (p, n) =>
       Math.round(Math.min(0.95, p.defence + n * 0.02) * 100) + "%",
   },
 ];
+
+/**
+ * Map-mod stats that are NOT skill-point upgradeable. They only show up
+ * as rows when the "show with map mods" toggle is on AND at least one
+ * active mod contributes that effect.
+ */
+interface ExtraMapStatDef {
+  effect: string;
+  label: string;
+  format: (total: number) => string;
+}
+
+const EXTRA_MAP_STATS: ExtraMapStatDef[] = [
+  {
+    effect: "cooldown_reduction",
+    label: "Cooldown Reduction",
+    format: (v) => "+" + Math.round(v * 100) + "%",
+  },
+  {
+    effect: "drop_rate_mult",
+    label: "Drop Rate",
+    format: (v) => "+" + Math.round(v * 100) + "%",
+  },
+  {
+    effect: "rarity_bias",
+    label: "Rarity Bias",
+    format: (v) => "+" + Math.round(v),
+  },
+];
+
+/** Sum the goodValue of active map mods for a given effect. */
+function sumMapEffect(active: any[], effect: string): number {
+  let t = 0;
+  for (const s of active) {
+    if (s && s.goodEffect === effect && typeof s.goodValue === "number") {
+      t += s.goodValue;
+    }
+  }
+  return t;
+}
 
 const MAX_CARD_LEVEL = 10;
 const MAX_SHIELD_CARD_LEVEL = 10;
@@ -118,6 +173,8 @@ export interface CharacterScreenCallbacks {
     shieldLevels: number;
     cards: { slot: number; levels: number }[];
   }) => void;
+  /** Active map mods (RoomState.activeMapStats) for the stats view. */
+  getActiveMapStats?: () => any[];
 }
 
 export function createCharacterScreen(
@@ -258,6 +315,62 @@ export function createCharacterScreen(
   drawSaveBtnBg(false);
 
   container.add([saveBtnBg, saveHit, saveBtnLabel]);
+
+  // ---- MAP MODS toggle: bottom-left of the C tab panel ----
+  // When ON, stat rows also show the active map-mod bonus in yellow
+  // and mod-only stats (drop rate, rarity bias, cooldown reduction)
+  // appear below the base stats.
+  let showMapMods = false;
+  const MODS_BTN_W = 160;
+  const MODS_BTN_H = 34;
+  const modsBtnX = px + 14;
+  const modsBtnTop = py + PANEL_H - 18 - MODS_BTN_H;
+  const modsBtnBg = scene.add.graphics().setScrollFactor(0).setDepth(402);
+  const modsBtnLabel = scene.add
+    .text(modsBtnX + MODS_BTN_W / 2, modsBtnTop + MODS_BTN_H / 2, "", {
+      color: "#ffe066",
+      fontSize: "12px",
+      fontFamily: "monospace",
+      fontStyle: "bold",
+      stroke: "#000000",
+      strokeThickness: 3,
+    })
+    .setOrigin(0.5, 0.5)
+    .setScrollFactor(0)
+    .setDepth(402);
+  const modsHit = scene.add
+    .rectangle(
+      modsBtnX + MODS_BTN_W / 2,
+      modsBtnTop + MODS_BTN_H / 2,
+      MODS_BTN_W,
+      MODS_BTN_H,
+      0x000000,
+      0,
+    )
+    .setOrigin(0.5, 0.5)
+    .setScrollFactor(0)
+    .setDepth(402)
+    .setInteractive({ useHandCursor: true });
+  modsBtnLabel.setInteractive({ useHandCursor: true });
+  const drawModsBtn = () => {
+    modsBtnBg.clear();
+    modsBtnBg.fillStyle(showMapMods ? 0x3a321a : 0x222222, 0.95);
+    modsBtnBg.fillRoundedRect(modsBtnX, modsBtnTop, MODS_BTN_W, MODS_BTN_H, 6);
+    modsBtnBg.lineStyle(showMapMods ? 2 : 1, showMapMods ? 0xffe066 : 0x555555, 1);
+    modsBtnBg.strokeRoundedRect(modsBtnX, modsBtnTop, MODS_BTN_W, MODS_BTN_H, 6);
+    modsBtnLabel
+      .setText(showMapMods ? "[ HIDE MAP MODS ]" : "[ SHOW MAP MODS ]")
+      .setColor(showMapMods ? "#ffe066" : "#999999");
+  };
+  drawModsBtn();
+  const toggleMapMods = () => {
+    showMapMods = !showMapMods;
+    drawModsBtn();
+    if (visible) refresh();
+  };
+  modsHit.on("pointerdown", () => toggleMapMods());
+  modsBtnLabel.on("pointerdown", () => toggleMapMods());
+  container.add([modsBtnBg, modsHit, modsBtnLabel]);
 
   // ---- close hint (small, top-right) ----
   const closeHint = scene.add
@@ -471,9 +584,41 @@ export function createCharacterScreen(
         .setDepth(402),
     );
     y += 24;
+    // Active map mods (only fetched when the toggle is on).
+    const activeMods = showMapMods ? (cb.getActiveMapStats?.() ?? []) : [];
+    const modsOn = activeMods.length > 0;
     for (const stat of STAT_DEFS) {
       const pending = pendingStat[stat.id] ?? 0;
-      const valStr = stat.format(p, pending);
+      // Split the synced value into base + map-mod bonus so the mod
+      // part can be shown in yellow. Additive stats (crit, defence)
+      // have the mod baked into the synced field, so subtract it;
+      // attack / move speed show the base number and only append the
+      // bonus (their mods live in non-synced multipliers); max health
+      // was multiplied by Π(1+v) server-side.
+      let pBase: any = p;
+      let bonusStr = "";
+      if (modsOn && stat.mapEffect) {
+        const modSum = sumMapEffect(activeMods, stat.mapEffect);
+        if (modSum > 0) {
+          if (stat.id === "health") {
+            let prod = 1;
+            for (const s of activeMods) {
+              if (s.goodEffect === "max_health_mult") prod *= 1 + s.goodValue;
+            }
+            if (prod > 1) {
+              pBase = { ...p, maxHealth: p.maxHealth / prod };
+              bonusStr = "+" + Math.round((prod - 1) * 100) + "%";
+            }
+          } else if (stat.id === "attack" || stat.id === "moveSpeed") {
+            bonusStr = "+" + Math.round(modSum * 100) + "%";
+          } else if (typeof p[stat.id] === "number") {
+            pBase = { ...p };
+            pBase[stat.id] = p[stat.id] - modSum;
+            bonusStr = "+" + Math.round(modSum * 100) + "%";
+          }
+        }
+      }
+      const valStr = stat.format(pBase, pending);
       const labelText =
         stat.label +
         ": " +
@@ -491,6 +636,22 @@ export function createCharacterScreen(
         .setScrollFactor(0)
         .setDepth(402);
       addDyn(line);
+      if (bonusStr) {
+        addDyn(
+          scene.add
+            .text(px + 20 + line.width + 8, y, bonusStr, {
+              color: "#ffe066",
+              fontSize: "13px",
+              fontFamily: "monospace",
+              fontStyle: "bold",
+              stroke: "#000000",
+              strokeThickness: 2,
+            })
+            .setOrigin(0, 0)
+            .setScrollFactor(0)
+            .setDepth(402),
+        );
+      }
       // Defence caps at 0.95 — disable + once we hit it.
       const isCapped =
         stat.cap !== undefined &&
@@ -512,6 +673,28 @@ export function createCharacterScreen(
         },
       );
       y += 22;
+    }
+    // Mod-only stats (not skill-point upgradeable): yellow rows below
+    // the base stats, only while the toggle is on and a mod grants them.
+    if (modsOn) {
+      for (const ex of EXTRA_MAP_STATS) {
+        const v = sumMapEffect(activeMods, ex.effect);
+        if (v <= 0) continue;
+        addDyn(
+          scene.add
+            .text(px + 20, y, ex.label + ": " + ex.format(v), {
+              color: "#ffe066",
+              fontSize: "13px",
+              fontFamily: "monospace",
+              stroke: "#000000",
+              strokeThickness: 2,
+            })
+            .setOrigin(0, 0)
+            .setScrollFactor(0)
+            .setDepth(402),
+        );
+        y += 22;
+      }
     }
     y += 14;
 
