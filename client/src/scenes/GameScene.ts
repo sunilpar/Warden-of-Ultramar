@@ -401,6 +401,7 @@ export class GameScene extends Phaser.Scene {
         shieldLevels: number;
         cards: { slot: number; levels: number }[];
       }) => this.room?.send(21, payload),
+      getActiveMapStats: () => this.pullActiveMapStats(),
     });
     this.charScreen.setHideMapInfoTooltip(() => {
       if (this.mapInfo?.tooltip) this.mapInfo.tooltip.setVisible(false);
@@ -2008,8 +2009,16 @@ export class GameScene extends Phaser.Scene {
       dirX /= length;
       dirY /= length;
     }
-    this.currentPlayer.x += dirX * this.moveSpeed * dt;
-    this.currentPlayer.y += dirY * this.moveSpeed * dt;
+    // Use the server-synced effective speed so local prediction matches
+    // the server during speed changes (e.g. shock halves moveSpeed).
+    // Predicting at full speed while the server is slowed causes
+    // divergence and the >32px snap-back (rubber banding).
+    const speed =
+      this.currentPlayerState?.moveSpeed > 0
+        ? this.currentPlayerState.moveSpeed
+        : this.moveSpeed;
+    this.currentPlayer.x += dirX * speed * dt;
+    this.currentPlayer.y += dirY * speed * dt;
     this.currentPlayer.x = Phaser.Math.Clamp(
       this.currentPlayer.x,
       0,
