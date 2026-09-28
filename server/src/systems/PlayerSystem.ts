@@ -3,21 +3,32 @@
  * =============
  * Processes player input and moves players each tick.
  * Handles: normalized diagonal movement, boundary clamping, obstacle collision.
+ *
+ * Per-map scoping: each PlayerSystem instance is bound to ONE map
+ * (`targetMapId`) and processes only the players whose `currentMapId`
+ * matches. The room runs two systems side-by-side: one for the lobby,
+ * one for the room's current gameplay map. This keeps movement +
+ * collision resolution isolated to the right map per player.
  */
 
 import { RoomState } from "../schema/RoomState";
 import { InputData } from "../schema/Player";
 import { GAME_CONFIG } from "../config/game";
+import type { MapId } from "../config/mapRegistry";
 import { MapSystem } from "./MapSystem";
 
 export class PlayerSystem {
   constructor(
     private state: RoomState,
     private mapSystem: MapSystem,
+    private targetMapId: MapId,
   ) {}
 
   update(dt: number): void {
     this.state.players.forEach((player) => {
+      // Skip players that aren't on this system's map (lobby players
+      // are processed by the lobby's PlayerSystem, not this one).
+      if (player.currentMapId !== this.targetMapId) return;
       // Skip movement while in hit-stun (pausedUntil).
       if (false) {
         // hit-stun removed

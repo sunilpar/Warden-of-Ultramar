@@ -29,6 +29,7 @@
  *  10: Drop slot card  { slot: number }
  *  11: Pick up card    { cardId, slot: number }
  *  12: Move ground card{ cardId, x, y }
+ *  22: Lobby -> gameplay map (player clicked "Play" in the lobby)
  *
  * CARD MODEL
  * The player HUD is `player.equippedSlots` — a synced array of 5 card
@@ -60,7 +61,13 @@ import { PulseSystem } from "../systems/PulseSystem";
 import { ShockSystem } from "../systems/ShockSystem";
 import { DashSystem } from "../systems/DashSystem";
 import { VortexSystem } from "../systems/VortexSystem";
-import { MAPS, DEFAULT_MAP, type MapId } from "../config/mapRegistry";
+import {
+  MAPS,
+  DEFAULT_MAP,
+  type MapId,
+  type GameMapId,
+} from "../config/mapRegistry";
+import { LOBBY_SPAWN_POINT } from "../config/lobbyMap";
 import {
   SKILL_DEFS,
   MAX_SKILL_LEVEL,
@@ -118,6 +125,12 @@ export class GameRoom extends Room {
 
   private mapSystem!: MapSystem;
   private playerSystem!: PlayerSystem;
+  /** Lobby-side PlayerSystem: processes movement for players whose
+   *  currentMapId === "lobby" using the lobby's MapSystem. */
+  private lobbyPlayerSystem!: PlayerSystem;
+  /** Lobby MapSystem - never changes; used by lobbyPlayerSystem for
+   *  movement collision against the lobby's collision grid. */
+  private lobbyMapSystem!: MapSystem;
   private enemySystem!: EnemySystem;
   private lootSystem!: LootSystem;
   private projectileSystem!: ProjectileSystem;
@@ -134,7 +147,7 @@ export class GameRoom extends Room {
   private enemiesKilled: number = 0;
   /** True once this map's single elite enemy has spawned. */
   private eliteSpawned: boolean = false;
-  private mapId: MapId = DEFAULT_MAP;
+  private mapId: GameMapId = DEFAULT_MAP;
   private activeModifiers: ModifierId[] = [];
   /** True while a map transition is in progress (blocks re-trigger). */
   private transitioning: boolean = false;
@@ -156,6 +169,16 @@ export class GameRoom extends Room {
   >();
 
   onCreate(_options: any) {
+    // The lobby is a permanent, never-rotating map. Its MapSystem +
+    // PlayerSystem live for the entire lifetime of the room.
+    this.lobbyMapSystem = new MapSystem(MAPS.lobby.data);
+    this.lobbyPlayerSystem = new PlayerSystem(
+      this.state,
+      this.lobbyMapSystem,
+      "lobby",
+    );
+    // The gameplay map is initialized up front (map1). Its systems
+    // reset on every map transition (map1 -> map2 etc).
     this.initMap(DEFAULT_MAP);
     this.startSimulation();
   }
@@ -177,14 +200,14 @@ export class GameRoom extends Room {
    * touched here — cards, XP, skill points and inventory carry over.
    * Called on room creation (first map) and on every map transition.
    */
-  private initMap(mapId: MapId): void {
+  private initMap(mapId: GameMapId): void {
     this.mapId = mapId;
     const def = MAPS[mapId];
     this.activeModifiers = def.modifiers;
 
     // ---- Per-map systems (fresh instances = zero stale state) ----
     this.mapSystem = new MapSystem(def.data);
-    this.playerSystem = new PlayerSystem(this.state, this.mapSystem);
+    this.playerSystem = new PlayerSystem(this.state, this.mapSystem, mapId);
     this.enemySystem = new EnemySystem(this.state, this.mapSystem);
     this.lootSystem = new LootSystem(this.state);
     this.projectileSystem = new ProjectileSystem(this.state, this.mapSystem);
@@ -232,6 +255,9 @@ export class GameRoom extends Room {
     this.state.spawnGraceUntil = Date.now() + 5000;
 
     // ---- Reposition existing players at the new map's spawn ----
+    // Only players ALREADY on this gameplay map are repositioned. Lobby
+    // players (currentMapId === "lobby") stay where they are - they
+    // rejoin the new map only when they click "Play".
     const spawn = this.mapSystem.getSpawnPoint();
     // Undo the stats that were in effect on the PREVIOUS map (snapshot
     // taken before expiry), then re-apply only what is STILL active.
@@ -240,6 +266,8 @@ export class GameRoom extends Room {
     const undoFrom = this.lastAppliedStats;
     const stillActive = readAppliedStats(this.state.activeMapStats.values());
     this.state.players.forEach((p) => {
+      // Lobby players are not on this gameplay map - skip them entirely.
+      if (p.currentMapId !== mapId) return;
       p.x = spawn.x;
       p.y = spawn.y;
       p.inputQueue.length = 0;
@@ -311,14 +339,25 @@ export class GameRoom extends Room {
   //core cycle
   fixedTick(timeStepMs: number) {
     const dt = timeStepMs / 1000;
+    // Process movement for ALL players across ALL maps. Each system
+    // filters internally by targetMapId so lobby players get lobby
+    // collision and gameplay players get gameplay collision.
+    this.lobbyPlayerSystem.update(dt);
     this.playerSystem.update(dt);
     this.enemySystem.update(dt);
     this.projectileSystem.update(dt);
     this.clawSystem.update(dt);
     this.slamSystem.update(dt);
     this.vortexSystem.update(dt);
-    // Tick player skill cooldowns + bleed DoT
+    // Tick player skill cooldowns + bleed DoT + handle death.
+    // Lobby players don't tick skills (they have nothing to cast and
+    // can't take damage in the safe zone). When a gameplay-map player
+    // dies, the server moves them to the lobby automatically and the
+    // client tears down its scene on the next patch.
     this.state.players.forEach((p) => {
+      // Lobby players: only their movement input is being processed by
+      // PlayerSystem (already done above). Skip skill/shield ticks.
+      if (p.currentMapId !== this.mapId) return;
       p.tickShield(dt);
       p.tickSlotCooldowns(dt);
       if (p.tickBleed(dt)) {
@@ -328,6 +367,14 @@ export class GameRoom extends Room {
       // Check if player died from any damage source
       if (p.isDead && p.currentHealth === 0) {
         p.die();
+      }
+      // PER-PLAYER DEATH → LOBBY.
+      // The first tick the player's HP hits 0 we teleport them back to
+      // the lobby, give them a fresh loadout, and mark them as a lobby
+      // player. Subsequent ticks short-circuit on the `currentMapId`
+      // check above (they're no longer on the gameplay map).
+      if (p.isDead && p.currentMapId === this.mapId) {
+        this.sendPlayerToLobby(p);
       }
     });
     // Clean up dead enemies
@@ -1011,25 +1058,16 @@ export class GameRoom extends Room {
     // Respawn request (player pressed Respawn button).
     4: (client: Client, _msg: any) => {
       const player = this.state.players.get(client.sessionId);
-      if (!player || !player.isDead) return;
-      // Respawn: reset stats, heal to full, move to spawn point.
-      // respawn() empties all HUD slots (death wipes equipped cards);
-      // we then refill the same starter loadout that onJoin uses so
-      // the player has something to cast immediately.
-      player.respawn();
-      for (let i = 0; i < NUM_CARD_SLOTS && i < STARTER_CARDS.length; i++) {
-        const sc = STARTER_CARDS[i];
-        const card = new CardInstance();
-        card.skill = sc.skill;
-        card.level = sc.level;
-        card.rarity = "common";
-        player.equippedSlots[i] = card;
-      }
-      player.recomputeSkillLevels();
-      player.recomputeShield();
-      const spawn = this.mapSystem.getSpawnPoint();
-      player.x = spawn.x;
-      player.y = spawn.y;
+      if (!player) return;
+      // In the lobby era: "respawn" means "send me back to the lobby".
+      // The server already auto-teleports a dead player to the lobby in
+      // fixedTick(), so this handler is mostly defensive - it lets the
+      // client force a teleport if it gets stuck on the death screen
+      // for any reason. It works whether the player is currently on a
+      // gameplay map (dead or alive - no-op for alive) or already in
+      // the lobby (no-op).
+      if (player.currentMapId === "lobby") return;
+      this.sendPlayerToLobby(player);
     },
 
     // (5 was "map transition XP" — transitions are now fully
@@ -1402,6 +1440,16 @@ export class GameRoom extends Room {
     20: (client: Client, msg: { index: number }) => {
       this.pickMapStatAndTransition(client, msg?.index | 0);
     },
+
+    // ---- Lobby: player pressed "Play" (clicked the Play polygon) ----
+    // msg: {}  (no payload). The server moves the local player from the
+    // lobby to the room's current gameplay map. No-op if the player is
+    // already on a gameplay map.
+    22: (client: Client, _msg: any) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+      this.sendPlayerToGameMap(player);
+    },
   };
 
   // ============================================================
@@ -1433,11 +1481,72 @@ export class GameRoom extends Room {
       player,
       readAppliedStats(this.state.activeMapStats.values()),
     );
-    const spawn = this.mapSystem.getSpawnPoint();
-    player.x = spawn.x;
-    player.y = spawn.y;
+    // ---- LOBBY SPAWN ----
+    // Every player joins in the lobby (safe zone). They have to click
+    // the "Play" polygon to join the room's main gameplay map.
+    player.currentMapId = "lobby";
+    player.x = LOBBY_SPAWN_POINT.x;
+    player.y = LOBBY_SPAWN_POINT.y;
 
     this.state.players.set(client.sessionId, player);
+  }
+
+  /**
+   * TELEPORT a player to the lobby with a fresh loadout.
+   * Used by both the auto-death flow (server-authoritative) and the
+   * "play" handler's reverse path (defensive). Player must currently
+   * be on a gameplay map; lobby players are a no-op.
+   */
+  private sendPlayerToLobby(player: Player): void {
+    if (player.currentMapId === "lobby") return;
+    // Halve XP, then wipe loadout (initBaseStats resets XP to 0 anyway,
+    // but we call die() so the existing XP-loss behaviour stays).
+    player.die();
+    player.freshLoadout();
+    // Re-apply room-level bonuses so the player keeps map-stat
+    // modifiers + active map modifiers when they re-enter the gameplay
+    // map (freshLoadout zeroes damageMultiplier etc.).
+    applyPlayerModifiers(player, this.activeModifiers);
+    applyActiveMapStatsToPlayer(
+      player,
+      readAppliedStats(this.state.activeMapStats.values()),
+    );
+    player.currentMapId = "lobby";
+    player.x = LOBBY_SPAWN_POINT.x;
+    player.y = LOBBY_SPAWN_POINT.y;
+  }
+
+  /**
+   * Move a lobby player onto the room's current gameplay map. The
+   * player keeps their (fresh) loadout and the room's active bonuses.
+   */
+  private sendPlayerToGameMap(player: Player): void {
+    if (player.currentMapId !== "lobby") return;
+    const spawn = this.mapSystem.getSpawnPoint();
+    // Refill starter cards (lobby state has them already but be
+    // explicit in case a future change clears them).
+    for (let i = 0; i < NUM_CARD_SLOTS && i < STARTER_CARDS.length; i++) {
+      const sc = STARTER_CARDS[i];
+      // Only fill empty slots; keep any pre-equipped card.
+      if (!player.hasSlotCard(i)) {
+        const card = new CardInstance();
+        card.skill = sc.skill;
+        card.level = sc.level;
+        card.rarity = "common";
+        player.equippedSlots[i] = card;
+      }
+    }
+    player.recomputeSkillLevels();
+    player.recomputeShield();
+    applyPlayerModifiers(player, this.activeModifiers);
+    applyActiveMapStatsToPlayer(
+      player,
+      readAppliedStats(this.state.activeMapStats.values()),
+    );
+    player.currentMapId = this.mapId;
+    player.x = spawn.x;
+    player.y = spawn.y;
+    player.inputQueue.length = 0;
   }
   onLeave(client: Client, _code: number) {
     console.log("Player left:", client.sessionId);

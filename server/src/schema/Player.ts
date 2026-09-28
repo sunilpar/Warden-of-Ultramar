@@ -210,6 +210,24 @@ export class Player extends Schema {
    */
   shieldRechargeAt: number = 0;
 
+  /**
+   * WHICH map this player is currently on. Synced so the client can
+   * decide which scene to render (LobbyScene vs GameScene) and so the
+   * server can scope enemy systems to the room's gameplay map only.
+   *
+   *   "lobby" = safe zone (no enemies, no spawning, free movement).
+   *             Set on join, on death, and on entering the lobby from
+   *             any other map. The local player can click the "Play"
+   *             polygon to leave the lobby.
+   *   "map1" / "map2" = gameplay maps. The room's enemy systems only
+   *             operate on players whose currentMapId is the room's
+   *             main gameplay map.
+   *
+   * When this changes, the client tears down its current scene and
+   * renders the new one (no in-place swap like map<->map).
+   */
+  @type("string") currentMapId: string = "lobby";
+
   constructor() {
     super();
     // Fixed-size HUD: 5 entries, all empty sentinels to start.
@@ -494,6 +512,22 @@ export class Player extends Schema {
     this.bleedUntil = 0;
     this.bleedDps = 0;
     this.invincibleUntil = 0;
+  }
+
+  /**
+   * FRESH-LOADOUT RESET (lobby arrival).
+   * Like `respawn()` but ALSO wipes the inventory (no carried cards into
+   * the lobby). Used by the GameRoom when a player dies or presses
+   * "Quit to Lobby" - the user explicitly asked for "fresh loadout each
+   * visit", so we discard any loot the player had banked.
+   */
+  freshLoadout(): void {
+    this.respawn();
+    // Empty inventory (same sentinel pattern as clearSlots()).
+    for (let i = 0; i < NUM_INVENTORY_SLOTS; i++) {
+      const c = this.inventorySlots[i];
+      if (c && c.skill) this.emptyCardInPlace(c);
+    }
   }
 
   // ============================================================
@@ -881,11 +915,7 @@ export class Player extends Schema {
     if (i < 0 || i >= NUM_CARD_SLOTS) return false;
     if ((this.slotCooldownRemaining[i] ?? 0) > 0) return false;
     const c = this.equippedSlots[i];
-    if (
-      c &&
-      c.skill === "heal" &&
-      c.level < SKILL_DEFS.heal.aoeUnlockLevel
-    ) {
+    if (c && c.skill === "heal" && c.level < SKILL_DEFS.heal.aoeUnlockLevel) {
       return (this.slotHealKills[i] ?? 0) >= this.healKillThreshold(c.level);
     }
     return true;

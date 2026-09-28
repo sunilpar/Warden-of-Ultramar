@@ -117,12 +117,22 @@ import { updateEntityVisuals } from "../systems/entityRenderer";
 import { getSkillTargeting } from "../config/targeting";
 
 export class GameScene extends Phaser.Scene {
+  /** Optional pre-existing room handed in from LobbyScene (so we don't
+   *  open a duplicate Colyseus connection on every scene swap). */
+  private incomingRoom: any = null;
+  private incomingClient: Client | null = null;
   client = new Client(BACKEND_URL);
   room: any = null;
 
   currentPlayer!: Phaser.GameObjects.Sprite;
   currentPlayerState: any = null;
   playerEntities: { [sessionId: string]: Phaser.GameObjects.Sprite } = {};
+  /** Map sessionId -> per-player change handler so we can detach when
+   *  the player leaves the gameplay map (returns to the lobby). */
+  private playerChangeUnsubs: Map<string, () => void> = new Map();
+  /** Last `currentMapId` we saw for the local player (used to detect
+   *  transitions back to the lobby). */
+  private lastLocalMapId: string | null = null;
   enemyEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
   projectileEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
   clawEntities: { [id: string]: Phaser.GameObjects.Sprite } = {};
@@ -229,6 +239,16 @@ export class GameScene extends Phaser.Scene {
 
   constructor(config: Phaser.Types.Scenes.SettingsConfig) {
     super(config);
+  }
+
+  /**
+   * Receive the existing room+client from LobbyScene when the player
+   * clicked "Play". Stored on the scene instance and consumed in
+   * `create()` so we reuse the connection instead of opening a new one.
+   */
+  init(data?: { room?: any; client?: Client }) {
+    if (data?.room) this.incomingRoom = data.room;
+    if (data?.client) this.incomingClient = data.client;
   }
 
   async create() {
@@ -550,6 +570,13 @@ export class GameScene extends Phaser.Scene {
   }
 
   async connect() {
+    // If LobbyScene handed us an existing room, reuse it. Otherwise
+    // open a fresh connection.
+    if (this.incomingRoom) {
+      this.room = this.incomingRoom;
+      if (this.incomingClient) this.client = this.incomingClient;
+      return;
+    }
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
       const roomPromise = this.client.joinOrCreate("game_room", {});
@@ -581,14 +608,30 @@ export class GameScene extends Phaser.Scene {
     const cb = Callbacks.get(this.room as any) as any;
 
     cb.onAdd("players", (player: any, sessionId: string) => {
+      // Lobby players are owned by LobbyScene; GameScene only renders
+      // players on the active gameplay map.
+      if (player.currentMapId === "lobby") return;
       if (sessionId === this.room.sessionId) {
+        this.lastLocalMapId = player.currentMapId;
         this.createLocalPlayer(player);
       } else {
         this.createRemotePlayer(player, sessionId);
       }
+      // Watch the player's currentMapId - when it flips to "lobby"
+      // (death -> lobby teleport), tear down the sprite and (for the
+      // local player) switch back to LobbyScene.
+      const unsub = cb.onChange(player, () => {
+        this.handlePlayerMapChange(sessionId, player);
+      });
+      this.playerChangeUnsubs.set(sessionId, unsub);
     });
 
     cb.onRemove("players", (_p: any, sessionId: string) => {
+      const unsub = this.playerChangeUnsubs.get(sessionId);
+      if (unsub) {
+        unsub();
+        this.playerChangeUnsubs.delete(sessionId);
+      }
       const entity = this.playerEntities[sessionId];
       if (entity) {
         entity.destroy();
@@ -1040,6 +1083,7 @@ export class GameScene extends Phaser.Scene {
     );
     const cb = Callbacks.get(this.room as any) as any;
     cb.onChange(player, () => {
+      this.handlePlayerMapChange(this.room.sessionId, player);
       this.currentPlayerState = player;
       const dx = Math.abs(sprite.x - player.x);
       const dy = Math.abs(sprite.y - player.y);
@@ -1117,12 +1161,69 @@ export class GameScene extends Phaser.Scene {
     this.playerEntities[sessionId] = sprite;
     const cb = Callbacks.get(this.room as any) as any;
     cb.onChange(player, () => {
+      // If this remote player teleported to the lobby, destroy the
+      // sprite so we don't render a phantom.
+      if (player.currentMapId === "lobby" && this.playerEntities[sessionId]) {
+        const s = this.playerEntities[sessionId];
+        s.destroy();
+        delete this.playerEntities[sessionId];
+        return;
+      }
       sprite.setData("serverX", player.x);
       sprite.setData("serverY", player.y);
       sprite.setData("hitFlashUntil", player.hitFlashUntil ?? 0);
       sprite.setData("hitboxW", player.hitboxW ?? 10);
       sprite.setData("hitboxH", player.hitboxH ?? 10);
     });
+  }
+
+  /**
+   * Handle a player's `currentMapId` flipping to/from the lobby.
+   * For the local player: when they go to the lobby (death -> lobby
+   * teleport), tear down GameScene state and switch to LobbyScene,
+   * passing the room so we don't reconnect.
+   * For remote players: just add/remove their sprite.
+   */
+  private handlePlayerMapChange(sessionId: string, player: any): void {
+    const mapId = player.currentMapId;
+    const isLocal = sessionId === this.room?.sessionId;
+
+    // ---- Local player sent to lobby -> handoff to LobbyScene ----
+    if (isLocal && mapId === "lobby" && this.lastLocalMapId !== "lobby") {
+      this.lastLocalMapId = "lobby";
+      this.cleanupBeforeSceneSwitch();
+      this.scene.start("lobby", { room: this.room, client: this.client });
+      return;
+    }
+    if (isLocal) this.lastLocalMapId = mapId;
+
+    // ---- Remote player returned to the lobby -> remove sprite ----
+    if (!isLocal && mapId === "lobby" && this.playerEntities[sessionId]) {
+      const s = this.playerEntities[sessionId];
+      s.destroy();
+      delete this.playerEntities[sessionId];
+      return;
+    }
+    // ---- Remote player came back to the gameplay map ----
+    if (!isLocal && mapId !== "lobby" && !this.playerEntities[sessionId]) {
+      this.createRemotePlayer(player, sessionId);
+    }
+  }
+
+  /**
+   * Tear down per-scene listeners + entities before handing the room
+   * off to LobbyScene. We DON'T leave the room (LobbyScene reuses it);
+   * we just unsubscribe the change listeners so they don't fire on
+   * a dead scene.
+   */
+  private cleanupBeforeSceneSwitch(): void {
+    for (const unsub of this.playerChangeUnsubs.values()) unsub();
+    this.playerChangeUnsubs.clear();
+    // Hide any visible death screen so LobbyScene starts clean.
+    this.hideDeathScreen();
+    // Note: enemy/projectile/skill entities are owned by THIS scene's
+    // lifecycle (they get destroyed when the scene shuts down). No
+    // explicit cleanup needed here.
   }
 
   updatePlayerAnimation(): void {
@@ -1862,39 +1963,33 @@ export class GameScene extends Phaser.Scene {
     this.deathScreen.container = showDeathScreen(
       this,
       () => {
-        if (this.mapId !== "map1") {
-          this.deathScreen = hideDeathScreen(this.deathScreen);
-          try {
-            this.room?.leave();
-          } catch (_e) {
-            /* ignore */
-          }
-          this.room = null;
-          for (const id in this.playerEntities) {
-            this.playerEntities[id]?.destroy();
-            delete this.playerEntities[id];
-          }
-          for (const id in this.enemyEntities) {
-            this.enemyEntities[id]?.destroy();
-            delete this.enemyEntities[id];
-          }
-          for (const id in this.projectileEntities) {
-            this.projectileEntities[id]?.destroy();
-            delete this.projectileEntities[id];
-          }
-          for (const id in this.clawEntities) {
-            this.clawEntities[id]?.destroy();
-            delete this.clawEntities[id];
-          }
-          this.scene.restart({ fadeIn: true });
-          return;
-        }
+        // "Respawn" in the lobby era = go back to the lobby. The server
+        // has already moved the local player to the lobby (in
+        // GameRoom.fixedTick on death); we just need to switch scenes
+        // so the player sees the lobby instead of the death screen.
+        // As a defensive measure, send the respawn message anyway in
+        // case the server's death handler didn't fire (e.g. client-side
+        // health drift).
         if (this.room) this.room.send(4, {});
         this.slotCards = Array(5).fill(null);
         this.hudCards = Array(5).fill(null);
         this.slotsSyncedOnce = false;
         this.hideBolterTooltip();
         this.deathScreen = hideDeathScreen(this.deathScreen);
+        // The server will set our currentMapId = "lobby" almost
+        // immediately. handlePlayerMapChange will then switch us to
+        // LobbyScene. If for some reason the server doesn't, force the
+        // switch here.
+        if (
+          this.currentPlayerState &&
+          this.currentPlayerState.currentMapId !== "lobby"
+        ) {
+          this.cleanupBeforeSceneSwitch();
+          this.scene.start("lobby", {
+            room: this.room,
+            client: this.client,
+          });
+        }
       },
       () => {
         /* Quit no-op */
