@@ -32,6 +32,13 @@ export class RoomState extends Schema {
    * change). Clients watch this field to rebuild their tilemap.
    */
   @type("string") mapId: string = "map1";
+  /**
+   * True while a run is active (someone pressed Play and the group is
+   * playing the gameplay maps). While true, players in the lobby CANNOT
+   * press Play to join mid-run — only the players that were in the
+   * lobby when the run started participate until the map empties.
+   */
+  @type("boolean") runInProgress: boolean = false;
   /** Server timestamp (ms) until which enemy spawning is disabled
    *  (grace period after map start). 0 = spawning allowed. */
   @type("number") spawnGraceUntil: number = 0;

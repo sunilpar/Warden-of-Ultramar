@@ -65,6 +65,16 @@ export class Player extends Schema {
   @type("number") y: number = 0;
   @type("number") tick: number = 0;
 
+  /**
+   * Persistent display name assigned by the server on first join.
+   * Survives `initBaseStats()` and `freshLoadout()` (death/lobby trip)
+   * because the GameRoom only sets it once per `clientPlayerId`.
+   * Synced so every client can render it above the player's sprite
+   * in the lobby and in the gameplay maps. The client never edits
+   * this field directly — the server is the source of truth.
+   */
+  @type("string") displayName: string = "";
+
   // ---- Health (synced) ----
   @type("number") maxHealth: number = PLAYER_STATS.BASE.MAX_HEALTH;
   @type("number") currentHealth: number = PLAYER_STATS.BASE.MAX_HEALTH;

@@ -114,6 +114,13 @@ import {
   type GroundCardCallbacks,
 } from "../systems/groundCards";
 import { updateEntityVisuals } from "../systems/entityRenderer";
+import {
+  attachPlayerHud,
+  updatePlayerHud,
+  destroyPlayerHud,
+  type PlayerHud,
+} from "../systems/nameLabel";
+import { defaultJoinOptions } from "../clientIdentity";
 import { getSkillTargeting } from "../config/targeting";
 
 export class GameScene extends Phaser.Scene {
@@ -127,6 +134,8 @@ export class GameScene extends Phaser.Scene {
   currentPlayer!: Phaser.GameObjects.Sprite;
   currentPlayerState: any = null;
   playerEntities: { [sessionId: string]: Phaser.GameObjects.Sprite } = {};
+  /** Display-name + HP-bar HUD per player sprite (sessionId -> PlayerHud). */
+  playerHuds: { [sessionId: string]: PlayerHud } = {};
   /** Map sessionId -> per-player change handler so we can detach when
    *  the player leaves the gameplay map (returns to the lobby). */
   private playerChangeUnsubs: Map<string, () => void> = new Map();
@@ -258,6 +267,7 @@ export class GameScene extends Phaser.Scene {
     this.wasDead = false;
     this.room = null;
     this.playerEntities = {};
+    this.playerHuds = {};
     this.enemyEntities = {};
     this.projectileEntities = {};
     this.clawEntities = {};
@@ -579,7 +589,10 @@ export class GameScene extends Phaser.Scene {
     }
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
-      const roomPromise = this.client.joinOrCreate("game_room", {});
+      const roomPromise = this.client.joinOrCreate(
+        "game_room",
+        defaultJoinOptions(),
+      );
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutId = setTimeout(
           () => reject(new Error("Room connection timeout")),
@@ -636,6 +649,11 @@ export class GameScene extends Phaser.Scene {
       if (entity) {
         entity.destroy();
         delete this.playerEntities[sessionId];
+      }
+      const hud = this.playerHuds[sessionId];
+      if (hud) {
+        destroyPlayerHud(hud);
+        delete this.playerHuds[sessionId];
       }
     });
 
@@ -1081,6 +1099,16 @@ export class GameScene extends Phaser.Scene {
       this.mapData.widthPx,
       this.mapData.heightPx,
     );
+    // Player HUD (name + HP bar + shield overlay) above the local sprite.
+    if (this.playerHuds[this.room.sessionId]) {
+      destroyPlayerHud(this.playerHuds[this.room.sessionId]);
+    }
+    this.playerHuds[this.room.sessionId] = attachPlayerHud(
+      this,
+      sprite,
+      player.displayName ?? "",
+      { showHpBar: true },
+    );
     const cb = Callbacks.get(this.room as any) as any;
     cb.onChange(player, () => {
       this.handlePlayerMapChange(this.room.sessionId, player);
@@ -1130,6 +1158,13 @@ export class GameScene extends Phaser.Scene {
       sprite.setData("invincibleUntil", player.invincibleUntil ?? 0);
       sprite.setData("hitboxW", player.hitboxW ?? 10);
       sprite.setData("hitboxH", player.hitboxH ?? 10);
+      // Cached HP/shield for the per-tick HUD update (the tick path
+      // reads from sprite.data, not from the schema, to avoid re-laying
+      // out the world-space HUD bar every patch).
+      sprite.setData("currentHealth", player.currentHealth ?? 0);
+      sprite.setData("maxHealth", player.maxHealth ?? 1);
+      sprite.setData("shield", player.shield ?? 0);
+      sprite.setData("maxShield", player.maxShield ?? 0);
       const seq = player.hitSeq ?? 0;
       const prev = this.entityHitSeqs["__local__"] ?? 0;
       if (seq !== prev) {
@@ -1158,7 +1193,24 @@ export class GameScene extends Phaser.Scene {
       .setDepth(4);
     sprite.setData("serverX", player.x);
     sprite.setData("serverY", player.y);
+    // Pre-populate the cached HP/shield so the very first render isn't
+    // a full bar (or zero bar) - they'll get refreshed on the first
+    // patch in onChange below.
+    sprite.setData("currentHealth", player.currentHealth ?? 0);
+    sprite.setData("maxHealth", player.maxHealth ?? 1);
+    sprite.setData("shield", player.shield ?? 0);
+    sprite.setData("maxShield", player.maxShield ?? 0);
     this.playerEntities[sessionId] = sprite;
+    // Player HUD (name + HP bar + shield overlay) above the remote sprite.
+    if (this.playerHuds[sessionId]) {
+      destroyPlayerHud(this.playerHuds[sessionId]);
+    }
+    this.playerHuds[sessionId] = attachPlayerHud(
+      this,
+      sprite,
+      player.displayName ?? "",
+      { showHpBar: true },
+    );
     const cb = Callbacks.get(this.room as any) as any;
     cb.onChange(player, () => {
       // If this remote player teleported to the lobby, destroy the
@@ -1167,8 +1219,17 @@ export class GameScene extends Phaser.Scene {
         const s = this.playerEntities[sessionId];
         s.destroy();
         delete this.playerEntities[sessionId];
+        const hud = this.playerHuds[sessionId];
+        if (hud) {
+          destroyPlayerHud(hud);
+          delete this.playerHuds[sessionId];
+        }
         return;
       }
+      sprite.setData("currentHealth", player.currentHealth ?? 0);
+      sprite.setData("maxHealth", player.maxHealth ?? 1);
+      sprite.setData("shield", player.shield ?? 0);
+      sprite.setData("maxShield", player.maxShield ?? 0);
       sprite.setData("serverX", player.x);
       sprite.setData("serverY", player.y);
       sprite.setData("hitFlashUntil", player.hitFlashUntil ?? 0);
@@ -1202,6 +1263,11 @@ export class GameScene extends Phaser.Scene {
       const s = this.playerEntities[sessionId];
       s.destroy();
       delete this.playerEntities[sessionId];
+      const hud = this.playerHuds[sessionId];
+      if (hud) {
+        destroyPlayerHud(hud);
+        delete this.playerHuds[sessionId];
+      }
       return;
     }
     // ---- Remote player came back to the gameplay map ----
@@ -1219,6 +1285,12 @@ export class GameScene extends Phaser.Scene {
   private cleanupBeforeSceneSwitch(): void {
     for (const unsub of this.playerChangeUnsubs.values()) unsub();
     this.playerChangeUnsubs.clear();
+    // Detach every HUD so they don't keep rendering after the scene
+    // shuts down (LobbyScene recreates fresh ones on its side).
+    for (const id in this.playerHuds) {
+      destroyPlayerHud(this.playerHuds[id]);
+    }
+    this.playerHuds = {};
     // Hide any visible death screen so LobbyScene starts clean.
     this.hideDeathScreen();
     // Note: enemy/projectile/skill entities are owned by THIS scene's
@@ -2150,6 +2222,37 @@ export class GameScene extends Phaser.Scene {
 
     // ---- Entity visuals: interpolation, anims, HP bars, hit flash ----
     updateEntityVisuals(this as any);
+
+    // ---- Name + HP-bar HUDs follow their sprites after remote interpolation ----
+    for (const id in this.playerEntities) {
+      const sprite = this.playerEntities[id];
+      if (!sprite?.active) continue;
+      const hud = this.playerHuds[id];
+      if (hud) {
+        updatePlayerHud(
+          hud,
+          sprite,
+          hud.lastName,
+          (sprite.data.get("currentHealth") as number) ?? 0,
+          (sprite.data.get("maxHealth") as number) ?? 1,
+          (sprite.data.get("shield") as number) ?? 0,
+          (sprite.data.get("maxShield") as number) ?? 0,
+          true,
+        );
+      }
+    }
+    if (this.currentPlayer && this.playerHuds[this.room.sessionId]) {
+      const localHud = this.playerHuds[this.room.sessionId];
+      // Local player's HP/shield come from currentPlayerState (the
+      // latest server-synced player schema), not sprite.data — the
+      // tick path can fire between onChange patches.
+      const cs = this.currentPlayerState;
+      const hp = cs?.currentHealth ?? 0;
+      const maxHp = cs?.maxHealth ?? 1;
+      const sh = cs?.shield ?? 0;
+      const maxSh = cs?.maxShield ?? 0;
+      updatePlayerHud(localHud, this.currentPlayer, localHud.lastName, hp, maxHp, sh, maxSh, true);
+    }
 
     // ---- Inventory card drag follow ----
     if (this.invDrag) this.updateInvCardDrag(this.input.activePointer);

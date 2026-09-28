@@ -19,6 +19,14 @@
  * GameScene doesn't open a duplicate connection. When GameScene later
  * detects the local player has been moved back to the lobby, it does
  * the reverse and passes the room back.
+ *
+ * SOLO-REDIRECT: When the local player is the ONLY one in the lobby
+ * while the rest of the group is mid-run, pressing Play would normally
+ * be rejected ("run in progress"). Instead the server creates a
+ * FRESH GameRoom and tells this client to leave the old room and join
+ * the new one (message `playRedirected` -> `swapToRoom`). The scene
+ * tears down all lobby sprites/HUDs, then re-binds state on the new
+ * room's Callbacks.
  */
 import Phaser from "phaser";
 import { Client } from "@colyseus/sdk";
@@ -28,6 +36,13 @@ import { LOBBY_MAP_DATA, LOBBY_PLAY_POLYGON } from "../maps/lobbyMapData";
 import { resolveTileCollision } from "../maps/layeredMapData";
 import { createCharacterAnimations } from "../vfx/animations";
 import { bindKeyboard } from "../systems/input";
+import { defaultJoinOptions } from "../clientIdentity";
+import {
+  attachPlayerHud,
+  updatePlayerHud,
+  destroyPlayerHud,
+  type PlayerHud,
+} from "../systems/nameLabel";
 
 /** Message type that matches server/src/rooms/GameRoom.ts (lobby -> play). */
 const MSG_PLAY = 22;
@@ -47,12 +62,17 @@ export class LobbyScene extends Phaser.Scene {
   currentPlayerState: any = null;
   /** Remote players also in the lobby (sessionId -> sprite). */
   playerEntities: { [sessionId: string]: Phaser.GameObjects.Sprite } = {};
+  /** Display-name HUD strip per player sprite (sessionId -> PlayerHud). */
+  playerHuds: { [sessionId: string]: PlayerHud } = {};
   /** Clickable Play polygon. */
   playButton!: Phaser.GameObjects.Rectangle;
   /** Status text shown during room connect / errors. */
   statusText!: Phaser.GameObjects.Text;
   /** FPS counter (debug overlay). */
   debugFPS!: Phaser.GameObjects.Text;
+  /** True while the room's players are mid-run on the gameplay map.
+   *  Play is disabled in that case — nobody can join a map mid-run. */
+  private runInProgress = false;
 
   private wasdKeys!: ReturnType<typeof bindKeyboard>["wasdKeys"];
   private inputPayload = {
@@ -263,16 +283,20 @@ export class LobbyScene extends Phaser.Scene {
     if (!this.room) {
       try {
         this.client = new Client(BACKEND_URL);
-        this.room = await this.client.joinOrCreate("game_room", {});
+        this.room = await this.client.joinOrCreate(
+          "game_room",
+          defaultJoinOptions(),
+        );
       } catch (e) {
         console.error("LobbyScene failed to connect:", e);
         this.statusText.setText("Connection failed - refresh to retry");
         return;
       }
     }
-    this.statusText.setText(
-      `In lobby — click PLAY to begin (${this.room.sessionId.slice(0, 6)})`,
-    );
+    // ---- Initial status text (will be re-rendered by updateLobbyStatus
+    //      once the local player is registered) ----
+    this.statusText.setText("In lobby - click PLAY to begin");
+    this.runInProgress = !!this.room.state?.runInProgress;
 
     // ---- Production fullscreen (mirrors the old SceneSelector behavior) ----
     if (
@@ -394,7 +418,19 @@ export class LobbyScene extends Phaser.Scene {
 
   private requestPlay(): void {
     if (!this.room) return;
-    // Send the "play" message - server teleports us to the gameplay map.
+    // Always forward the press to the server - it's the only place
+    // with the authority to decide what happens. The server handles
+    // three cases:
+    //   * lobby has 2+ players + runInProgress == false
+    //       -> startRun() takes everyone to map1 together.
+    //   * lobby has 2+ players + runInProgress == true
+    //       -> playRejected("run_in_progress") - we wait.
+    //   * lobby has 1 player (dead or fresh) + runInProgress == true
+    //       -> playRedirected(...) - server spawns a fresh solo room.
+    //   * lobby has 1 player + runInProgress == false
+    //       -> startRun() takes us to a fresh map1 in this room.
+    // We deliberately do NOT gate the button client-side on
+    // runInProgress - that was swallowing the dead-loner solo press.
     this.room.send(MSG_PLAY, {});
   }
 
@@ -402,8 +438,49 @@ export class LobbyScene extends Phaser.Scene {
   // ROOM STATE BINDINGS
   // ============================================================
 
+  /**
+   * Wires Colyseus Callbacks to scene state. Safe to call AGAIN after
+   * a solo-redirect (the new room gets a fresh Callbacks instance via
+   * `Callbacks.get(this.room)`, so listeners from the old room become
+   * inert once we leave it).
+   */
   private bindRoomStateListeners(): void {
     const cb = Callbacks.get(this.room as any) as any;
+
+    // ---- Run-in-progress watch ----
+    // The button itself is never client-gated (the server is the only
+    // authority) but the STATUS TEXT changes depending on whether we
+    // could solo-start now vs have to wait for the group.
+    cb.listen("runInProgress", (v: boolean) => {
+      this.runInProgress = !!v;
+      this.updateLobbyStatus();
+    });
+
+    // Server rejected our Play press (a run is already active, and
+    // this player is NOT alone in the lobby - so we wait our turn).
+    (this.room as any).onMessage("playRejected", (_msg: any) => {
+      this.runInProgress = true;
+      this.updateLobbyStatus();
+    });
+
+    // ---- Solo redirect ----
+    // We pressed Play while the dead-only-in-lobby scenario was
+    // active: the server created a fresh GameRoom and is telling us
+    // to swap to it. We tear down all lobby-state sprites/HUDs,
+    // leave the old room, join the new one, and rebind state. Our
+    // sticky `clientPlayerId` keeps our display name across the swap.
+    (this.room as any).onMessage("playRedirected", (msg: any) => {
+      const newRoomId = msg?.roomId;
+      if (!newRoomId) {
+        console.warn("[LOBBY] playRedirected without roomId:", msg);
+        return;
+      }
+      this.statusText.setText("Starting solo run...");
+      this.swapToRoom(newRoomId).catch((e) => {
+        console.error("[LOBBY] Solo swap failed:", e);
+        this.statusText.setText("Solo run failed - press PLAY to retry");
+      });
+    });
 
     cb.onAdd("players", (player: any, sessionId: string) => {
       // Only render players that are CURRENTLY in the lobby. A player
@@ -416,6 +493,9 @@ export class LobbyScene extends Phaser.Scene {
       } else {
         this.createRemotePlayer(player, sessionId);
       }
+      // Lobby count just changed - re-render the status line so the
+      // "alone → can solo" hint is up to date.
+      this.updateLobbyStatus();
       // Watch for currentMapId changes (lobby <-> gameplay swap).
       cb.onChange(player, () => {
         this.handlePlayerMapChange(sessionId, player);
@@ -432,8 +512,157 @@ export class LobbyScene extends Phaser.Scene {
         entity.destroy();
         delete this.playerEntities[sessionId];
       }
+      const hud = this.playerHuds[sessionId];
+      if (hud) {
+        destroyPlayerHud(hud);
+        delete this.playerHuds[sessionId];
+      }
+      // Lobby count may have changed - re-render status.
+      this.updateLobbyStatus();
     });
   }
+
+  // ============================================================
+  // SOLO-REDIRECT SWAP
+  // ============================================================
+
+  /**
+   * Leave the current (lobby) room and join the freshly-created solo
+   * GameRoom the server told us about. Destroys every sprite/HUD that
+   * belonged to the old room's lobby, then re-runs
+   * `bindRoomStateListeners()` against the new room so the new room's
+   * `onAdd("players")` fires and re-creates the local player sprite
+   * (now in the new room's roster).
+   */
+  private async swapToRoom(roomId: string): Promise<void> {
+    const oldRoom = this.room;
+    console.log(`[LOBBY] Swapping to solo room ${roomId}`);
+
+    // 1) Tear down all lobby-side visuals + bookkeeping BEFORE we leave
+    // the old room, so the dying connection can't fire an onRemove that
+    // touches half-cleared state.
+    this.teardownLobbyState();
+
+    // 2) Leave the old room. wrap:true means if the connection is
+    // already dead we don't throw a confusing error.
+    if (oldRoom) {
+      try {
+        await oldRoom.leave(true);
+      } catch (e) {
+        console.warn("[LOBBY] Old room leave failed (likely already closed):", e);
+      }
+    }
+
+    // 3) Join the new room with our sticky clientPlayerId so the
+    // server re-binds us to our existing display name in the new
+    // room's fresh name cache.
+    try {
+      this.room = await this.client.joinById(roomId, defaultJoinOptions());
+    } catch (e) {
+      console.error("[LOBBY] joinById failed:", e);
+      this.statusText.setText("Failed to join solo run - press PLAY to retry");
+      throw e;
+    }
+
+    this.statusText.setText(
+      `In solo run — entering map1... (${this.room.sessionId.slice(0, 6)})`,
+    );
+
+    // 4) Re-bind state on the NEW room. Its onAdd("players") will fire
+    // for our Player object (the only one in the solo room) and
+    // createLocalPlayer is called for it.
+    this.bindRoomStateListeners();
+
+    // 5) RACE-SAFE local-player setup: by the time we get here, the
+    // solo room's onJoin already added our Player to state. If the
+    //    cb.onAdd fired BEFORE we called bindRoomStateListeners, our
+    //    createLocalPlayer never ran - meaning no onChange handler
+    //    is registered, and the server-side soloRun auto-startRun
+    //    (player.currentMapId -> "map1") would never trigger our
+    //    scene.start("game"). Sweep the state once to ensure we have
+    //    a local sprite + onChange ready for the upcoming patch.
+    const localPlayer = this.room.state.players.get(this.room.sessionId);
+    if (localPlayer && !this.currentPlayer) {
+      console.log(
+        "[LOBBY] cb.onAdd missed the local player - syncing manually",
+      );
+      this.createLocalPlayer(localPlayer);
+    }
+  }
+
+  /**
+   * Render the status line at the top of the screen using the rules
+   * below. Read on every lobby-affecting state change (room connect,
+   * runInProgress flip, player add/remove, map transition, server
+   * rejection). The contract is:
+   *
+   *   * No room / no local player           -> "In lobby - click PLAY"
+   *   * 1+ other players in the lobby + run in progress
+   *                                          -> "Run in progress - wait
+   *                                             for the group"
+   *   * You are ALONE in lobby + run in progress
+   *                                          -> "Press PLAY to start a
+   *                                             solo run"  (key UX fix)
+   *   * No run in progress                   -> "In lobby - click PLAY"
+   */
+  private updateLobbyStatus(): void {
+    if (!this.statusText) return;
+    if (!this.room || !this.currentPlayerState) return;
+    // Count how many players are currently in the lobby (incl. us).
+    let lobbyCount = 0;
+    try {
+      const players = this.room.state?.players;
+      if (players?.forEach) {
+        players.forEach((p: any) => {
+          if (p && p.currentMapId === "lobby") lobbyCount++;
+        });
+      }
+    } catch {
+      // state may not be ready yet - fall through to default text
+    }
+    const aloneInLobby = lobbyCount <= 1;
+    if (this.runInProgress) {
+      this.statusText.setText(
+        aloneInLobby
+          ? `Press PLAY to start your solo run (${this.room.sessionId.slice(0, 6)})`
+          : "Run in progress - wait for the group to finish",
+      );
+    } else {
+      this.statusText.setText(
+        `In lobby - click PLAY to begin (${this.room.sessionId.slice(0, 6)})`,
+      );
+    }
+  }
+
+  /**
+   * Destroy every lobby-side sprite + HUD and clear the bookkeeping
+   * maps. Called BEFORE we leave the current room so the dying
+   * connection's onRemove can't touch cleared state.
+   */
+  private teardownLobbyState(): void {
+    if (this.currentPlayer) {
+      this.cameras.main.stopFollow();
+      this.currentPlayer.destroy();
+      this.currentPlayer = null;
+    }
+    this.currentPlayerState = null;
+    this.lastLocalMapId = null;
+    this.runInProgress = false;
+    for (const id in this.playerEntities) {
+      const s = this.playerEntities[id];
+      if (s) s.destroy();
+      delete this.playerEntities[id];
+    }
+    for (const id in this.playerHuds) {
+      const hud = this.playerHuds[id];
+      if (hud) destroyPlayerHud(hud);
+      delete this.playerHuds[id];
+    }
+  }
+
+  // ============================================================
+  // PLAYER + HUD CREATION
+  // ============================================================
 
   /**
    * Create the LOCAL player sprite and attach the camera.
@@ -454,6 +683,16 @@ export class LobbyScene extends Phaser.Scene {
       LOBBY_MAP_DATA.widthPx,
       LOBBY_MAP_DATA.heightPx,
     );
+    // Name HUD above the local sprite (no HP bar in the lobby).
+    if (this.playerHuds[this.room.sessionId]) {
+      destroyPlayerHud(this.playerHuds[this.room.sessionId]);
+    }
+    this.playerHuds[this.room.sessionId] = attachPlayerHud(
+      this,
+      sprite,
+      player.displayName ?? "",
+      { showHpBar: false },
+    );
 
     const cb = Callbacks.get(this.room as any) as any;
     cb.onChange(player, () => {
@@ -468,6 +707,9 @@ export class LobbyScene extends Phaser.Scene {
       }
       sprite.setData("serverX", player.x);
       sprite.setData("serverY", player.y);
+      // Refresh the local HUD text in case the name was reassigned.
+      const hud = this.playerHuds[this.room.sessionId];
+      if (hud) updatePlayerHud(hud, sprite, player.displayName ?? "", 0, 1, 0, 0, false);
       this.handlePlayerMapChange(this.room.sessionId, player);
     });
   }
@@ -479,6 +721,37 @@ export class LobbyScene extends Phaser.Scene {
     sprite.setData("serverX", player.x);
     sprite.setData("serverY", player.y);
     this.playerEntities[sessionId] = sprite;
+    // Name HUD above the remote sprite (no HP bar in the lobby).
+    if (this.playerHuds[sessionId]) {
+      destroyPlayerHud(this.playerHuds[sessionId]);
+    }
+    this.playerHuds[sessionId] = attachPlayerHud(
+      this,
+      sprite,
+      player.displayName ?? "",
+      { showHpBar: false },
+    );
+    const cb = Callbacks.get(this.room as any) as any;
+    cb.onChange(player, () => {
+      // CRITICAL: keep the sprite's lerp target in sync with the
+      // server-side Player position. Without this the remote sprite
+      // stays at its initial position forever (the smoothing in
+      // fixedTick lerps toward (serverX, serverY), which would be
+      // stuck at the join coordinates).
+      sprite.setData("serverX", player.x);
+      sprite.setData("serverY", player.y);
+      // Hard snap on large desync so the remote doesn't drift if
+      // a packet is dropped or the lerp falls behind.
+      const dx = Math.abs(sprite.x - player.x);
+      const dy = Math.abs(sprite.y - player.y);
+      if (dx > 64 || dy > 64) {
+        sprite.x = player.x;
+        sprite.y = player.y;
+      }
+      // Refresh the HUD text in case the display name was reassigned.
+      const hud = this.playerHuds[sessionId];
+      if (hud) updatePlayerHud(hud, sprite, player.displayName ?? "", 0, 1, 0, 0, false);
+    });
   }
 
   /**
@@ -492,25 +765,47 @@ export class LobbyScene extends Phaser.Scene {
     const mapId = player.currentMapId;
     const isLocal = sessionId === this.room.sessionId;
 
-    // ---- Local player leaving the lobby -> switch to GameScene ----
-    if (isLocal && mapId !== "lobby" && this.lastLocalMapId === "lobby") {
+    // ---- LOCAL PLAYER BRANCH ----
+    // Only the local player's currentMapId drives scene transitions.
+    // Critically, we MUST NOT touch `lastLocalMapId` for remote player
+    // changes - a remote player leaving the lobby would otherwise
+    // poison the local transition gate ("lastLocalMapId === lobby"
+    // would no longer match when our own player's patch arrives a
+    // moment later, and the local client would stay stuck in the
+    // lobby while the rest of the group runs on the map).
+    if (isLocal) {
+      if (mapId !== "lobby" && this.lastLocalMapId === "lobby") {
+        // Leaving the lobby -> handoff the room + client so GameScene
+        // doesn't reconnect, then start it.
+        this.lastLocalMapId = mapId;
+        this.scene.start("game", { room: this.room, client: this.client });     
+        return;
+      }
       this.lastLocalMapId = mapId;
-      // Hand off the connection so GameScene doesn't reconnect.
-      this.scene.start("game", { room: this.room, client: this.client });
+      // Local may have just died (map1 -> lobby): lobby count changed.
+      this.updateLobbyStatus();
       return;
     }
-    this.lastLocalMapId = mapId;
 
-    // ---- Remote player entering the lobby ----
-    if (!isLocal && mapId === "lobby" && !this.playerEntities[sessionId]) {
-      this.createRemotePlayer(player, sessionId);
-      return;
-    }
-    // ---- Remote player leaving the lobby -> remove their sprite ----
-    if (!isLocal && mapId !== "lobby" && this.playerEntities[sessionId]) {
+    // ---- REMOTE PLAYER BRANCH ----
+    // Remote player leaving the lobby -> remove their sprite + HUD.
+    if (mapId !== "lobby" && this.playerEntities[sessionId]) {
       const sprite = this.playerEntities[sessionId];
       sprite.destroy();
       delete this.playerEntities[sessionId];
+      const hud = this.playerHuds[sessionId];
+      if (hud) {
+        destroyPlayerHud(hud);
+        delete this.playerHuds[sessionId];
+      }
+      this.updateLobbyStatus();
+      return;
+    }
+    // Remote player entering the lobby (mid-game group dropping in,
+    // or a freshly-connected second tab) -> spawn their sprite + HUD.
+    if (mapId === "lobby" && !this.playerEntities[sessionId]) {
+      this.createRemotePlayer(player, sessionId);
+      this.updateLobbyStatus();
       return;
     }
   }
@@ -548,8 +843,14 @@ export class LobbyScene extends Phaser.Scene {
       sprite.anims.currentAnim.key !== targetKey
     ) {
       sprite.anims.play(targetKey);
-      if (targetKey === "player_idle") sprite.setFlipX(direction === "right");
     }
+    // The walk animations have a facing per row; only the IDLE anim is
+    // flipped to face the last direction. Reset the flip whenever we
+    // play a walk anim — otherwise the flip set during a previous idle
+    // leaks into the walk animation and the player appears to walk in
+    // the OPPOSITE direction.
+    if (moving) sprite.setFlipX(false);
+    else sprite.setFlipX(direction === "right");
   }
 
   private fixedTick(): void {
@@ -610,6 +911,14 @@ export class LobbyScene extends Phaser.Scene {
       const sy = sprite.data.get("serverY") as number;
       sprite.x += (sx - sprite.x) * 0.4;
       sprite.y += (sy - sprite.y) * 0.4;
+      const hud = this.playerHuds[id];
+      if (hud)
+        updatePlayerHud(hud, sprite, hud.lastName, 0, 1, 0, 0, false);
+    }
+    // Local HUD tracks the local sprite (we move it directly above).
+    if (this.currentPlayer && this.playerHuds[this.room.sessionId]) {
+      const localHud = this.playerHuds[this.room.sessionId];
+      updatePlayerHud(localHud, this.currentPlayer, localHud.lastName, 0, 1, 0, 0, false);
     }
   }
 

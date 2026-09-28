@@ -29,7 +29,8 @@
  *  10: Drop slot card  { slot: number }
  *  11: Pick up card    { cardId, slot: number }
  *  12: Move ground card{ cardId, x, y }
- *  22: Lobby -> gameplay map (player clicked "Play" in the lobby)
+ *  22: Lobby "Play" — starts a run for everyone in the lobby (blocked
+ *      while a run is in progress; nobody joins a map mid-run)
  *
  * CARD MODEL
  * The player HUD is `player.equippedSlots` — a synced array of 5 card
@@ -37,7 +38,7 @@
  * the SLOT, and the card in that slot casts its skill with ITS OWN mods.
  * Duplicates of the same skill are allowed (each slot independent).
  */
-import { Room, Client } from "colyseus";
+import { Room, Client, matchMaker } from "colyseus";
 import { RoomState } from "../schema/RoomState";
 import { GroundCard } from "../schema/GroundCard";
 import { CardInstance } from "../schema/CardInstance";
@@ -96,6 +97,7 @@ import {
   type RolledMapStat,
 } from "../config/mapStats";
 import { MapStat } from "../schema/MapStat";
+import { pickUniqueName } from "../config/namePool";
 
 /** Serialized map-stat offer sent over the wire to the picker UI. */
 export interface SerializedMapStatOffer {
@@ -109,6 +111,13 @@ export interface SerializedMapStatOffer {
   badValue: number;
   durationMaps: number;
 }
+
+/**
+ * Stable per-browser identifier the client persists in localStorage
+ * and re-sends on every join. The server uses it to give the same
+ * player the same display name across rooms (within one process).
+ */
+const CLIENT_PLAYER_ID_KEY = "clientPlayerId";
 
 /** Starter cards handed to FRESH players (all 5 slots filled). */
 const STARTER_CARDS: { skill: SkillId; level: number }[] = [
@@ -167,8 +176,28 @@ export class GameRoom extends Room {
     string,
     { x: number; y: number; w: number; h: number }
   >();
+  /**
+   * Sticky name assignment cache: maps a client's persistent
+   * `clientPlayerId` to the display name the server gave them.
+   * Cleared when the room is disposed (process restart).
+   */
+  private nameByClientId = new Map<string, string>();
+  /**
+   * Names currently in use by ANY player connected to THIS room
+   * (across the live roster). Updated on join + leave so freshly
+   * joining players don't collide with current neighbours.
+   */
+  private namesInUse = new Set<string>();
+  /**
+   * Set when this room was created by `spawnSoloRunFor` (matches the
+   * `soloRun: true` option passed to `matchMaker.createRoom`). When
+   * true, the FIRST player that joins is auto-teleported to map1 by
+   * `startRun()` so the dead-loner Play press takes them straight to
+   * the map without requiring a second click on the new room's lobby.
+   */
+  private isSoloRun = false;
 
-  onCreate(_options: any) {
+  onCreate(options?: any) {
     // The lobby is a permanent, never-rotating map. Its MapSystem +
     // PlayerSystem live for the entire lifetime of the room.
     this.lobbyMapSystem = new MapSystem(MAPS.lobby.data);
@@ -181,6 +210,11 @@ export class GameRoom extends Room {
     // reset on every map transition (map1 -> map2 etc).
     this.initMap(DEFAULT_MAP);
     this.startSimulation();
+    // Solo-run flag: carried from matchMaker.createRoom options.
+    if (options && options.soloRun) {
+      this.isSoloRun = true;
+      console.log("[ROOM] Solo-run room created - first join will auto-start");
+    }
   }
 
   /** Fixed timestep simulation loop (started once, on room create). */
@@ -255,9 +289,9 @@ export class GameRoom extends Room {
     this.state.spawnGraceUntil = Date.now() + 5000;
 
     // ---- Reposition existing players at the new map's spawn ----
-    // Only players ALREADY on this gameplay map are repositioned. Lobby
-    // players (currentMapId === "lobby") stay where they are - they
-    // rejoin the new map only when they click "Play".
+    // Only players ON A GAMEPLAY MAP move with the room (their
+    // currentMapId is updated to the new map). Lobby players stay
+    // where they are - they rejoin only when a new run starts.
     const spawn = this.mapSystem.getSpawnPoint();
     // Undo the stats that were in effect on the PREVIOUS map (snapshot
     // taken before expiry), then re-apply only what is STILL active.
@@ -266,8 +300,9 @@ export class GameRoom extends Room {
     const undoFrom = this.lastAppliedStats;
     const stillActive = readAppliedStats(this.state.activeMapStats.values());
     this.state.players.forEach((p) => {
-      // Lobby players are not on this gameplay map - skip them entirely.
-      if (p.currentMapId !== mapId) return;
+      // Lobby players are not part of the run - skip them entirely.
+      if (p.currentMapId === "lobby") return;
+      p.currentMapId = mapId;
       p.x = spawn.x;
       p.y = spawn.y;
       p.inputQueue.length = 0;
@@ -375,6 +410,8 @@ export class GameRoom extends Room {
       // check above (they're no longer on the gameplay map).
       if (p.isDead && p.currentMapId === this.mapId) {
         this.sendPlayerToLobby(p);
+        // The run may now be over (this was the last player on the map).
+        this.endRunIfNeeded();
       }
     });
     // Clean up dead enemies
@@ -501,6 +538,11 @@ export class GameRoom extends Room {
     let alive = 0;
     let onExit = 0;
     this.state.players.forEach((p) => {
+      // ONLY players on this gameplay map participate in the exit
+      // check. Lobby players (full HP after freshLoadout) would count
+      // as "alive but never on the exit" and permanently block the
+      // transition for the rest of the group.
+      if (p.currentMapId !== this.mapId) return;
       if (p.isDead) return;
       alive++;
       const inside =
@@ -1068,6 +1110,8 @@ export class GameRoom extends Room {
       // the lobby (no-op).
       if (player.currentMapId === "lobby") return;
       this.sendPlayerToLobby(player);
+      // The run may now be over (this was the last player on the map).
+      this.endRunIfNeeded();
     },
 
     // (5 was "map transition XP" — transitions are now fully
@@ -1442,13 +1486,47 @@ export class GameRoom extends Room {
     },
 
     // ---- Lobby: player pressed "Play" (clicked the Play polygon) ----
-    // msg: {}  (no payload). The server moves the local player from the
-    // lobby to the room's current gameplay map. No-op if the player is
-    // already on a gameplay map.
+    // msg: {}  (no payload). Starts a NEW RUN for the whole lobby group:
+    // every player currently in the lobby is teleported to the (fresh)
+    // gameplay map together.
+    //
+    // Two "in progress" scenarios that this handler must distinguish:
+    //
+    //   (a) GROUP press — 2+ lobby players. The press waits until the
+    //       current run ends (so the new group doesn't split the
+    //       existing run-in-progress).
+    //
+    //   (b) SOLO press — exactly 1 lobby player while a run is active
+    //       elsewhere. We CANNOT clobber the existing run by calling
+    //       `initMap()`. Instead we ask Colyseus to spin up a brand
+    //       new GameRoom (separate roomId, separate state) and reply
+    //       with `playRedirected` so the client leaves this room and
+    //       joins the new one. The solo player starts a clean run on
+    //       map1 with no cross-talk with the original group's run.
     22: (client: Client, _msg: any) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
-      this.sendPlayerToGameMap(player);
+      if (player.currentMapId !== "lobby") return;
+      if (this.state.runInProgress) {
+        // Count how many players are still in THIS room's lobby.
+        let lobbyCount = 0;
+        this.state.players.forEach((p) => {
+          if (p.currentMapId === "lobby") lobbyCount++;
+        });
+        if (lobbyCount <= 1) {
+          // (b) Solo press while a run is active: spin up a fresh
+          // GameRoom for this player. matchMaker.createRoom is async
+          // and Colyseus does not await user message handlers, so we
+          // fire-and-forget and rely on the client to leave + rejoin.
+          void this.spawnSoloRunFor(client);
+          return;
+        }
+        // (a) Group press while a run is active: must wait for it to
+        // finish. Tell the client so its status text can show this.
+        client.send("playRejected", { reason: "run_in_progress" });
+        return;
+      }
+      this.startRun();
     },
   };
 
@@ -1456,7 +1534,7 @@ export class GameRoom extends Room {
   // CONNECTION LIFECYCLE
   // ============================================================
 
-  onJoin(client: Client, _options: any) {
+  onJoin(client: Client, options?: any) {
     console.log("Player joined GameRoom:", client.sessionId);
 
     const player = new Player();
@@ -1481,6 +1559,31 @@ export class GameRoom extends Room {
       player,
       readAppliedStats(this.state.activeMapStats.values()),
     );
+    // ---- Assign a sticky display name ----
+    // Re-use the cached name if the same client reconnects (same
+    // browser, same localStorage id) AND it's not currently claimed
+    // by someone else in this room. Otherwise pick a unique one
+    // from the pool and update the cache so subsequent joins stick.
+    const clientId =
+      (options && typeof options[CLIENT_PLAYER_ID_KEY] === "string"
+        ? (options[CLIENT_PLAYER_ID_KEY] as string)
+        : client.sessionId) || client.sessionId;
+    const cached = this.nameByClientId.get(clientId);
+    let name: string;
+    if (cached && !this.namesInUse.has(cached)) {
+      // Cached but free (e.g. previous connection dropped) - reuse.
+      name = cached;
+    } else {
+      // No cache, or another live connection already owns it -> draw
+      // fresh and rebind this client to the new name (sticky from now on).
+      name = pickUniqueName(this.namesInUse, clientId);
+      this.nameByClientId.set(clientId, name);
+    }
+    this.namesInUse.add(name);
+    player.displayName = name;
+    console.log(
+      `[NAME] ${client.sessionId} (${clientId.slice(0, 8)}...) -> "${name}"`,
+    );
     // ---- LOBBY SPAWN ----
     // Every player joins in the lobby (safe zone). They have to click
     // the "Play" polygon to join the room's main gameplay map.
@@ -1489,12 +1592,30 @@ export class GameRoom extends Room {
     player.y = LOBBY_SPAWN_POINT.y;
 
     this.state.players.set(client.sessionId, player);
+
+    // ---- SOLO RUN: auto-start the run on first join ----
+    // The room was created via matchMaker with `soloRun: true`. The
+    // player who joined is the dead-loner; take them straight to map1
+    // (no second Play click needed in the new room). We use a small
+    // timeout so the client's joinById handshake completes + the
+    // initial state is in their hands before we mutate the player.
+    if (this.isSoloRun) {
+      console.log(
+        `[RUN] Solo-run room auto-starting run for ${client.sessionId}`,
+      );
+      setTimeout(() => {
+        // Guard: re-check the flag in case the room got disposed.
+        if (this.isSoloRun && this.state.players.has(client.sessionId)) {
+          this.startRun();
+        }
+      }, 100);
+    }
   }
 
   /**
    * TELEPORT a player to the lobby with a fresh loadout.
    * Used by both the auto-death flow (server-authoritative) and the
-   * "play" handler's reverse path (defensive). Player must currently
+   * "respawn" handler (message 4, defensive). Player must currently
    * be on a gameplay map; lobby players are a no-op.
    */
   private sendPlayerToLobby(player: Player): void {
@@ -1517,41 +1638,132 @@ export class GameRoom extends Room {
   }
 
   /**
-   * Move a lobby player onto the room's current gameplay map. The
-   * player keeps their (fresh) loadout and the room's active bonuses.
+   * START A RUN: every player currently in the lobby joins the room's
+   * gameplay map together. The map is re-initialized (fresh enemies,
+   * fresh spawn grace) so the whole group starts clean from map1's
+   * spawn. Only lobby players participate; late joiners (connected
+   * after the run started) must wait in the lobby until the run ends.
    */
-  private sendPlayerToGameMap(player: Player): void {
-    if (player.currentMapId !== "lobby") return;
-    const spawn = this.mapSystem.getSpawnPoint();
-    // Refill starter cards (lobby state has them already but be
-    // explicit in case a future change clears them).
-    for (let i = 0; i < NUM_CARD_SLOTS && i < STARTER_CARDS.length; i++) {
-      const sc = STARTER_CARDS[i];
-      // Only fill empty slots; keep any pre-equipped card.
-      if (!player.hasSlotCard(i)) {
-        const card = new CardInstance();
-        card.skill = sc.skill;
-        card.level = sc.level;
-        card.rarity = "common";
-        player.equippedSlots[i] = card;
-      }
-    }
-    player.recomputeSkillLevels();
-    player.recomputeShield();
-    applyPlayerModifiers(player, this.activeModifiers);
-    applyActiveMapStatsToPlayer(
-      player,
-      readAppliedStats(this.state.activeMapStats.values()),
+  private startRun(): void {
+    // Collect everyone who is in the lobby RIGHT NOW — they are the
+    // run's fixed roster. Players still connecting are out of luck.
+    const lobbyPlayers: Player[] = [];
+    this.state.players.forEach((p) => {
+      if (p.currentMapId === "lobby") lobbyPlayers.push(p);
+    });
+    if (lobbyPlayers.length === 0) return;
+
+    // Fresh map for the new run: resets per-map state (enemies, zones,
+    // exit gate, spawn counters) and re-arms the 5s spawn grace. The
+    // room always restarts runs on map1 (DEFAULT_MAP) so mid-run joins
+    // can't inherit a half-cleared deeper map.
+    this.initMap(DEFAULT_MAP);
+
+    this.state.runInProgress = true;
+    console.log(
+      `[RUN] Started with ${lobbyPlayers.length} player(s) from the lobby`,
     );
-    player.currentMapId = this.mapId;
-    player.x = spawn.x;
-    player.y = spawn.y;
-    player.inputQueue.length = 0;
+
+    const spawn = this.mapSystem.getSpawnPoint();
+    for (const p of lobbyPlayers) {
+      // Reset stat-derived fields to a clean base BEFORE re-applying the
+      // room's bonuses. Players already carry one application from their
+      // lobby entry (onJoin / sendPlayerToLobby) — applying again without
+      // resetting would double every map-stat bonus. initBaseStats is
+      // safe here: death already zeroed level/XP (freshLoadout) and
+      // fresh joiners are at base stats anyway.
+      p.initBaseStats();
+      // Refill starter cards (lobby state has them already but be
+      // explicit in case a future change clears them).
+      for (let i = 0; i < NUM_CARD_SLOTS && i < STARTER_CARDS.length; i++) {
+        if (!p.hasSlotCard(i)) {
+          const sc = STARTER_CARDS[i];
+          const card = new CardInstance();
+          card.skill = sc.skill;
+          card.level = sc.level;
+          card.rarity = "common";
+          p.equippedSlots[i] = card;
+        }
+      }
+      p.recomputeSkillLevels();
+      p.recomputeShield();
+      applyPlayerModifiers(p, this.activeModifiers);
+      applyActiveMapStatsToPlayer(
+        p,
+        readAppliedStats(this.state.activeMapStats.values()),
+      );
+      p.currentMapId = this.mapId;
+      p.x = spawn.x;
+      p.y = spawn.y;
+      p.inputQueue.length = 0;
+    }
+  }
+
+  /**
+   * SPAWN A NEW ROOM for a solo player who's the only one in the
+   * lobby while another run is active. The new room has its OWN
+   * GameRoom state (fresh `initMap(DEFAULT_MAP)` on its first
+   * `startRun()` call), so the solo player starts a clean run that
+   * doesn't disturb the original group's run.
+   *
+   * Implementation note: Colyseus does NOT await user message
+   * handlers, so we kick off the async create and rely on the
+   * client to `room.leave()` + `client.joinById(roomId)` once it
+   * receives the `playRedirected` message. If the create fails
+   * the client falls back to the regular lobby-waiting state.
+   */
+  private async spawnSoloRunFor(client: Client): Promise<void> {
+    try {
+      // Mark the new room as a solo-run room so onCreate flips the
+      // auto-start flag. The FIRST player to join it (our dead-loner)
+      // will be teleported to map1 automatically — they don't have to
+      // press Play a second time inside the new room's lobby.
+      const cache = await matchMaker.createRoom("game_room", { soloRun: true });
+      // Hand the new room id back to the client. It will leave this
+      // room and joinById the new one (see client LobbyScene).
+      client.send("playRedirected", {
+        reason: "solo_run",
+        roomId: cache.roomId,
+      });
+      console.log(
+        `[RUN] Solo redirect for ${client.sessionId} -> ${cache.roomId}`,
+      );
+    } catch (e) {
+      console.error("[RUN] Failed to create solo room:", e);
+      client.send("playRejected", { reason: "spawn_failed" });
+    }
+  }
+
+  /**
+   * END THE RUN: called when the last player leaves the gameplay map
+   * (death -> lobby or disconnect). Resets the room's run flag so the
+   * next "Play" press in the lobby can start a fresh group run.
+   * Per-map state is NOT reset here — startRun() re-initializes the
+   * map when the next run begins.
+   */
+  private endRunIfNeeded(): void {
+    if (!this.state.runInProgress) return;
+    let onMap = 0;
+    this.state.players.forEach((p) => {
+      if (p.currentMapId !== "lobby") onMap++;
+    });
+    if (onMap === 0) {
+      this.state.runInProgress = false;
+      console.log("[RUN] Ended (no players left on the gameplay map)");
+    }
   }
   onLeave(client: Client, _code: number) {
     console.log("Player left:", client.sessionId);
+    // Free the display name so a future join from this same browser
+    // (same localStorage id) re-binds to it instead of drawing fresh.
+    const player = this.state.players.get(client.sessionId);
+    if (player && player.displayName) {
+      this.namesInUse.delete(player.displayName);
+    }
     this.state.players.delete(client.sessionId);
     this.viewports.delete(client.sessionId);
+    // A disconnect can empty the gameplay map -> run over.
+    this.endRunIfNeeded();
   }
 
   onDispose() {
