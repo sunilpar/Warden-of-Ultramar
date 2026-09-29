@@ -668,6 +668,17 @@ export class LobbyScene extends Phaser.Scene {
    * Create the LOCAL player sprite and attach the camera.
    */
   private createLocalPlayer(player: any): void {
+    // Idempotency guard: cb.onAdd can fire twice for the same player
+    // (once via triggerAll for existing items, once if the manual
+    // sync in swapToRoom races with the listener), and we don't want
+    // a duplicate sprite floating around with no controller.
+    if (this.currentPlayer) {
+      const existing = this.currentPlayer;
+      existing.setData("serverX", player.x);
+      existing.setData("serverY", player.y);
+      this.currentPlayerState = player;
+      return;
+    }
     const sprite = this.add
       .sprite(player.x, player.y, "player_sheet", 0)
       .setDepth(4);
@@ -715,6 +726,14 @@ export class LobbyScene extends Phaser.Scene {
   }
 
   private createRemotePlayer(player: any, sessionId: string): void {
+    // Idempotency guard: prevent a phantom duplicate remote sprite
+    // if cb.onAdd fires twice for the same player.
+    if (this.playerEntities[sessionId]) {
+      const existing = this.playerEntities[sessionId];
+      existing.setData("serverX", player.x);
+      existing.setData("serverY", player.y);
+      return;
+    }
     const sprite = this.add
       .sprite(player.x, player.y, "player_sheet", 0)
       .setDepth(4);

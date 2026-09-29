@@ -526,6 +526,20 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.bindRoomStateListeners();
+    // Defensive sweep: ensure the local player sprite exists even if
+    // cb.onAdd didn't fire for the existing player (race condition
+    // when the scene is started via handoff with an already-populated
+    // state). Without this, the solo-run auto-startRun flips
+    // currentMapId -> "map1" with no sprite to drive the camera / HUD.
+    const localSweep = (this.room as any)?.state?.players?.get?.(
+      this.room.sessionId,
+    );
+    if (localSweep && !this.currentPlayer) {
+      console.log(
+        "[GAME] cb.onAdd missed the local player - syncing manually",
+      );
+      this.createLocalPlayer(localSweep);
+    }
     // Rebuild the map-info tooltip now that live room state exists
     // (covers mid-session joins) and whenever active map mods change.
     rebuildMapInfoTooltip(this, this.mapInfo);
@@ -1086,6 +1100,24 @@ export class GameScene extends Phaser.Scene {
 
   createLocalPlayer(player: any) {
     createCharacterAnimations(this);
+    // Idempotency guard: cb.onAdd may fire twice for the same player
+    // (once via triggerAll for existing items, once if the scene
+    // transition races with a fresh add) and createLocalPlayer can
+    // also be invoked from a defensive manual sync in create(). If
+    // we already own a sprite, just refresh its data instead of
+    // creating a duplicate (which would render a phantom avatar
+    // with no controller).
+    if (this.currentPlayer) {
+      const existing = this.currentPlayer;
+      existing.setData("serverX", player.x);
+      existing.setData("serverY", player.y);
+      if (existing.x === 0 && existing.y === 0) {
+        existing.x = player.x;
+        existing.y = player.y;
+      }
+      this.currentPlayerState = player;
+      return;
+    }
     const sprite = this.add
       .sprite(player.x, player.y, "player_sheet", 0)
       .setDepth(4);
@@ -1188,6 +1220,18 @@ export class GameScene extends Phaser.Scene {
     });
   }
   createRemotePlayer(player: any, sessionId: string) {
+    // Idempotency guard: same reason as createLocalPlayer - a phantom
+    // duplicate remote sprite would render an uncontrolled avatar.
+    if (this.playerEntities[sessionId]) {
+      const existing = this.playerEntities[sessionId];
+      existing.setData("serverX", player.x);
+      existing.setData("serverY", player.y);
+      if (existing.x === 0 && existing.y === 0) {
+        existing.x = player.x;
+        existing.y = player.y;
+      }
+      return;
+    }
     const sprite = this.add
       .sprite(player.x, player.y, "player_sheet", 0)
       .setDepth(4);
