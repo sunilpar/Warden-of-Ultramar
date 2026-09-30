@@ -118,7 +118,8 @@ Warden-of-Ultramar/
 │   │   ├── backend.ts                # ws://... endpoint discovery
 │   │   ├── scenes/
 │   │   │   ├── SceneSelector.ts      # start menu, preloads everything
-│   │   │   └── GameScene.ts          # ~6,300 lines — THE scene
+│   │   │   ├── LobbyScene.ts         # ~830 lines — safe-zone, Play polygon, room handoff
+│   │   │   └── GameScene.ts          # ~2,400 lines — THE gameplay scene
 │   │   ├── config/
 │   │   │   ├── skillDefs.ts          # card art tier helpers
 │   │   │   ├── skills.ts             # legacy skill table (kept in sync)
@@ -221,6 +222,8 @@ class GameRoom extends Room {
 | 17 | pickup to inv | `{cardId, inv}` | Ground card into inventory slot |
 | 18 | inv reorder | `{from, to}` | Insert-shift in inventory |
 | 19 | HUD ↔ inv swap | `{slot, inv}` | Swap a HUD card with an inventory card |
+| 20 | pick map-stat offer | `{index}` | Player picked one of the three post-exit buffs |
+| 22 | play (lobby Play polygon) | `{}` | 'Start the run'. Triggers group, solo-redirect, or startRun depending on lobby size + runInProgress (see §A.2 in Appendix A) |
 
 **`initMap(mapId)` is the bridge between maps.** Called once on create and again after a transition. It **rebuilds every system instance** and rebinds cross-system references:
 
@@ -672,7 +675,7 @@ Both are O(1) on a small 3×3 / single-overlap neighborhood — fine for 60 Hz.
 
 ### 4.1 Lifecycle
 
-`client/src/scenes/GameScene.ts` is ~6,300 lines — the entire game lives here. There is no `preload()` (everything is preloaded by `SceneSelector`).
+`client/src/scenes/GameScene.ts` is ~2,400 lines — the gameplay half of the client. The other half (safe-zone + Play handoff) lives in `LobbyScene.ts` (~830 lines). See Appendix A for the lobby-era architecture. There is no `preload()` (everything is preloaded by `SceneSelector`).
 
 ```
 async create():
@@ -1186,7 +1189,7 @@ This section is the honest audit. The prototype works — you can run a co-op ma
 
 ### 11.1 Architectural smells
 
-**1. `GameScene.ts` is 6,300 lines.** This is the single biggest problem.
+**1. `GameScene.ts` was 6,300 lines — the single biggest problem.** (As of Appendix A it is ~2,400 lines after the lobby-era split, with `LobbyScene.ts` absorbing the safe-zone + Play polygon logic.)
 
 *Symptom.* Everything — input, rendering, VFX, networking, HUD, drag-and-drop, tooltips, prediction, interpolation — lives in one Phaser scene class. Adding a feature means scrolling through thousands of lines of unrelated code.
 
@@ -1409,3 +1412,133 @@ For someone who wants to take this prototype to "real game" quality:
 | **VFX gaps** | Per-skill visual offsets so the sprite doesn't render *on top of* the caster. |
 | **raycastCoverage** | A 6-px-step wall check. Returns `(i-1)/steps` so VFX can be clipped to the visible length. |
 | **pickupLockUntil** | Server timestamp after which a ground card can be picked up. 500 ms after drop. |
+
+---
+
+## Appendix A: Lobby-Era Architecture (Added 2026)
+
+This appendix documents the lobby-era architecture added after the original architecture pass. It describes the new LobbyScene, the `currentMapId` state field, the solo-run redirect, and the ghost-player bug fix.
+
+### A.1 Why a lobby?
+
+The legacy flow put every player straight into the gameplay map on join. That made the dead-loner scenario impossible to handle gracefully:
+
+- P1 + P2 join, both press Play -> run starts on map1
+- P1 dies -> goes back to the safe-zone lobby
+- P2 is still on map1 (`runInProgress = true`)
+- P1 presses Play -> no way to start a fresh solo run without clobbering P2's map
+
+The lobby-era architecture solves this by:
+
+1. Spawning every player in a shared, permanent lobby tile map on join.
+2. Adding `Player.currentMapId` as the per-player state field that drives which scene renders them.
+3. Adding the Play polygon in `LobbyScene` that sends `room.send(22, {})`.
+4. Adding `spawnSoloRunFor` server-side: when the only lobby player presses Play while `runInProgress = true`, the server creates a brand-new `game_room` and tells the client to swap.
+
+### A.2 Server side
+
+`Player.currentMapId` (synced via `@type("string")` on `Player` schema):
+
+- `"lobby"` -> safe-zone, sprite shown by `LobbyScene`.
+- `"map1"` / `"map2"` -> gameplay map, sprite shown by `GameScene`.
+
+`RoomState.runInProgress: boolean` - true while any player has `currentMapId !== "lobby"`. Drives the Play-button logic.
+
+`GameRoom.isSoloRun: boolean` - set in `onCreate` from `options.soloRun`. When true, `onJoin` schedules a `setTimeout(100ms)` that auto-runs `startRun()` so the dead-loner doesn't need a second Play click.
+
+Handler 22 (Play). Fires when a player clicks the Play polygon. Branches on `runInProgress` + lobbyCount:
+
+- `runInProgress=true` + `lobbyCount<=1`: SOLO -> `spawnSoloRunFor(client)` (create fresh `game_room` with `soloRun: true`, send `playRedirected`).
+- `runInProgress=true` + `lobbyCount>1`: GROUP -> `client.send("playRejected", { reason: "run_in_progress" })`.
+- `runInProgress=false`: `startRun()` in this room.
+
+`GameRoom.spawnSoloRunFor` is async-fire-and-forget (Colyseus does NOT await user-message handlers). It calls `matchMaker.createRoom("game_room", { soloRun: true })`. `matchMaker.createRoom` always creates a new room (vs `joinOrCreate` which matches existing rooms by name+options).
+
+`GameRoom.startRun` collects every player with `currentMapId === "lobby"`, reinitializes the map (`initMap(DEFAULT_MAP)`), sets `runInProgress = true`, and teleports each lobby player to the map's spawn point.
+
+`GameRoom.endRunIfNeeded` runs after every death/disconnect. Sets `runInProgress = false` if no players are on a gameplay map.
+
+`sendPlayerToLobby` (called when a player dies) is the death-teleport. The player is NOT removed from `state.players` - they stay in the room with `currentMapId = "lobby"` until they leave via `room.leave()`. This is what enables the lobby count check in handler 22.
+
+### A.3 Client side
+
+`LobbyScene` (~830 lines, `client/src/scenes/LobbyScene.ts`):
+
+- Loads the lobby tile map (`client/src/maps/lobbyMapData.ts`).
+- Renders every player with `currentMapId === "lobby"` as a sprite.
+- Draws the Play polygon (`LOBBY_PLAY_POLYGON`) as a clickable Phaser rectangle.
+- Streams WASD input to the server (same input message 0 as GameScene).
+- On the local player's `currentMapId` flipping to a map id -> `scene.start("game", { room, client })`.
+
+`GameScene` (~2,400 lines) - same as before, but now its lifecycle includes being launched by `LobbyScene` with the same Colyseus room (passed in `data`). On the local player's `currentMapId` flipping back to `"lobby"` (death -> lobby teleport) -> `scene.start("lobby", { room, client })`.
+
+`LobbyScene.swapToRoom(roomId)` is the dead-loner redirect handler:
+
+1. `teardownLobbyState()` - destroy local player sprite, destroy remote sprites + HUDs.
+2. `await oldRoom.leave(true)` - server's onLeave removes P1 from OLD `state.players` and runs `endRunIfNeeded`.
+3. `await client.joinById(roomId, defaultJoinOptions())` - P1 joins NEW room with a NEW sessionId.
+4. `bindRoomStateListeners()` on NEW room - `cb.onAdd` fires synchronously for P1 (existing in NEW `state.players`); `createLocalPlayer(P1)` runs.
+5. Manual sync - defensive sweep of `state.players` to ensure the local sprite is present even if `cb.onAdd` fired async.
+
+`LobbyScene.handlePlayerMapChange` is the transition gate. Critically, `lastLocalMapId` is only mutated for the local branch - a remote player's `currentMapId` flipping must not poison the gate.
+
+### A.4 The ghost player bug
+
+Symptom. When P1 dies and presses Play alone, they enter the new map with TWO player sprites: their real one (which they control) and a phantom ghost (which just stands there, no controller).
+
+Root cause. A race between two sprite-creation paths during the LobbyScene -> GameScene handoff:
+
+- `bindRoomStateListeners()` registers `cb.onAdd("players", ...)`. In Colyseus 0.15+, this fires for existing items in the collection (the player who just joined).
+- The manual sync step also calls `createLocalPlayer` if `cb.onAdd` had not fired yet (or had fired async).
+
+If `cb.onAdd` fires twice (or once via cb.onAdd AND once via manual sync), `createLocalPlayer` creates two sprites. The first sprite is the real P1; the second is the ghost (no input binding, just standing around).
+
+Fix shipped. Three layers of defense, applied to both `LobbyScene.ts` and `GameScene.ts`:
+
+1. `createLocalPlayer` / `createRemotePlayer` are now idempotent - if `this.currentPlayer` (or `this.playerEntities[sessionId]`) is already set, the function refreshes the existing sprite's `serverX/serverY` instead of creating a new one.
+2. `GameScene.create()` has a defensive manual sync after `bindRoomStateListeners()`, mirroring `LobbyScene.swapToRoom`'s step 5. The local sprite is guaranteed even if `cb.onAdd` raced.
+3. The position-refresh branch skips the spawn-point snap if `existing.x !== 0 || existing.y !== 0`, so the camera does not jolt.
+
+After the fix, only one sprite per `(sessionId, local/remote)` slot is ever created, regardless of how many times `cb.onAdd` fires.
+
+### A.5 State machine (visual)
+
+```
+                                    room.send(22)
+   joinOrCreate                       (click Play)
+       |                                  |
+       v                                  v
+[ LOBBY scene ]  death     [   GAME scene          ]
+[               ] ------->  [   (map1 / map2)       ]
+[ Player.curr   ]           [                       ]
+[ entMapId =    ] <--------  [ Player.currentMapId   ]
+[  "lobby"      ]  sendPlayer[ = "map1"|"map2"     ]
+[               ]  ToLobby() [                       ]
+
+       |                                ^
+       |  playRedirected (solo only)     |
+       v                                |
+[ OLD game_room ]                [ NEW game_room        ]
+[  (P2 alone)   ]                [  (P1 alone, solo)   ]
+[               ]                [  isSoloRun = true    ]
+```
+
+### A.6 Glossary additions
+
+| Term | Meaning |
+|---|---|
+| **lobby era** | The current architecture where players spawn in a safe-zone tile map and click a Play polygon to enter the gameplay map. |
+| **currentMapId** | Per-player `@type("string")` field on `Player`. Values: `"lobby"`, `"map1"`, `"map2"`. Drives which scene renders the sprite. |
+| **Play polygon** | A clickable `Phaser.GameObjects.Rectangle` overlay in `LobbyScene`. Click sends `room.send(22, {})`. |
+| **solo run** | A run started by a player who is alone in the lobby while another run is in progress elsewhere. |
+| **dead-loner** | A player who died and is the only one left in the lobby while teammates are still mid-run. |
+| **`playRedirected`** | Server message `{ reason: "solo_run", roomId }`. Client calls `swapToRoom(roomId)`. |
+| **`playRejected`** | Server message `{ reason: "run_in_progress" \| "spawn_failed" }`. |
+| **`swapToRoom`** | LobbyScene private method. The dead-loner's full redirect procedure. |
+| **isSoloRun** | Per-room flag set in `onCreate` from `options.soloRun`. Auto-runs `startRun()` after 100ms. |
+| **`runInProgress`** | Per-room boolean in `RoomState`. Drives the Play-button logic. |
+| **`endRunIfNeeded`** | Server method. Sets `runInProgress = false` when no players are on a gameplay map. |
+| **sticky display name** | Server-side cache that re-binds the same browser to the same random name across reconnects. |
+| **`LOBBY_SPAWN_POINT`** | `(x, y)` constant. `sendPlayerToLobby` respawns the player here. |
+| **idempotent sprite creation** | New pattern: `createLocalPlayer`/`createRemotePlayer` return early when a sprite already exists. |
+| **handler 22** | The Play message handler. Triggers group, solo-redirect, or `startRun`. |
