@@ -524,91 +524,76 @@ export class GameRoom extends Room {
   }
 
   /**
-   * SERVER-AUTHORITATIVE MAP EXIT.
-   * When this map's elite is dead (exitUnlocked) and ALL alive players
-   * stand inside the exit zone, transition the whole room to the next
-   * map in place: clear per-map state, re-init systems, respawn players
-   * at the new spawn, award transition XP. No disconnect ever happens.
+   * SERVER-AUTHORITATIVE MAP EXIT (per-player picker).
+   * When the elite is dead (`exitUnlocked`), the moment ANY alive
+   * player stands inside the exit zone, that player gets their own
+   * map-stat picker (with their own 3 rolled offers). Stepping off
+   * the exit closes only THAT player's picker; everyone else's stays
+   * open. Picking resolves at the room level: the chosen stat is
+   * added to `activeMapStats` and the whole room transitions to the
+   * next map. No "wait for everyone" gating.
    */
   private checkMapExit(): void {
     if (this.transitioning) return;
     if (!this.state.exitUnlocked) return;
     const def = MAPS[this.mapId];
     const ex = def.data.exitPoint;
-    let alive = 0;
-    let onExit = 0;
+    // Per-player: walk every alive player on the map and toggle
+    // their picker individually based on whether they are inside
+    // the exit zone right now.
     this.state.players.forEach((p) => {
-      // ONLY players on this gameplay map participate in the exit
-      // check. Lobby players (full HP after freshLoadout) would count
-      // as "alive but never on the exit" and permanently block the
-      // transition for the rest of the group.
+      // Only gameplay-map, alive players are eligible. Lobby and
+      // dead players are skipped entirely (they have no business
+      // holding a picker open).
       if (p.currentMapId !== this.mapId) return;
       if (p.isDead) return;
-      alive++;
       const inside =
         p.x >= ex.x &&
         p.x <= ex.x + ex.width &&
         p.y >= ex.y &&
         p.y <= ex.y + ex.height;
-      if (inside) onExit++;
-    });
-    if (alive === 0) return;
-
-    // ---- If the picker is currently open but at least one alive player
-    //      has stepped OFF the exit (e.g. after clicking Cancel or No
-    //      Mods), reset the picker so a future re-entry can re-open it.
-    //      Without this, Cancel leaves the room stuck on the exit
-    //      forever. ----
-    if (this.mapStatPickersOpen > 0 && onExit < alive) {
-      this.mapStatPickersOpen = 0;
-      this.currentMapStatOffers.clear();
-      this.broadcast("mapStatCancelled", {});
-      return;
-    }
-
-    if (onExit < alive) return;
-
-    // ---- Everyone is on the exit: open the map-stat picker. The first
-    //      player to send a "pick" message locks in the choice; the rest
-    //      see a broadcast "picked" event and the room transitions.
-    //      Each player gets THEIR OWN set of 3 rolled offers (so up to
-    //      N*3 cards total, where N = alive players). ----
-    if (this.mapStatPickersOpen === 0) {
-      this.mapStatPickersOpen = alive;
-      // Roll map-stat values at the tier of the HIGHEST-LEVEL player
-      // in the room. tierForLevel is the same function used for enemy
-      // loot drops (L0-9=t1, ..., L40+=t5), so a level-100 player
-      // gets tier-5 (top-tier) offers instead of base-tier ones.
-      const tier = tierForLevel(this.getHighestPlayerLevel());
-      // Flat list: every alive player gets the SAME shared pool of
-      // `alive * 3` offers, so the picker UI can list them all in
-      // one scrollable card and any player can pick any index.
-      const allOffers: RolledMapStat[] = [];
-      while (allOffers.length < alive * 3) {
-        allOffers.push(...rollThreeOffers(tier));
+      const hasOffer = this.currentMapStatOffers.has(p.sessionId);
+      if (inside && !hasOffer) {
+        // Player just stepped onto the exit: roll THEIR OWN set of
+        // 3 offers and ship them only to this player's client.
+        // tierForLevel uses the highest-level player in the room,
+        // so a level-100 player in the party still lifts the
+        // offers to tier-5 instead of base-tier for everyone else.
+        const tier = tierForLevel(this.getHighestPlayerLevel());
+        const rolled = rollThreeOffers(tier);
+        const serialized = rolled.map((o, i) => ({
+          index: i,
+          defId: rolledMapStatId(o),
+          goodName: o.good.name,
+          badName: o.bad.name,
+          goodEffect: o.good.effect,
+          badEffect: o.bad.effect,
+          goodValue: o.goodValue,
+          badValue: o.badValue,
+          durationMaps: o.durationMaps,
+        }));
+        this.currentMapStatOffers.set(p.sessionId, serialized);
+        this.mapStatPickersOpen++;
+        const client = this.clients.find((c) => c.sessionId === p.sessionId);
+        if (client) {
+          client.send("mapStatOffer", {
+            tier,
+            offers: serialized,
+            playerCount: 1,
+          });
+        }
+      } else if (!inside && hasOffer) {
+        // Player stepped off the exit (or cancelled): close ONLY
+        // their picker. Other players with their own pickers open
+        // are untouched.
+        this.currentMapStatOffers.delete(p.sessionId);
+        this.mapStatPickersOpen--;
+        const client = this.clients.find((c) => c.sessionId === p.sessionId);
+        if (client) {
+          client.send("mapStatCancelled", {});
+        }
       }
-      const serialized = allOffers.map((o, i) => ({
-        index: i,
-        defId: rolledMapStatId(o),
-        goodName: o.good.name,
-        badName: o.bad.name,
-        goodEffect: o.good.effect,
-        badEffect: o.bad.effect,
-        goodValue: o.goodValue,
-        badValue: o.badValue,
-        durationMaps: o.durationMaps,
-      }));
-      // The picker validates by index (flat), so we no longer need
-      // the per-player map. Stash the array directly.
-      this.currentMapStatOffers = new Map();
-      this.currentMapStatOffers.set("__shared__", serialized);
-      this.broadcast("mapStatOffer", {
-        tier,
-        offers: serialized,
-        playerCount: alive,
-      });
-    }
-    return;
+    });
   }
 
   /** Sum the GOOD-side values of a single effect across an AppliedMapStat list. */
@@ -630,7 +615,9 @@ export class GameRoom extends Room {
     offerIndex: number,
   ): void {
     if (this.transitioning) return;
-    const offers = this.currentMapStatOffers.get("__shared__");
+    // Per-player offers: each player's own 3 rolled offers, keyed by
+    // their sessionId (not a shared "__shared__" key anymore).
+    const offers = this.currentMapStatOffers.get(client.sessionId);
     // -1 = "no mods" (transition without applying a stat).
     // Otherwise: validate the index is in range.
     if (offerIndex !== -1) {
@@ -1490,40 +1477,57 @@ export class GameRoom extends Room {
     // every player currently in the lobby is teleported to the (fresh)
     // gameplay map together.
     //
-    // Two "in progress" scenarios that this handler must distinguish:
+    // Three scenarios this handler distinguishes:
     //
     //   (a) GROUP press — 2+ lobby players. The press waits until the
     //       current run ends (so the new group doesn't split the
     //       existing run-in-progress).
     //
-    //   (b) SOLO press — exactly 1 lobby player while a run is active
-    //       elsewhere. We CANNOT clobber the existing run by calling
-    //       `initMap()`. Instead we ask Colyseus to spin up a brand
-    //       new GameRoom (separate roomId, separate state) and reply
-    //       with `playRedirected` so the client leaves this room and
-    //       joins the new one. The solo player starts a clean run on
-    //       map1 with no cross-talk with the original group's run.
+    //   (b) LATE JOIN — exactly 1 lobby player, BUT a run is currently
+    //       active with other players on the map. The lobby player is
+    //       teleported straight onto the active map so they can join
+    //       the existing group (this is the bug-fix: previously the
+    //       late joiner was spun off into a separate solo room and
+    //       could never see/touch the group's map-stat picker).
+    //
+    //   (c) TRULY SOLO press — exactly 1 lobby player AND no one else
+    //       is on the map (run ended or freshly created room). Spin
+    //       up a brand new GameRoom via matchMaker so the solo player
+    //       gets their own clean run with no cross-talk.
     22: (client: Client, _msg: any) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
       if (player.currentMapId !== "lobby") return;
       if (this.state.runInProgress) {
-        // Count how many players are still in THIS room's lobby.
+        // Count how many players are still in THIS room's lobby AND on
+        // the active gameplay map. The lobby count alone is misleading
+        // because the FIRST player to press Play already left the
+        // lobby - they are now on the map, mid-run, and a late-joining
+        // second player should join THEM, not spin off into a solo room.
         let lobbyCount = 0;
+        let onMapCount = 0;
         this.state.players.forEach((p) => {
           if (p.currentMapId === "lobby") lobbyCount++;
+          else if (p.currentMapId === this.mapId && !p.isDead) onMapCount++;
         });
-        if (lobbyCount <= 1) {
-          // (b) Solo press while a run is active: spin up a fresh
-          // GameRoom for this player. matchMaker.createRoom is async
-          // and Colyseus does not await user message handlers, so we
-          // fire-and-forget and rely on the client to leave + rejoin.
-          void this.spawnSoloRunFor(client);
+        if (lobbyCount >= 2) {
+          // (a) Group press while a run is active: must wait for it to
+          // finish. Tell the client so its status text can show this.
+          client.send("playRejected", { reason: "run_in_progress" });
           return;
         }
-        // (a) Group press while a run is active: must wait for it to
-        // finish. Tell the client so its status text can show this.
-        client.send("playRejected", { reason: "run_in_progress" });
+        if (onMapCount > 0) {
+          // (b) Late join: drop the player straight onto the active
+          // map so they share the same exit, picker, and map-stat
+          // offers as the rest of the group. No solo redirect, no
+          // duplicate room.
+          this.joinExistingRun(player);
+          return;
+        }
+        // (c) Solo press while a run is in progress but no one is on
+        // the map (e.g. everyone died and runInProgress hasn't been
+        // cleared yet). Spin up a fresh GameRoom for this player.
+        void this.spawnSoloRunFor(client);
         return;
       }
       this.startRun();
@@ -1632,6 +1636,12 @@ export class GameRoom extends Room {
       player,
       readAppliedStats(this.state.activeMapStats.values()),
     );
+    // Clean up any pending map-stat offers for this player (they
+    // can't pick from a hospital bed). Without this, the per-player
+    // picker key would leak and mapStatPickersOpen would drift up.
+    if (this.currentMapStatOffers.delete(player.sessionId)) {
+      this.mapStatPickersOpen = Math.max(0, this.mapStatPickersOpen - 1);
+    }
     player.currentMapId = "lobby";
     player.x = LOBBY_SPAWN_POINT.x;
     player.y = LOBBY_SPAWN_POINT.y;
@@ -1700,6 +1710,55 @@ export class GameRoom extends Room {
   }
 
   /**
+   * LATE-JOIN: drop a lobby player straight onto the currently active
+   * gameplay map so they share the same exit / picker / map-stat
+   * offers as the rest of the group. Used by message 22 when the
+   * solo-press branch used to send players off into their own room
+   * (the old behaviour stranded them with no way to interact with
+   * the group's run).
+   *
+   * This does NOT call `initMap()` - the map is in flight and stays
+   * exactly as it is. It only repositions the joining player at the
+   * map's spawn point, applies the room's active bonuses, and flips
+   * their `currentMapId` so the GameScene transition fires.
+   */
+  private joinExistingRun(player: Player): void {
+    const spawn = this.mapSystem.getSpawnPoint();
+    // Reset stat-derived fields to a clean base BEFORE re-applying
+    // bonuses. The player already carried one application from their
+    // lobby entry (onJoin) - applying again without resetting would
+    // double every map-stat bonus.
+    player.initBaseStats();
+    // Refill starter cards (lobby state has them already but be
+    // explicit in case a future change clears them).
+    for (let i = 0; i < NUM_CARD_SLOTS && i < STARTER_CARDS.length; i++) {
+      if (!player.hasSlotCard(i)) {
+        const sc = STARTER_CARDS[i];
+        const card = new CardInstance();
+        card.skill = sc.skill;
+        card.level = sc.level;
+        card.rarity = "common";
+        player.equippedSlots[i] = card;
+      }
+    }
+    player.recomputeSkillLevels();
+    player.recomputeShield();
+    applyPlayerModifiers(player, this.activeModifiers);
+    applyActiveMapStatsToPlayer(
+      player,
+      readAppliedStats(this.state.activeMapStats.values()),
+    );
+    player.currentMapId = this.mapId;
+    player.x = spawn.x;
+    player.y = spawn.y;
+    player.inputQueue.length = 0;
+    console.log(
+      `[RUN] Late-join: ${player.displayName ?? "(no name)"} dropped onto ` +
+        `${this.mapId} at (${Math.round(spawn.x)}, ${Math.round(spawn.y)})`,
+    );
+  }
+
+  /**
    * SPAWN A NEW ROOM for a solo player who's the only one in the
    * lobby while another run is active. The new room has its OWN
    * GameRoom state (fresh `initMap(DEFAULT_MAP)` on its first
@@ -1759,6 +1818,11 @@ export class GameRoom extends Room {
     const player = this.state.players.get(client.sessionId);
     if (player && player.displayName) {
       this.namesInUse.delete(player.displayName);
+    }
+    // Clean up any pending per-player map-stat offers so the
+    // counters stay accurate after a disconnect mid-pick.
+    if (this.currentMapStatOffers.delete(client.sessionId)) {
+      this.mapStatPickersOpen = Math.max(0, this.mapStatPickersOpen - 1);
     }
     this.state.players.delete(client.sessionId);
     this.viewports.delete(client.sessionId);

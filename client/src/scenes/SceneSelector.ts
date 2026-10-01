@@ -197,9 +197,6 @@ export class SceneSelector extends Phaser.Scene {
       .setPadding(6)
       .setShadow(3, 3, "#000000", 4, true, true)
       .on("pointerdown", () => {
-        // Only request real browser fullscreen in production builds.
-        // In dev (vite dev) we skip it so the canvas stays in-window for debugging.
-        // Vite maps MODE to NODE_ENV (development | production) automatically.
         if (
           import.meta.env.MODE === "production" &&
           !this.scale.isFullscreen &&
