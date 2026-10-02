@@ -60,6 +60,15 @@ export const NUM_CARD_SLOTS = 5;
 export const NUM_INVENTORY_SLOTS = 20;
 
 export class Player extends Schema {
+  // ---- Identity (NOT synced — server-only) ----
+  /**
+   * The owning client's Colyseus session id. Set once in GameRoom.onJoin
+   * right after the Player is created. Needed for server-side lookups
+   * (e.g. this.clients.get(player.sessionId) to send per-player
+   * messages like the map-stat picker offer). Never synced to clients.
+   */
+  sessionId: string = "";
+
   // ---- Position (synced) ----
   @type("number") x: number = 0;
   @type("number") y: number = 0;

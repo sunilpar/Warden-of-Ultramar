@@ -177,6 +177,16 @@ export class GameRoom extends Room {
     { x: number; y: number; w: number; h: number }
   >();
   /**
+   * How many players are in the CURRENT run. Used to scale the number
+   * of map-stat offers each player sees at the exit (base = 3 per
+   * player, multiplied by the party size so a 4-player party gets 4x
+   * the choice of mods).
+   *   - Set in `startRun()` to the lobby count at run start.
+   *   - Incremented in `joinExistingRun()` for late joiners.
+   *   - Reset in `endRunIfNeeded()` so the next run starts clean.
+   */
+  private runPartySize: number = 0;
+  /**
    * Sticky name assignment cache: maps a client's persistent
    * `clientPlayerId` to the display name the server gave them.
    * Cleared when the room is disposed (process restart).
@@ -482,7 +492,12 @@ export class GameRoom extends Room {
    * (highest player level in the room).
    */
   private getTargetEnemyCount(): number {
-    return 20 + Math.floor(this.getHighestPlayerLevel() / 2);
+    // Base scales with the highest player level; TOTAL scales with the
+    // party size so a 4-player lobby faces 4x the enemies of a solo
+    // run (each zone also spawns `partySize` enemies instead of 1 -
+    // see checkSpawnZones).
+    const base = 20 + Math.floor(this.getHighestPlayerLevel() / 2);
+    return base * Math.max(1, this.runPartySize);
   }
 
   /** Drop a rolled card instance to the ground at the player's position. */
@@ -555,13 +570,22 @@ export class GameRoom extends Room {
       const hasOffer = this.currentMapStatOffers.has(p.sessionId);
       if (inside && !hasOffer) {
         // Player just stepped onto the exit: roll THEIR OWN set of
-        // 3 offers and ship them only to this player's client.
+        // offers and ship them only to this player's client.
         // tierForLevel uses the highest-level player in the room,
         // so a level-100 player in the party still lifts the
         // offers to tier-5 instead of base-tier for everyone else.
+        //
+        // Offer count scales with party size: base = 3 per player,
+        // multiplied by runPartySize so a 4-player party sees 12
+        // offers each (4x the choice of a solo run).
         const tier = tierForLevel(this.getHighestPlayerLevel());
-        const rolled = rollThreeOffers(tier);
-        const serialized = rolled.map((o, i) => ({
+        const partySize = Math.max(1, this.runPartySize);
+        const targetCount = 3 * partySize;
+        const allRolled: RolledMapStat[] = [];
+        while (allRolled.length < targetCount) {
+          allRolled.push(...rollThreeOffers(tier));
+        }
+        const serialized = allRolled.map((o, i) => ({
           index: i,
           defId: rolledMapStatId(o),
           goodName: o.good.name,
@@ -574,12 +598,14 @@ export class GameRoom extends Room {
         }));
         this.currentMapStatOffers.set(p.sessionId, serialized);
         this.mapStatPickersOpen++;
-        const client = this.clients.find((c) => c.sessionId === p.sessionId);
+        // Colyseus 0.17: `this.clients` is a ClientArray with a
+        // getById(sessionId) lookup (NOT a Map - .get doesn't exist).
+        const client = this.clients.getById(p.sessionId);
         if (client) {
           client.send("mapStatOffer", {
             tier,
             offers: serialized,
-            playerCount: 1,
+            playerCount: partySize,
           });
         }
       } else if (!inside && hasOffer) {
@@ -588,7 +614,7 @@ export class GameRoom extends Room {
         // are untouched.
         this.currentMapStatOffers.delete(p.sessionId);
         this.mapStatPickersOpen--;
-        const client = this.clients.find((c) => c.sessionId === p.sessionId);
+        const client = this.clients.getById(p.sessionId);
         if (client) {
           client.send("mapStatCancelled", {});
         }
@@ -742,30 +768,35 @@ export class GameRoom extends Room {
         }
       }
       if (touched) {
-        // Spawn until the map's target enemy count is reached.
+        // Spawn until the map's target enemy count is reached. Each
+        // zone spawns `partySize` enemies (1 per player) so a 4-player
+        // party faces 4x the density of a solo run, still capped by
+        // the room-wide target from getTargetEnemyCount().
         const target = this.getTargetEnemyCount();
-        const alive = this.state.enemies.size;
-        if (alive >= target) {
-          this.spawnedZones.add(i);
-          continue;
-        }
-        const spawnId = this.enemySystem.spawn(
-          this.pickEnemyType(),
-          z.x + z.width / 2,
-          z.y + z.height / 2,
-          enemyLevel,
-        );
-        const spawnedEnemy = this.state.enemies.get(spawnId);
-        if (spawnedEnemy) {
-          applyEnemyModifiers(spawnedEnemy, this.activeModifiers);
-          applyActiveMapStatsToEnemy(
-            spawnedEnemy,
-            readAppliedStats(this.state.activeMapStats.values()),
+        const spawnsPerZone = Math.max(1, this.runPartySize);
+        for (let s = 0; s < spawnsPerZone; s++) {
+          const alive = this.state.enemies.size;
+          if (alive >= target) break;
+          const spawnId = this.enemySystem.spawn(
+            this.pickEnemyType(),
+            // Spread the batch slightly so they don't stack: offset
+            // each extra enemy within the zone's bounds.
+            z.x + z.width / 2 + (s % 2 === 0 ? -s * 24 : s * 24),
+            z.y + z.height / 2 + (s % 2 === 0 ? s * 16 : -s * 16),
+            enemyLevel,
           );
-          // Loot roll: may attach a modded card to this enemy.
-          this.refreshLootContext();
-          const card = this.lootSystem.rollEnemyCard(spawnedEnemy);
-          if (card) spawnedEnemy.card = card;
+          const spawnedEnemy = this.state.enemies.get(spawnId);
+          if (spawnedEnemy) {
+            applyEnemyModifiers(spawnedEnemy, this.activeModifiers);
+            applyActiveMapStatsToEnemy(
+              spawnedEnemy,
+              readAppliedStats(this.state.activeMapStats.values()),
+            );
+            // Loot roll: may attach a modded card to this enemy.
+            this.refreshLootContext();
+            const card = this.lootSystem.rollEnemyCard(spawnedEnemy);
+            if (card) spawnedEnemy.card = card;
+          }
         }
         this.spawnedZones.add(i);
       }
@@ -1542,6 +1573,10 @@ export class GameRoom extends Room {
     console.log("Player joined GameRoom:", client.sessionId);
 
     const player = new Player();
+    // Bind the owning client's session id so server-side code can do
+    // this.clients.get(player.sessionId) lookups (per-player messages
+    // like the map-stat picker offer). See Player.sessionId docs.
+    player.sessionId = client.sessionId;
     // Fresh player: starter cards fill all 5 slots. (There is no longer
     // any client-supplied playerState to restore — progression lives in
     // the room and survives map transitions server-side.)
@@ -1670,6 +1705,9 @@ export class GameRoom extends Room {
     this.initMap(DEFAULT_MAP);
 
     this.state.runInProgress = true;
+    // Party size = whoever was in the lobby when the run started.
+    // This drives the per-player offer count at the exit (3 * size).
+    this.runPartySize = lobbyPlayers.length;
     console.log(
       `[RUN] Started with ${lobbyPlayers.length} player(s) from the lobby`,
     );
@@ -1752,9 +1790,13 @@ export class GameRoom extends Room {
     player.x = spawn.x;
     player.y = spawn.y;
     player.inputQueue.length = 0;
+    // Late joiner counts toward the party size so they get the same
+    // scaled offer count as everyone else when they reach the exit.
+    this.runPartySize++;
     console.log(
       `[RUN] Late-join: ${player.displayName ?? "(no name)"} dropped onto ` +
-        `${this.mapId} at (${Math.round(spawn.x)}, ${Math.round(spawn.y)})`,
+        `${this.mapId} at (${Math.round(spawn.x)}, ${Math.round(spawn.y)}) ` +
+        `(party size now ${this.runPartySize})`,
     );
   }
 
@@ -1808,6 +1850,9 @@ export class GameRoom extends Room {
     });
     if (onMap === 0) {
       this.state.runInProgress = false;
+      // Reset party size so the next run starts fresh (otherwise
+      // a 4-player wipe would still scale offers as if 4 were here).
+      this.runPartySize = 0;
       console.log("[RUN] Ended (no players left on the gameplay map)");
     }
   }
