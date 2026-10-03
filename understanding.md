@@ -244,7 +244,6 @@ this.lootSystem = new LootSystem(this.state);
 // Cross-link enemies → {projectile, claw, slam, heal, shock, dash, vortex, pulse}
 this.enemySystem.setProjectileSystem(this.projectileSystem);
 this.enemySystem.setClawSystem(this.clawSystem);
-// ... etc
 
 // Clear all live collections
 this.state.enemies.clear();
