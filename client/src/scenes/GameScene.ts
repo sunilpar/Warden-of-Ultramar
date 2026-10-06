@@ -70,6 +70,11 @@ import {
 } from "../ui/mapStatPicker";
 import { createEliteIndicator } from "../ui/hud/eliteIndicator";
 import {
+  createPartyHud,
+  type PartyHudRefs,
+  type PartyPlayerSnapshot,
+} from "../ui/hud/partyHud";
+import {
   showDeathScreen,
   hideDeathScreen,
   type DeathScreenRefs,
@@ -152,6 +157,8 @@ export class GameScene extends Phaser.Scene {
   projLastPos: { [id: string]: { x: number; y: number } } = {};
 
   private statsHud!: StatsHudRefs;
+  /** Party Unit Frame HUD (top-left overlay, >=2 players). */
+  private partyHud!: PartyHudRefs;
   private mapStatPicker!: MapStatPickerRefs;
   private pendingMapStatOffers: MapStatOffer[] = [];
   private xpBar!: XpBarRefs;
@@ -397,6 +404,7 @@ export class GameScene extends Phaser.Scene {
 
     this.createDebugHUD();
     this.statsHud = createStatsHud(this, { initialShowHitboxes: false });
+    this.partyHud = createPartyHud(this);
     this.xpBar = createXpBar(this);
     this.mapInfo = createMapInfoButton(
       this,
@@ -526,6 +534,14 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.bindRoomStateListeners();
+    // Party Unit Frame: only render players currently on this
+    // gameplay map (LobbyScene owns the lobby players).
+    this.partyHud.bindRoom(this.room, {
+      includePlayer: (p: any) => p.currentMapId !== "lobby",
+    });
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.partyHud?.destroy();
+    });
     // Defensive sweep: ensure the local player sprite exists even if
     // cb.onAdd didn't fire for the existing player (race condition
     // when the scene is started via handoff with an already-populated
@@ -1193,6 +1209,7 @@ export class GameScene extends Phaser.Scene {
       // Cached HP/shield for the per-tick HUD update (the tick path
       // reads from sprite.data, not from the schema, to avoid re-laying
       // out the world-space HUD bar every patch).
+      sprite.setData("displayName", player.displayName ?? "");
       sprite.setData("currentHealth", player.currentHealth ?? 0);
       sprite.setData("maxHealth", player.maxHealth ?? 1);
       sprite.setData("shield", player.shield ?? 0);
@@ -1240,6 +1257,7 @@ export class GameScene extends Phaser.Scene {
     // Pre-populate the cached HP/shield so the very first render isn't
     // a full bar (or zero bar) - they'll get refreshed on the first
     // patch in onChange below.
+    sprite.setData("displayName", player.displayName ?? "");
     sprite.setData("currentHealth", player.currentHealth ?? 0);
     sprite.setData("maxHealth", player.maxHealth ?? 1);
     sprite.setData("shield", player.shield ?? 0);
@@ -2296,6 +2314,45 @@ export class GameScene extends Phaser.Scene {
       const sh = cs?.shield ?? 0;
       const maxSh = cs?.maxShield ?? 0;
       updatePlayerHud(localHud, this.currentPlayer, localHud.lastName, hp, maxHp, sh, maxSh, true);
+
+      // Party Unit Frame HUD: push live state for every visible player so
+      // the HP / shield bars animate at frame rate (same data source as the
+      // floating head HP bar in systems/nameLabel.ts).
+      if (this.partyHud && (this.room || this.currentPlayerState)) {
+        var partyStates = [];
+        // Local player
+        if (this.room) {
+          var localCs = this.currentPlayerState;
+          if (localCs) {
+            partyStates.push({
+              id: this.room.sessionId,
+              displayName: (localCs.displayName != null ? localCs.displayName : ''),
+              currentHealth: (localCs.currentHealth != null ? localCs.currentHealth : 0),
+              maxHealth: (localCs.maxHealth != null ? localCs.maxHealth : 1),
+              shield: (localCs.shield != null ? localCs.shield : 0),
+              maxShield: (localCs.maxShield != null ? localCs.maxShield : 0),
+              isDead: ((localCs.currentHealth != null ? localCs.currentHealth : 0)) <= 0,
+            });
+          }
+        }
+        // Remote players (HP/shield live in sprite.data, set by the
+        // cb.onChange handler in bindRoomStateListeners).
+        for (var partyId in this.playerEntities) {
+          var psprite = this.playerEntities[partyId];
+          if (!psprite) continue;
+          var pdata = psprite.data;
+          partyStates.push({
+            id: partyId,
+            displayName: (pdata.get('displayName') != null ? pdata.get('displayName') : ''),
+            currentHealth: (pdata.get('currentHealth') != null ? pdata.get('currentHealth') : 0),
+            maxHealth: (pdata.get('maxHealth') != null ? pdata.get('maxHealth') : 1),
+            shield: (pdata.get('shield') != null ? pdata.get('shield') : 0),
+            maxShield: (pdata.get('maxShield') != null ? pdata.get('maxShield') : 0),
+            isDead: ((pdata.get('currentHealth') != null ? pdata.get('currentHealth') : 0)) <= 0,
+          });
+        }
+        this.partyHud.upsertPlayers(partyStates);
+      }
     }
 
     // ---- Inventory card drag follow ----

@@ -5,6 +5,15 @@
     "target": "esnext",                                  /* Set the JavaScript language version for emitted JavaScript and include compatible library declarations. */
     "module": "esnext",                                /* Specify what module code is generated. */
     "moduleResolution": "bundler",
+    "baseUrl": "./",
+    "paths": {
+      "phaser": ["./node_modules/phaser"],
+      "phaser/*": ["./node_modules/phaser/*"],
+      "@colyseus/sdk": ["./node_modules/@colyseus/sdk"],
+      "@colyseus/schema": ["./node_modules/@colyseus/schema"],
+      "@colyseus/*": ["./node_modules/@colyseus/*"]
+    },
+    "typeRoots": ["./node_modules/@types"],
     "resolveJsonModule": true,                            /* Enable importing .json files */
     // "rootDir": "./",                                  /* Specify the root folder within your source files. */
     // "moduleResolution": "node",                       /* Specify how TypeScript looks up a file from a given module specifier. */

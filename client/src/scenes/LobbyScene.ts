@@ -43,6 +43,10 @@ import {
   destroyPlayerHud,
   type PlayerHud,
 } from "../systems/nameLabel";
+import {
+  createPartyHud,
+  type PartyHudRefs,
+} from "../ui/hud/partyHud";
 
 /** Message type that matches server/src/rooms/GameRoom.ts (lobby -> play). */
 const MSG_PLAY = 22;
@@ -73,6 +77,8 @@ export class LobbyScene extends Phaser.Scene {
   /** True while the room's players are mid-run on the gameplay map.
    *  Play is disabled in that case — nobody can join a map mid-run. */
   private runInProgress = false;
+  /** Party Unit Frame HUD (top-left overlay, >=2 players). */
+  private partyHud!: PartyHudRefs;
 
   private wasdKeys!: ReturnType<typeof bindKeyboard>["wasdKeys"];
   private inputPayload = {
@@ -307,6 +313,16 @@ export class LobbyScene extends Phaser.Scene {
     }
 
     this.bindRoomStateListeners();
+    // Create + bind the party HUD once the room is ready. The HUD
+    // only renders players currently in the lobby (GameScene owns
+    // gameplay-map players).
+    this.partyHud = createPartyHud(this);
+    this.partyHud.bindRoom(this.room, {
+      includePlayer: (p: any) => p.currentMapId === "lobby",
+    });
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.partyHud?.destroy();
+    });
     this.bindCameraToLocalPlayer();
   }
 
@@ -573,7 +589,11 @@ export class LobbyScene extends Phaser.Scene {
     // createLocalPlayer is called for it.
     this.bindRoomStateListeners();
 
-    // 5) RACE-SAFE local-player setup: by the time we get here, the
+        // Re-bind the party HUD against the new (solo) room.
+    this.partyHud?.bindRoom(this.room, {
+      includePlayer: (p: any) => p.currentMapId === "lobby",
+    });
+// 5) RACE-SAFE local-player setup: by the time we get here, the
     // solo room's onJoin already added our Player to state. If the
     //    cb.onAdd fired BEFORE we called bindRoomStateListeners, our
     //    createLocalPlayer never ran - meaning no onChange handler
