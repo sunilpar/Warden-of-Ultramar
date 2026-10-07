@@ -76,6 +76,8 @@ export interface PartyHudBindOptions {
 
 export interface PartyHudRefs {
   container: Phaser.GameObjects.Container | null;
+  /** Force the panel to show even when only one player is present. */
+  setForceShow?: (v: boolean) => void;
   upsertPlayer(snapshot: PartyPlayerSnapshot): void;
   /** Batch upsert: pushes live state for every frame, then re-layouts once. */
   upsertPlayers(snapshots: PartyPlayerSnapshot[]): void;
@@ -179,7 +181,12 @@ export function createPartyHud(scene: Phaser.Scene): PartyHudRefs {
       const y = HITBOX_TOGGLE_BOTTOM + idx * (FRAME_H + FRAME_GAP);
       f.container.setY(y);
     });
-    const show = N >= 2;
+    // Visibility threshold: 2+ by default. LobbyScene flips
+    // `forceShow` to true while in a code lobby so the lone host
+    // still sees their own unit frame (matches the spec that says
+    // "player frame HP should be shown in the lobby to show that
+    // they are in lobby now").
+    const show = forceShow || N >= 2;
     frames.forEach((f) => f.container.setVisible(show));
   }
 
@@ -260,6 +267,12 @@ export function createPartyHud(scene: Phaser.Scene): PartyHudRefs {
     if (idx >= 0) order.splice(idx, 1);
     relayout();
   }
+
+  let forceShow = false;
+  /** Setter exposed below. When true the panel shows even for 1 player. */
+  const setForceShow = (v: boolean) => {
+    forceShow = v;
+  };
 
   let roomUnbind: Array<() => void> = [];
 
@@ -409,5 +422,7 @@ export function createPartyHud(scene: Phaser.Scene): PartyHudRefs {
     bindRoom,
     unbindRoom,
     destroy,
+    /** Force the panel to show even when only one player is present. */
+    setForceShow,
   };
 }

@@ -31,8 +31,16 @@
 import Phaser from "phaser";
 import { Client } from "@colyseus/sdk";
 import { Callbacks } from "@colyseus/schema";
-import { BACKEND_URL } from "../backend";
-import { LOBBY_MAP_DATA, LOBBY_PLAY_POLYGON } from "../maps/lobbyMapData";
+import { BACKEND_URL, BACKEND_HTTP_URL } from "../backend";
+import {
+  createMultiplayerDialog,
+  type MultiplayerDialogRefs,
+} from "../ui/multiplayerDialog";
+import {
+  LOBBY_MAP_DATA,
+  LOBBY_PLAY_POLYGON,
+  LOBBY_MULTIPLAYER_POLYGON,
+} from "../maps/lobbyMapData";
 import { resolveTileCollision } from "../maps/layeredMapData";
 import { createCharacterAnimations } from "../vfx/animations";
 import { bindKeyboard } from "../systems/input";
@@ -70,6 +78,12 @@ export class LobbyScene extends Phaser.Scene {
   playerHuds: { [sessionId: string]: PlayerHud } = {};
   /** Clickable Play polygon. */
   playButton!: Phaser.GameObjects.Rectangle;
+  /** Clickable MULTIPLYER polygon (opens lobby code dialog). */
+  multiplayerButton!: Phaser.GameObjects.Rectangle;
+  /** Multiplayer lobby code modal (Create / Join / Leave). */
+  multiplayerDialog!: MultiplayerDialogRefs;
+  /** Top-bar text that surfaces the current code while in a lobby. */
+  lobbyCodeText!: Phaser.GameObjects.Text;
   /** Status text shown during room connect / errors. */
   statusText!: Phaser.GameObjects.Text;
   /** FPS counter (debug overlay). */
@@ -280,29 +294,54 @@ export class LobbyScene extends Phaser.Scene {
 
     // ---- "Click Play to begin" hint + the Play polygon itself ----
     this.buildPlayButton();
+    // ---- The MULTIPLYER polygon (opens the lobby code dialog) ----
+    this.buildMultiplayerButton();
+    // ---- The lobby code dialog (Create / Join / Leave) ----
+    this.multiplayerDialog = createMultiplayerDialog(this);
+    // ---- Top-bar code text (only visible when in a code lobby) ----
+    this.lobbyCodeText = this.add
+      .text(this.cameras.main.centerX, 44, "", {
+        color: "#ffd54f",
+        fontSize: "14px",
+        fontFamily: "monospace",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5, 0)
+      .setScrollFactor(0)
+      .setDepth(101)
+      .setVisible(false);
 
     // ---- Input bindings ----
     const bindings = bindKeyboard(this);
     this.wasdKeys = bindings.wasdKeys;
 
-    // ---- Connect to the room ----
+    // ---- Connect to a room ONLY if one was handed in (via scene.start
+    //      with init data) from GameScene (death -> lobby swap, or
+    //      solo-redirect target). Otherwise we DO NOT auto-join: the
+    //      player has to either click MULTIPLYER -> Create/Join a code
+    //      lobby, or click PLAY -> spawn a private solo room.
     if (!this.room) {
       try {
         this.client = new Client(BACKEND_URL);
-        this.room = await this.client.joinOrCreate(
-          "game_room",
-          defaultJoinOptions(),
-        );
       } catch (e) {
-        console.error("LobbyScene failed to connect:", e);
+        console.error("LobbyScene failed to construct Colyseus client:", e);
         this.statusText.setText("Connection failed - refresh to retry");
         return;
       }
+      // No room yet -> ghost sprite the player so the lobby still feels
+      // alive. WASD + collision work locally, and the multiplayer
+      // polygon / play polygon route to the room-creation flow.
+      this.spawnGhostPlayer();
+    } else {
+      // Coming from GameScene with an already-open room. Use the
+      // existing state to render the local player + remotes.
+      this.runInProgress = !!this.room.state?.runInProgress;
     }
     // ---- Initial status text (will be re-rendered by updateLobbyStatus
     //      once the local player is registered) ----
-    this.statusText.setText("In lobby - click PLAY to begin");
-    this.runInProgress = !!this.room.state?.runInProgress;
+    this.updateLobbyStatus();
 
     // ---- Production fullscreen (mirrors the old SceneSelector behavior) ----
     if (
@@ -312,18 +351,26 @@ export class LobbyScene extends Phaser.Scene {
       if (!this.scale.isFullscreen) this.scale.startFullscreen();
     }
 
-    this.bindRoomStateListeners();
-    // Create + bind the party HUD once the room is ready. The HUD
-    // only renders players currently in the lobby (GameScene owns
-    // gameplay-map players).
-    this.partyHud = createPartyHud(this);
-    this.partyHud.bindRoom(this.room, {
-      includePlayer: (p: any) => p.currentMapId === "lobby",
-    });
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-      this.partyHud?.destroy();
-    });
-    this.bindCameraToLocalPlayer();
+    if (this.room) {
+      this.bindRoomStateListeners();
+      // Create + bind the party HUD once the room is ready. The HUD
+      // only renders players currently in the lobby (GameScene owns
+      // gameplay-map players). `setForceShow(true)` is applied later
+      // in the create-room success path for code lobbies; for the
+      // default init-data case (GameScene handoff) the threshold
+      // remains the standard 2+.
+      this.partyHud = createPartyHud(this);
+      this.partyHud.bindRoom(this.room, {
+        includePlayer: (p: any) => p.currentMapId === "lobby",
+      });
+      this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+        this.partyHud?.destroy();
+      });
+      this.bindCameraToLocalPlayer();
+    } else {
+      // No room: ghost sprite was spawned. Camera follows it.
+      this.bindCameraToLocalPlayer();
+    }
   }
 
   // ============================================================
@@ -433,7 +480,12 @@ export class LobbyScene extends Phaser.Scene {
   }
 
   private requestPlay(): void {
-    if (!this.room) return;
+    if (!this.room) {
+      // No room yet -> Play means "start a private solo run".
+      this.statusText.setText("Starting solo run...");
+      this.requestSoloPlay();
+      return;
+    }
     // Always forward the press to the server - it's the only place
     // with the authority to decide what happens. The server handles
     // three cases:
@@ -448,6 +500,264 @@ export class LobbyScene extends Phaser.Scene {
     // We deliberately do NOT gate the button client-side on
     // runInProgress - that was swallowing the dead-loner solo press.
     this.room.send(MSG_PLAY, {});
+  }
+
+  /**
+   * Build the invisible clickable hit-area on top of the "MULTIPLYER"
+   * polygon in the lobby. Click -> open the lobby code dialog.
+   */
+  private buildMultiplayerButton(): void {
+    const poly = LOBBY_MULTIPLAYER_POLYGON;
+    if (!poly) {
+      console.warn(
+        "[LOBBY] No MULTIPLYER polygon found in lobby map - dialog trigger unavailable",
+      );
+      return;
+    }
+    const bbox = poly.bbox;
+    const cx = bbox.x + bbox.width / 2;
+    const cy = bbox.y + bbox.height / 2;
+    this.multiplayerButton = this.add
+      .rectangle(cx, cy, bbox.width, bbox.height, 0x000000, 0)
+      .setStrokeStyle(0)
+      .setDepth(5)
+      .setInteractive({ useHandCursor: true });
+    this.multiplayerButton.on("pointerdown", () => this.openMultiplayerDialog());
+  }
+
+  /**
+   * Open the multiplayer dialog with the right context (whether the
+   * player is currently in a code lobby or sitting in the no-room
+   * ghost state). Called from the MULTIPLYER polygon click.
+   */
+  private openMultiplayerDialog(): void {
+    const inCodeLobby = this.hasCodeLobbyRoom();
+    const currentCode = inCodeLobby
+      ? (this.room?.state?.lobbyCode as string | undefined) || ""
+      : undefined;
+    this.multiplayerDialog.show({
+      inCodeLobby,
+      currentCode,
+      // Create: caller fetches the room, dialog shows the code. The
+      // dialog stays open with the code visible until the user clicks
+      // ENTER LOBBY, which fires onCreateConfirmed below.
+      onCreate: (showCreated, showError) =>
+        this.requestCreateLobby(showCreated, showError),
+      onCreateConfirmed: (code, roomId) =>
+        this.confirmCreateLobbyAndJoin(code, roomId),
+      onJoin: (code, showError) => this.requestJoinLobby(code, showError),
+      onLeave: () => this.requestLeaveLobby(),
+      onSoloPlay: () => this.requestSoloPlay(),
+    });
+  }
+
+  /**
+   * True when we are currently inside a room that has a joinable
+   * lobby code (state.lobbyCode is non-empty). Returns false in the
+   * no-room state AND in private solo rooms.
+   */
+  private hasCodeLobbyRoom(): boolean {
+    if (!this.room) return false;
+    const code = this.room.state?.lobbyCode;
+    return typeof code === "string" && code.length > 0;
+  }
+
+  /**
+   * POST /api/lobby/create -> { code, roomId } -> joinById(roomId).
+   * On success flips the dialog into the "created" view with the
+   * freshly-minted code (which the dialog auto-copies to clipboard).
+   * On failure flips back to main + surfaces the error in the hint.
+   */
+  /**
+   * Create a fresh code-lobby GameRoom on the server. We DO NOT join
+   * it yet - the dialog stays open in the "created" view showing the
+   * code + COPY CODE + ENTER LOBBY buttons. When the user clicks
+   * ENTER LOBBY the dialog calls onCreateConfirmed -> us ->
+   * `confirmCreateLobbyAndJoin`, which is what actually performs the
+   * `swapToRoom` (and re-binds state). This split keeps the code
+   * visible until the user explicitly commits.
+   */
+  private async requestCreateLobby(
+    showCreated: (code: string, roomId: string) => void,
+    showError: (msg: string) => void,
+  ): Promise<void> {
+    try {
+      const res = await fetch(BACKEND_HTTP_URL + "/api/lobby/create", {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const text = await safeReadText(res);
+        showError(
+          (text || "Server returned " + res.status).slice(0, 200) ||
+            "Failed to create lobby",
+        );
+        return;
+      }
+      const data = (await res.json()) as { code?: string; roomId?: string };
+      if (!data.code || !data.roomId) {
+        showError("Server response missing code/roomId");
+        return;
+      }
+      // Hand the code + roomId to the dialog. It will display the
+      // code, auto-copy, and stay open until the user clicks ENTER.
+      showCreated(data.code, data.roomId);
+    } catch (e: any) {
+      console.error("[LOBBY] requestCreateLobby failed:", e);
+      showError("Network error: " + (e?.message || String(e)));
+    }
+  }
+
+  /**
+   * Second half of the create-lobby flow. Fired by the dialog's
+   * ENTER LOBBY button - by this point the dialog is hidden and we
+   * are committed to joining the code-lobby room. Mirrors the
+   * join-lobby path (HTTP lookup already happened, we have the
+   * roomId) so the user can re-create a lobby, walk away to share
+   * the code, then come back and ENTER without re-fetching.
+   */
+  private async confirmCreateLobbyAndJoin(
+    code: string,
+    roomId: string,
+  ): Promise<void> {
+    this.statusText.setText("Entering code lobby " + code + "...");
+    try {
+      await this.swapToRoom(roomId);
+      this.partyHud?.setForceShow?.(true);
+      this.updateLobbyStatus();
+    } catch (e: any) {
+      console.error("[LOBBY] confirmCreateLobbyAndJoin failed:", e);
+      this.statusText.setText(
+        "Failed to enter lobby: " + (e?.message || String(e)),
+      );
+    }
+  }
+
+  /**
+   * GET /api/lobby/join?code=X -> { roomId } -> joinById(roomId).
+   * On 404 / 409 surfaces the server message inline in the dialog.
+   */
+  private async requestJoinLobby(
+    code: string,
+    showError: (msg: string) => void,
+  ): Promise<void> {
+    try {
+      const res = await fetch(
+        BACKEND_HTTP_URL + "/api/lobby/join?code=" + encodeURIComponent(code),
+      );
+      if (!res.ok) {
+        const text = await safeReadText(res);
+        showError((text || "Server returned " + res.status).slice(0, 200));
+        return;
+      }
+      const data = (await res.json()) as { roomId?: string; code?: string };
+      if (!data.roomId) {
+        showError("Server response missing roomId");
+        return;
+      }
+      await this.swapToRoom(data.roomId);
+      this.partyHud?.setForceShow?.(true);
+      this.updateLobbyStatus();
+    } catch (e: any) {
+      console.error("[LOBBY] requestJoinLobby failed:", e);
+      showError("Network error: " + (e?.message || String(e)));
+    }
+  }
+
+  /**
+   * Leave the current room. If the player was the leader the server's
+   * onLeave will tear the room down and disconnect everyone; the
+   * resulting leave event gets caught by Colyseus and `this.room`
+   * becomes a dead reference. We tear our local lobby state down too
+   * and spawn a fresh ghost so the player can Create/Join a new one.
+   */
+  private async requestLeaveLobby(): Promise<void> {
+    if (!this.room) return;
+    const oldRoom = this.room;
+    this.statusText.setText("Leaving lobby...");
+    this.teardownLobbyState();
+    try {
+      await oldRoom.leave(true);
+    } catch (e) {
+      console.warn("[LOBBY] leave() during leave-lobby failed:", e);
+    }
+    this.room = null;
+    this.partyHud?.setForceShow?.(false);
+    this.spawnGhostPlayer();
+    this.statusText.setText(
+      "Left lobby - click MULTIPLYER or PLAY to start again",
+    );
+  }
+
+  /**
+   * Create a fresh private solo GameRoom (no lobbyCode -> not joinable
+   * by anyone else) and join it. Server sets isSoloRun=true so the
+   * first player to join is auto-teleported to map1 with no extra
+   * Play click. Used by both the dialog's PLAY SOLO button and the
+   * no-room Play press.
+   */
+  private async requestSoloPlay(): Promise<void> {
+    try {
+      const res = await fetch(BACKEND_HTTP_URL + "/api/lobby/solo", {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const text = await safeReadText(res);
+        this.statusText.setText(
+          "Solo create failed: " + (text || "HTTP " + res.status),
+        );
+        return;
+      }
+      const data = (await res.json()) as { roomId?: string };
+      if (!data.roomId) {
+        this.statusText.setText("Solo create response missing roomId");
+        return;
+      }
+      await this.swapToRoom(data.roomId);
+    } catch (e: any) {
+      console.error("[LOBBY] requestSoloPlay failed:", e);
+      this.statusText.setText(
+        "Solo create network error: " + (e?.message || String(e)),
+      );
+    }
+  }
+
+  /**
+   * Spawn a "ghost" local player sprite when the scene is up but no
+   * Colyseus room is connected yet. The ghost can be driven around
+   * with WASD so the lobby still feels alive; the multiplayer /
+   * play polygons route to room-creation flows that will dispose the
+   * ghost and create the real server-backed sprite via
+   * `createLocalPlayer`.
+   */
+  private spawnGhostPlayer(): void {
+    if (this.currentPlayer) return;
+    const sprite = this.add
+      .sprite(
+        LOBBY_MAP_DATA.spawnPoint.x,
+        LOBBY_MAP_DATA.spawnPoint.y,
+        "player_sheet",
+        0,
+      )
+      .setDepth(4);
+    this.currentPlayer = sprite;
+    this.cameras.main.startFollow(sprite);
+    this.cameras.main.setBounds(
+      0,
+      0,
+      LOBBY_MAP_DATA.widthPx,
+      LOBBY_MAP_DATA.heightPx,
+    );
+    // Floating name + "[GHOST]" suffix so the player understands the
+    // sprite isn't yet connected to a real session.
+    this.playerHuds["__ghost__"] = attachPlayerHud(
+      this,
+      sprite,
+      "GHOST (no lobby yet)",
+      { showHpBar: false },
+    );
+    this.statusText.setText(
+      "In lobby - click MULTIPLYER to create / join a lobby, or PLAY to go solo",
+    );
   }
 
   // ============================================================
@@ -627,7 +937,18 @@ export class LobbyScene extends Phaser.Scene {
    */
   private updateLobbyStatus(): void {
     if (!this.statusText) return;
-    if (!this.room || !this.currentPlayerState) return;
+    // ---- NO-ROOM (ghost) state ----
+    if (!this.room || !this.currentPlayerState) {
+      // Code text is hidden; status text already says "click MULTIPLYER
+      // or PLAY" via spawnGhostPlayer / requestLeaveLobby.
+      this.lobbyCodeText?.setVisible(false);
+      this.statusText.setText(
+        "In lobby - click MULTIPLYER to create/join a code lobby, or PLAY to go solo",
+      );
+      return;
+    }
+    // ---- IN-ROOM state ----
+    const lobbyCode: string = this.room.state?.lobbyCode ?? "";
     // Count how many players are currently in the lobby (incl. us).
     let lobbyCount = 0;
     try {
@@ -641,6 +962,15 @@ export class LobbyScene extends Phaser.Scene {
       // state may not be ready yet - fall through to default text
     }
     const aloneInLobby = lobbyCount <= 1;
+    // Code top-bar text: visible only when in a code lobby, shows the
+    // code so anyone in the room can re-share it. Hidden in solo rooms
+    // (no code) and in the no-room state.
+    if (lobbyCode) {
+      this.lobbyCodeText.setText("LOBBY CODE: " + lobbyCode);
+      this.lobbyCodeText.setVisible(true);
+    } else {
+      this.lobbyCodeText.setVisible(false);
+    }
     if (this.runInProgress) {
       this.statusText.setText(
         aloneInLobby
@@ -649,7 +979,9 @@ export class LobbyScene extends Phaser.Scene {
       );
     } else {
       this.statusText.setText(
-        `In lobby - click PLAY to begin (${this.room.sessionId.slice(0, 6)})`,
+        lobbyCode
+          ? `In code lobby ${lobbyCode} - click PLAY to start (${this.room.sessionId.slice(0, 6)})`
+          : `In lobby - click PLAY to begin (${this.room.sessionId.slice(0, 6)})`,
       );
     }
   }
@@ -722,7 +1054,7 @@ export class LobbyScene extends Phaser.Scene {
       this,
       sprite,
       player.displayName ?? "",
-      { showHpBar: false },
+      { showHpBar: this.hasCodeLobbyRoom() },
     );
 
     const cb = Callbacks.get(this.room as any) as any;
@@ -768,7 +1100,7 @@ export class LobbyScene extends Phaser.Scene {
       this,
       sprite,
       player.displayName ?? "",
-      { showHpBar: false },
+      { showHpBar: this.hasCodeLobbyRoom() },
     );
     const cb = Callbacks.get(this.room as any) as any;
     cb.onChange(player, () => {
@@ -972,5 +1304,19 @@ export class LobbyScene extends Phaser.Scene {
         break;
       }
     }
+  }
+}
+
+/**
+ * Best-effort text extractor for fetch responses. Some endpoints may
+ * return a non-JSON body on error (HTML proxy page, plain "Not Found"
+ * etc) which would crash res.json() in the caller. This helper returns
+ * the body as a trimmed string, or an empty string if reading fails.
+ */
+async function safeReadText(res: Response): Promise<string> {
+  try {
+    return (await res.text()).slice(0, 500);
+  } catch {
+    return "";
   }
 }

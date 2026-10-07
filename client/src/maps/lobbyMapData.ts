@@ -225,3 +225,14 @@ export const LOBBY_PLAY_POLYGON: LobbyInteractivePolygon | null =
   LOBBY_MAP_DATA.interactiveObjects.find((o) =>
     o.properties.includes("Play"),
   ) ?? null;
+
+/**
+ * The "MULTIPLYER" polygon (only one; the map JSON has a single
+ * polygon with property name "multiplayer" set to true). Clicking it
+ * opens the multiplayer lobby code dialog. Falls back to null if the
+ * map data didn't include it (defensive).
+ */
+export const LOBBY_MULTIPLAYER_POLYGON: LobbyInteractivePolygon | null =
+  LOBBY_MAP_DATA.interactiveObjects.find((o) =>
+    o.properties.includes("multiplayer"),
+  ) ?? null;

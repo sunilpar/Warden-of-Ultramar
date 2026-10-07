@@ -60,4 +60,14 @@ export class RoomState extends Schema {
    * to compute the offer tier (every 2 clears bumps the tier).
    */
   @type("number") mapsCleared: number = 0;
+  /**
+   * 6-char alphanumeric lobby code ("ABC123") or empty string when
+   * the room is private / solo (no other player can join it). Set
+   * once in `onCreate` from the createRoom options; clients read it
+   * to display "share this code with a friend" in the HUD.
+   *
+   * Lives on the state schema so it survives room-rebind races
+   * (solo-redirect swap, etc.) without a second message round-trip.
+   */
+  @type("string") lobbyCode: string = "";
 }

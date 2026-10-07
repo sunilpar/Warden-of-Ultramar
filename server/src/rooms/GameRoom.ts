@@ -98,6 +98,11 @@ import {
 } from "../config/mapStats";
 import { MapStat } from "../schema/MapStat";
 import { pickUniqueName } from "../config/namePool";
+import {
+  registerLobby,
+  unregisterLobby,
+  setLeaderInLobby,
+} from "../lobbyRegistry";
 
 /** Serialized map-stat offer sent over the wire to the picker UI. */
 export interface SerializedMapStatOffer {
@@ -206,6 +211,26 @@ export class GameRoom extends Room {
    * the map without requiring a second click on the new room's lobby.
    */
   private isSoloRun = false;
+  /**
+   * 6-character lobby code or empty string. Populated in onCreate
+   * from options.lobbyCode. When non-empty this room is a joinable
+   * code lobby - registered in the lobby registry so the HTTP join
+   * route can route other players into it. Empty means private/solo.
+   */
+  private lobbyCode: string = "";
+  /**
+   * sessionId of the FIRST player to join the room. The leader is
+   * the gatekeeper for new joiners (only they being in the lobby
+   * state allows HTTP join calls to succeed). On leader disconnect
+   * the entire room is destroyed - the lobby loses its identity.
+   */
+  private leaderId: string = "";
+  /**
+   * Mirror of leader Player.currentMapId === "lobby". Updated in
+   * onJoin, sendPlayerToLobby and startRun so the registry always
+   * answers the join gate without racing against a player schema.
+   */
+  private leaderInLobby: boolean = false;
 
   onCreate(options?: any) {
     // The lobby is a permanent, never-rotating map. Its MapSystem +
@@ -224,6 +249,15 @@ export class GameRoom extends Room {
     if (options && options.soloRun) {
       this.isSoloRun = true;
       console.log("[ROOM] Solo-run room created - first join will auto-start");
+    }
+    // Lobby code: carried from matchMaker.createRoom options. When
+    // present this room is a public code lobby; registration with
+    // the registry happens in onJoin (needs leader sessionId) and
+    // teardown happens automatically in onDispose.
+    if (options && typeof options.lobbyCode === "string" && options.lobbyCode.length > 0) {
+      this.lobbyCode = options.lobbyCode;
+      this.state.lobbyCode = this.lobbyCode;
+      console.log("[ROOM] Code-lobby room created with code " + this.lobbyCode);
     }
   }
 
@@ -1632,6 +1666,33 @@ export class GameRoom extends Room {
 
     this.state.players.set(client.sessionId, player);
 
+    // ---- LEADER TRACKING ----
+    // The first player to join a code-lobby room is the leader:
+    //   - They are the gatekeeper (new joiners only allowed when
+    //     leader is in the lobby state).
+    //   - If they disconnect, the entire room is destroyed - the
+    //     lobby identity dies with the leader.
+    // For private / solo rooms there is no leader - the room is
+    // throwaway and never enters the registry.
+    if (this.lobbyCode && this.leaderId === "") {
+      this.leaderId = client.sessionId;
+      this.leaderInLobby = true;
+      const registered = registerLobby(
+        this.lobbyCode,
+        this.roomId,
+        this.leaderId,
+      );
+      if (!registered) {
+        console.warn(
+          "[ROOM] Code " + this.lobbyCode + " already taken in registry; room created but not joinable",
+        );
+      } else {
+        console.log(
+          "[ROOM] Code-lobby " + this.lobbyCode + " registered, leader=" + this.leaderId,
+        );
+      }
+    }
+
     // ---- SOLO RUN: auto-start the run on first join ----
     // The room was created via matchMaker with `soloRun: true`. The
     // player who joined is the dead-loner; take them straight to map1
@@ -1680,6 +1741,12 @@ export class GameRoom extends Room {
     player.currentMapId = "lobby";
     player.x = LOBBY_SPAWN_POINT.x;
     player.y = LOBBY_SPAWN_POINT.y;
+    // Leader just returned to lobby -> flip registry flag so new
+    // joiners can be accepted again.
+    if (player.sessionId === this.leaderId && this.lobbyCode) {
+      this.leaderInLobby = true;
+      setLeaderInLobby(this.roomId, true);
+    }
   }
 
   /**
@@ -1697,6 +1764,13 @@ export class GameRoom extends Room {
       if (p.currentMapId === "lobby") lobbyPlayers.push(p);
     });
     if (lobbyPlayers.length === 0) return;
+    // Leader just left the lobby for a map -> mark them out so
+    // the join endpoint rejects new drop-ins mid-run. The leader
+    // must lead.
+    if (this.lobbyCode) {
+      this.leaderInLobby = false;
+      setLeaderInLobby(this.roomId, false);
+    }
 
     // Fresh map for the new run: resets per-map state (enemies, zones,
     // exit gate, spawn counters) and re-arms the 5s spawn grace. The
@@ -1858,6 +1932,26 @@ export class GameRoom extends Room {
   }
   onLeave(client: Client, _code: number) {
     console.log("Player left:", client.sessionId);
+
+    // ---- LEADER DISCONNECT -> ROOM DEAD ----
+    // If the leader drops, the lobby loses its identity. Anyone
+    // still connected gets disconnected (Colyseus sends the
+    // standard leave code on dispose) and the registry entry is
+    // cleared by onDispose. We unregister synchronously here so a
+    // concurrent join attempt for this code gets a 404 instead of
+    // being routed to a room that is about to be torn down.
+    if (this.lobbyCode && client.sessionId === this.leaderId) {
+      console.log(
+        "[ROOM] Leader of code-lobby " + this.lobbyCode + " left - destroying room",
+      );
+      unregisterLobby(this.roomId);
+      try {
+        this.disconnect();
+      } catch (e) {
+        console.warn("[ROOM] disconnect() after leader-leave failed:", e);
+      }
+      return;
+    }
     // Free the display name so a future join from this same browser
     // (same localStorage id) re-binds to it instead of drawing fresh.
     const player = this.state.players.get(client.sessionId);
@@ -1877,5 +1971,12 @@ export class GameRoom extends Room {
 
   onDispose() {
     console.log("GameRoom disposed:", this.roomId);
+    // Clear the lobby code registry too (the leader-leave path
+    // unregisters synchronously above; this is the catch-all for
+    // every other dispose route). Idempotent.
+    if (this.lobbyCode) {
+      unregisterLobby(this.roomId);
+      console.log("[ROOM] Code-lobby " + this.lobbyCode + " disposed");
+    }
   }
 }
