@@ -50,16 +50,17 @@ const entries = new Map<string, LobbyRegistryEntry>();
 const byRoom = new Map<string, string>();
 
 /**
- * Generate a 6-character lobby code from the alphabet 0-9 a-z A-Z
- * (62 chars; 62^6 = ~56B combinations -> collision probability for
- * 1k concurrent lobbies is ~10^-8, so retrying on collision is fine).
+ * Generate a 6-character lobby code from the alphabet 0-9 A-Z (uppercase
+ * only - lowercase letters are intentionally excluded so codes are easy
+ * to read and shout across the room). 36 chars; 36^6 = ~2.2B combinations
+ * -> collision probability for 1k concurrent lobbies is ~5e-7, so retrying
+ * on collision is fine.
  *
  * Pure random, server-authoritative. The seed text in the brief
- * (1-9, a-z, A-Z) IS the alphabet; the code is just sampled from it.
+ * (1-9, A-Z) IS the alphabet; the code is just sampled from it.
  */
 export function generateLobbyCode(): string {
-  const ALPHABET =
-    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   let out = "";
   // crypto.getRandomValues is available in modern Node (we are 18+).
   // Fall back to Math.random if not (older runtimes/tests).
@@ -82,8 +83,15 @@ export function generateLobbyCode(): string {
  * false if the code is already taken (very rare; caller should retry
  * with a fresh code).
  *
- * Used by:
- *   - The Create-Lobby HTTP route, immediately after matchMaker.createRoom.
+ * Called by:
+ *   - The Create-Lobby HTTP route, RIGHT AFTER matchMaker.createRoom
+ *     resolves - so the code is in the registry BEFORE the JSON
+ *     response goes back to the client. This closes the race where
+ *     a second player could paste the auto-copied code and hit JOIN
+ *     before the creator's `joinById` handshake (which would have
+ *     been the only trigger that previously inserted the entry).
+ *     `leaderId` is empty at this point; `setLobbyLeader` fills it
+ *     in when the creator's `onJoin` fires.
  *   - Not called by solo/private rooms - they never appear in here.
  */
 export function registerLobby(
@@ -101,6 +109,26 @@ export function registerLobby(
   });
   byRoom.set(roomId, code);
   return true;
+}
+
+/**
+ * Stamp the leader's sessionId onto an already-registered lobby.
+ * Called from GameRoom.onJoin when the first player connects - we
+ * know the room is already in the registry (registered at create
+ * time), we just need to record who the leader is so onLeave can
+ * detect a leader-disconnect and tear the room down.
+ *
+ * Idempotent: only writes when the entry exists AND the leader has
+ * not already been recorded (a reconnecting leader doesn't reset
+ * their own id).
+ */
+export function setLobbyLeader(roomId: string, leaderId: string): void {
+  const code = byRoom.get(roomId);
+  if (!code) return;
+  const entry = entries.get(code);
+  if (!entry) return;
+  if (entry.leaderId !== "") return;
+  entry.leaderId = leaderId;
 }
 
 /**
@@ -141,6 +169,12 @@ export function setLeaderInLobby(roomId: string, inLobby: boolean): void {
 }
 
 /** Debug helper - returns a snapshot of all registered lobbies. */
-export function debugDump(): Array<{ code: string; entry: LobbyRegistryEntry }> {
-  return Array.from(entries.entries()).map(([code, entry]) => ({ code, entry }));
+export function debugDump(): Array<{
+  code: string;
+  entry: LobbyRegistryEntry;
+}> {
+  return Array.from(entries.entries()).map(([code, entry]) => ({
+    code,
+    entry,
+  }));
 }

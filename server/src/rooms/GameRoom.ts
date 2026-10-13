@@ -99,9 +99,9 @@ import {
 import { MapStat } from "../schema/MapStat";
 import { pickUniqueName } from "../config/namePool";
 import {
-  registerLobby,
   unregisterLobby,
   setLeaderInLobby,
+  setLobbyLeader,
 } from "../lobbyRegistry";
 
 /** Serialized map-stat offer sent over the wire to the picker UI. */
@@ -254,7 +254,11 @@ export class GameRoom extends Room {
     // present this room is a public code lobby; registration with
     // the registry happens in onJoin (needs leader sessionId) and
     // teardown happens automatically in onDispose.
-    if (options && typeof options.lobbyCode === "string" && options.lobbyCode.length > 0) {
+    if (
+      options &&
+      typeof options.lobbyCode === "string" &&
+      options.lobbyCode.length > 0
+    ) {
       this.lobbyCode = options.lobbyCode;
       this.state.lobbyCode = this.lobbyCode;
       console.log("[ROOM] Code-lobby room created with code " + this.lobbyCode);
@@ -1677,20 +1681,18 @@ export class GameRoom extends Room {
     if (this.lobbyCode && this.leaderId === "") {
       this.leaderId = client.sessionId;
       this.leaderInLobby = true;
-      const registered = registerLobby(
-        this.lobbyCode,
-        this.roomId,
-        this.leaderId,
+      // The code was already registered at room-create time (see
+      // /api/lobby/create in app.config.ts) so second players can
+      // find the lobby before our `joinById` handshake even
+      // completes. All we need to do here is stamp the leader's
+      // sessionId so onLeave can detect a leader-disconnect.
+      setLobbyLeader(this.roomId, this.leaderId);
+      console.log(
+        "[ROOM] Code-lobby " +
+          this.lobbyCode +
+          " leader joined: " +
+          this.leaderId,
       );
-      if (!registered) {
-        console.warn(
-          "[ROOM] Code " + this.lobbyCode + " already taken in registry; room created but not joinable",
-        );
-      } else {
-        console.log(
-          "[ROOM] Code-lobby " + this.lobbyCode + " registered, leader=" + this.leaderId,
-        );
-      }
     }
 
     // ---- SOLO RUN: auto-start the run on first join ----
@@ -1942,7 +1944,9 @@ export class GameRoom extends Room {
     // being routed to a room that is about to be torn down.
     if (this.lobbyCode && client.sessionId === this.leaderId) {
       console.log(
-        "[ROOM] Leader of code-lobby " + this.lobbyCode + " left - destroying room",
+        "[ROOM] Leader of code-lobby " +
+          this.lobbyCode +
+          " left - destroying room",
       );
       unregisterLobby(this.roomId);
       try {

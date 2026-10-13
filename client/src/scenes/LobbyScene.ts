@@ -911,7 +911,19 @@ export class LobbyScene extends Phaser.Scene {
     //    (player.currentMapId -> "map1") would never trigger our
     //    scene.start("game"). Sweep the state once to ensure we have
     //    a local sprite + onChange ready for the upcoming patch.
-    const localPlayer = this.room.state.players.get(this.room.sessionId);
+    //
+    // Guard every step: for a JOINER the WebSocket state patch
+    // carrying the populated `players` map can land on a later
+    // tick than `joinById` resolving, so `state` or `state.players`
+    // may briefly be undefined here. The cb.onAdd listener we just
+    // registered is the primary path and will fire on the next
+    // patch - we just skip the manual sweep when the schema hasn't
+    // arrived yet.
+    const players = this.room.state?.players;
+    const localPlayer =
+      players && typeof players.get === "function"
+        ? players.get(this.room.sessionId)
+        : undefined;
     if (localPlayer && !this.currentPlayer) {
       console.log(
         "[LOBBY] cb.onAdd missed the local player - syncing manually",

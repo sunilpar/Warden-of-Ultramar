@@ -6,7 +6,7 @@ import type { Request, Response } from "express";
  * Import your Room files
  */
 import { GameRoom } from "./rooms/GameRoom";
-import { generateLobbyCode, lookupLobby } from "./lobbyRegistry";
+import { generateLobbyCode, lookupLobby, registerLobby } from "./lobbyRegistry";
 
 const server = defineServer({
   rooms: {
@@ -33,9 +33,9 @@ const server = defineServer({
     // custom metadata; the lobbyRegistry is the source of truth and the HTTP
     // route hands the client back the actual roomId to pass to joinById.
     //
-    // Codes are 6 chars from 0-9a-zA-Z (62 chars; ~56B combinations). With
-    // even 1k concurrent code-lobbies the collision probability is ~1e-8, so
-    // we retry up to 8 times before giving up.
+    // Codes are 6 chars from 0-9 A-Z (uppercase only - 36 chars; ~2.2B
+    // combinations). With even 1k concurrent code-lobbies the collision
+    // probability is ~5e-7, so we retry up to 8 times before giving up.
 
     /**
      * POST /api/lobby/create
@@ -49,27 +49,43 @@ const server = defineServer({
      */
     app.post("/api/lobby/create", async (_req: Request, res: Response) => {
       const MAX_ATTEMPTS = 8;
-      try {
-        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-          const code = generateLobbyCode();
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        const code = generateLobbyCode();
+        try {
           // matchMaker.createRoom returns a CacheEntry with the roomId.
           const cache = await matchMaker.createRoom("game_room", {
             lobbyCode: code,
           });
-          // Reservation succeeded. We can't register the code in the
-          // registry yet (no leader sessionId until first join), but
-          // GameRoom.onJoin will register it the moment the creator
-          // connects. If someone else races us with the same code the
-          // registry.registerLobby call there returns false and the
-          // create still succeeds - the room just isn't joinable.
+          // Register the code in the registry NOW, BEFORE returning the
+          // JSON response. The dialog auto-copies the code the moment
+          // it lands, so a second player could paste + JOIN in the
+          // window between this response and the creator's
+          // `joinById` handshake (which is what used to insert the
+          // entry in GameRoom.onJoin). Registering eagerly closes that
+          // race. `leaderId` is empty here - GameRoom.onJoin stamps it
+          // via setLobbyLeader() once the creator connects.
+          const registered = registerLobby(code, cache.roomId, "");
+          if (!registered) {
+            // Vanishingly rare collision with a concurrent create
+            // using the same code. The room is now unreachable via
+            // /api/lobby/join; retry with a fresh code. The orphan
+            // room will be cleaned up by Colyseus's natural timeout.
+            console.warn(
+              `[API] /api/lobby/create: code "${code}" race-collision, retrying`,
+            );
+            continue;
+          }
           res.json({ code, roomId: cache.roomId });
           return;
+        } catch (e) {
+          if (attempt === MAX_ATTEMPTS - 1) {
+            console.error("[API] /api/lobby/create failed:", e);
+            res
+              .status(500)
+              .json({ error: "lobby_create_failed", message: String(e) });
+            return;
+          }
         }
-      } catch (e) {
-        console.error("[API] /api/lobby/create failed:", e);
-        res
-          .status(500)
-          .json({ error: "lobby_create_failed", message: String(e) });
       }
     });
 
@@ -111,16 +127,11 @@ const server = defineServer({
     app.get("/api/lobby/join", (req: Request, res: Response) => {
       const codeRaw = req.query;
       const code = typeof codeRaw.code === "string" ? codeRaw.code.trim() : "";
-      // Normalise: uppercase to match what the server-side generator
-      // emits. The generator already emits mixed case, but a user
-      // typing the code might prefer one case; matching is
-      // case-insensitive either way because the alphabet is the same.
+      // Server-side generator only emits uppercase A-Z + 0-9, but a user
+      // typing the code may paste it in any case - normalise to upper so
+      // the registry lookup matches.
       const normalised = code.toUpperCase();
-      // First pass: case as-is (registry stores the generated case).
-      let entry = code ? lookupLobby(code) : null;
-      if (!entry && normalised && normalised !== code) {
-        entry = lookupLobby(normalised);
-      }
+      const entry = normalised ? lookupLobby(normalised) : null;
       if (!entry) {
         res.status(404).json({
           error: "lobby_not_found",
