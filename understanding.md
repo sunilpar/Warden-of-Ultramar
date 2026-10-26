@@ -48,6 +48,18 @@
     - 11.4 [Game-design smells](#114-game-design-smells)
     - 11.5 [How it *should* be done](#115-how-it-should-be-done)
 12. [Glossary](#12-glossary)
+13. [Lobby System (end-to-end breakdown)](#13-lobby-system-end-to-end-breakdown)
+   - 13.1 [The three lobby flavours](#131-the-three-lobby-flavours)
+   - 13.2 [Lobby map data — server & client](#132-lobby-map-data--server--client)
+   - 13.3 [Server: the lobby room (GameRoom)](#133-server-the-lobby-room-gameroom)
+   - 13.4 [HTTP lobby API](#134-http-lobby-api)
+   - 13.5 [lobbyRegistry.ts — the code index](#135-lobbyregistryts--the-code-index)
+   - 13.6 [The leader model](#136-the-leader-model)
+   - 13.7 [Client: LobbyScene](#137-client-lobbyscene)
+   - 13.8 [Client: multiplayerDialog.ts](#138-client-multiplayerdialogts)
+   - 13.9 [End-to-end flows](#139-end-to-end-flows)
+   - 13.10 [Lobby state & message reference](#1310-lobby-state--message-reference)
+   - 13.11 [Lobby gaps & smells](#1311-lobby-gaps--smells)
 
 ---
 
@@ -1414,7 +1426,406 @@ For someone who wants to take this prototype to "real game" quality:
 
 ---
 
+## 13. Lobby System (end-to-end breakdown)
+
+The word "lobby" means three different things in this codebase, and it is worth keeping them apart:
+
+| Thing | Where | Lifetime |
+|---|---|---|
+| **Lobby map** — a permanent safe-zone tile map | `server/src/config/lobbyMap.ts` + `client/src/maps/lobbyMapData.ts` | Forever (it never rotates) |
+| **Lobby scene** — the Phaser scene that renders it | `client/src/scenes/LobbyScene.ts` | While the player is in the lobby |
+| **Lobby room** — the Colyseus room that *hosts* the lobby map | `server/src/rooms/GameRoom.ts` | Until the leader leaves / the room empties |
+
+On top of those sit the **lobby flavours** (§13.1) and the **code-lobby plumbing** (§13.4–13.6): an HTTP API plus an in-memory registry that lets a second browser resolve a 6-character code to a room id.
+
+> Appendix A keeps the historical "lobby-era" design notes and the ghost-player bug write-up. This section documents the **current** implementation, which differs in one important way: lobbies are created over **HTTP** (`/api/lobby/*`) and indexed by `server/src/lobbyRegistry.ts` — not via `joinOrCreate` room options.
+
+### 13.1 The three lobby flavours
+
+| Flavour | Created by | `state.lobbyCode` | In `lobbyRegistry`? | Joinable by code? | Auto-starts a run? |
+|---|---|---|---|---|---|
+| **Code lobby** (shared) | `POST /api/lobby/create` | 6 chars (`0-9A-Z`) | Yes | Yes | No — the leader presses Play |
+| **Private solo room** | `POST /api/lobby/solo`, or `GameRoom.spawnSoloRunFor` | `""` | No | No | Yes — `soloRun: true` → `startRun()` on the first join |
+| **Ghost** (no room yet) | — no room exists at all | n/a | n/a | n/a | n/a — a client-only sprite until the player picks Create / Join / Solo |
+
+A code lobby and a solo room are the **same room class** with different `matchMaker.createRoom` options:
+
+```ts
+matchMaker.createRoom("game_room", { lobbyCode: code });  // code lobby
+matchMaker.createRoom("game_room", { soloRun: true });     // private solo room
+```
+
+There is only one room *type* (`game_room`) in `app.config.ts` — maps rotate **inside** the room (map1 → map2 → map1), see `config/mapRegistry.ts`.
+
+### 13.2 Lobby map data — server & client
+
+The lobby is a real Tiled export, parsed **twice** — once per side — because the client draws the tiles and predicts movement locally while the server needs its own collision grid for authority.
+
+**Server — `server/src/config/lobbyMap.ts`**
+
+| Step | Detail |
+|---|---|
+| Source files | `server/src/config/maps/Lobby map.json` (45 × 33 tiles, 32 px) + `lobby tilesheet.json` |
+| Collision source | the **base** tile layer (`"base"` or `"baselayer"`); a tile blocks iff the tileset marks it `collision: true` |
+| Object layer | `"interactive"` (objectgroup) carries the **Play** and **MULTIPLYER** polygons — it is *ignored* for collision |
+| Spawn point | hard-coded to the map centre (the lobby tileset has no spawn tiles) → `LOBBY_SPAWN_POINT` = (720, 528) |
+| Exit point | `{x:0, y:0, width:0, height:0}` — the lobby never rotates out |
+| Enemy zones | `[]` — safe zone, no spawns, no elite |
+
+**Client — `client/src/maps/lobbyMapData.ts`** parses the same two files and exports:
+
+- `LOBBY_MAP_DATA` — `id: "lobby"`, `tileSize`, `cols`, `rows`, `widthPx`, `baselayer`, `interactiveLayer`, `collisionGrid`, `tilesetKey: "lobby_tiles"`, `spawnPoint`, `interactiveObjects`.
+- `LOBBY_PLAY_POLYGON` — the interactive object whose property list contains `"Play"`.
+- `LOBBY_MULTIPLAYER_POLYGON` — the object whose property list contains `"multiplayer"`.
+
+Each interactive object carries an `bbox` (AABB) computed from the polygon's vertices — Tiled polygon vertices are relative to the object's anchor, so the AABB is `obj.x + minX … maxX`. `LobbyScene` uses that bbox to place an invisible `Phaser.GameObjects.Rectangle` hit area over the art that is already drawn in the tilesheet.
+
+> ⚠️ The server and client lobby collision grids must be identical (`lobbyMap.ts` and `lobbyMapData.ts` build them with the same rule). Nothing enforces this — see §13.11.
+
+**Registry — `server/src/config/mapRegistry.ts`**
+
+```ts
+export type MapId = "lobby" | "map1" | "map2";
+export type GameMapId = Exclude<MapId, "lobby">;   // the rotating gameplay map
+
+MAPS.lobby = { data: LOBBY_MAP, modifiers: [], info: {...}, next: "map1" };
+export const DEFAULT_MAP: GameMapId = "map1";        // where every run starts
+```
+
+### 13.3 Server: the lobby room (GameRoom)
+
+`GameRoom` hosts the lobby map **and** the rotating gameplay map at the same time, so it runs **two parallel system sets**:
+
+| System set | Created | Bound to | Serves |
+|---|---|---|---|
+| `lobbyMapSystem` + `lobbyPlayerSystem` | `onCreate` (never rebuilt) | `targetMapId = "lobby"` | movement + collision for players standing in the lobby |
+| `mapSystem` + `playerSystem` + every combat system | `onCreate` + each `initMap()` | `state.mapId` (`"map1"` / `"map2"`) | the actual run |
+
+`PlayerSystem` filters by map id internally, which is what makes the two sets coexist:
+
+```ts
+// server/src/systems/PlayerSystem.ts
+constructor(state, mapSystem, private targetMapId: MapId) {}
+
+update(dt) {
+  for (const player of state.players) {
+    if (player.currentMapId !== this.targetMapId) continue;  // not on this map
+    ...move + resolveRectTileCollision...
+  }
+}
+```
+
+Per tick (`fixedTick`):
+
+```
+lobbyPlayerSystem.update(dt)   ← lobby players move + collide with the lobby grid
+playerSystem.update(dt)        ← gameplay players move + collide with the map grid
+enemySystem / projectile / ... ← gameplay only
+for each player:
+  if (p.currentMapId !== this.mapId) continue   ← lobby players skip shield/cooldowns/bleed
+  p.tickShield(dt); p.tickSlotCooldowns(dt); ...
+  if (p.isDead) { sendPlayerToLobby(p); endRunIfNeeded(); }
+```
+
+So the lobby is genuinely inert: no enemies, no damage, no skill cooldowns — only movement and the two clickable polygons.
+
+**Lifecycle hooks**
+
+| Hook | Lobby-relevant work |
+|---|---|
+| `onCreate(options)` | Builds `lobbyMapSystem` + `lobbyPlayerSystem`; reads `options.soloRun` → `isSoloRun`; reads `options.lobbyCode` → `this.lobbyCode` **and** `state.lobbyCode` (synced, so every client in the room can display the code) |
+| `onJoin(client)` | `player.currentMapId = "lobby"`, position = `LOBBY_SPAWN_POINT`; stamps the **leader** (first player of a code lobby) via `setLobbyLeader`; for `soloRun` rooms schedules `setTimeout(100 ms)` → `startRun()` so the player never has to press Play twice |
+| `onLeave(client)` | If the leaver is the **leader** of a code lobby → `unregisterLobby(roomId)` + `this.disconnect()` → the whole room dies (the lobby loses its identity); otherwise remove the player, free the display name, call `endRunIfNeeded()` |
+| `onDispose()` | `unregisterLobby(this.roomId)` — idempotent catch-all for every other dispose route |
+
+**Run control — the five methods that matter**
+
+| Method | Trigger | What it does |
+|---|---|---|
+| `startRun()` | handler 22 with `runInProgress === false` | Collects every player whose `currentMapId === "lobby"` (the fixed roster), flips the leader out of the lobby (`setLeaderInLobby(roomId, false)`), calls `initMap(DEFAULT_MAP)` for a fresh map1, sets `state.runInProgress = true`, `runPartySize = roster.length`, resets each player's stats/cards and teleports them to the map spawn |
+| `joinExistingRun(player)` | handler 22, 1 lobby player + people already on the map | Drops the late joiner onto the **running** map (no `initMap`), re-applies room/map-stat bonuses, `runPartySize++` so their exit-offer count matches the party |
+| `endRunIfNeeded()` | after every death / disconnect | If nobody is on a gameplay map any more → `state.runInProgress = false`, `runPartySize = 0` |
+| `sendPlayerToLobby(player)` | player death (server-authoritative) or message 4 | `die()` + `freshLoadout()` + re-apply room/map-stat bonuses, clears pending map-stat offers, `currentMapId = "lobby"`, position = `LOBBY_SPAWN_POINT`; if it is the leader, flips `setLeaderInLobby(roomId, true)` so new joiners are accepted again |
+| `spawnSoloRunFor(client)` | handler 22, dead-loner case | `matchMaker.createRoom("game_room", {soloRun:true})` → `client.send("playRedirected", {reason:"solo_run", roomId})` |
+
+### 13.4 HTTP lobby API
+
+Defined in `server/src/app.config.ts` (express routes on the same server/port as the WebSocket). The client derives the HTTP base URL from the WS URL in `client/src/backend.ts` (`BACKEND_HTTP_URL`: `ws://` → `http://`, `wss://` → `https://`).
+
+| Route | Method | Body / Query | Success | Errors |
+|---|---|---|---|---|
+| `/api/lobby/create` | POST | — | `200 {code, roomId}` | `500 {error:"lobby_create_failed"}` (8 attempts exhausted) |
+| `/api/lobby/solo` | POST | — | `200 {roomId}` | `500 {error:"lobby_solo_failed"}` |
+| `/api/lobby/join` | GET | `?code=ABC123` | `200 {roomId, code}` | `404 {error:"lobby_not_found"}`, `409 {error:"lobby_in_run"}` |
+
+**`POST /api/lobby/create`** — the ordering is the whole point:
+
+```ts
+const code = generateLobbyCode();                       // 6 chars, 0-9A-Z
+const cache = await matchMaker.createRoom("game_room", { lobbyCode: code });
+const registered = registerLobby(code, cache.roomId, "");   // ← BEFORE the response
+if (!registered) continue;                              // collision → retry with a new code
+res.json({ code, roomId: cache.roomId });
+```
+
+The code is registered **before** the HTTP response is sent, because the client auto-copies the code the instant it arrives — a second player could otherwise paste it and hit JOIN before the creator's own `joinById` handshake had even reached the server. `leaderId` is empty at this point; `GameRoom.onJoin` stamps it via `setLobbyLeader`.
+
+**`GET /api/lobby/join`** — normalises the pasted code to uppercase and applies two gates:
+
+```ts
+const entry = lookupLobby(code.toUpperCase());
+if (!entry)               → 404 lobby_not_found
+if (!entry.leaderInLobby) → 409 lobby_in_run      // leader is mid-run
+res.json({ roomId: entry.roomId, code: entry.code });
+```
+
+The `409` is the "no drop-ins mid-run" rule: the code resolves to a room, but the leader has left the lobby for the map, so the group is mid-run and nobody else may come in.
+
+### 13.5 lobbyRegistry.ts — the code index
+
+`server/src/lobbyRegistry.ts` is an in-memory `Map` from lobby code → room metadata. It exists because `matchMaker.query()` can only filter by room name / room id — it cannot filter by custom metadata, and stuffing the code into the room name would leak it into matchMaker URLs and make the "private vs code" branch ugly.
+
+```ts
+export interface LobbyRegistryEntry {
+  code: string;            // 6-char user-facing key
+  roomId: string;          // Colyseus roomId
+  leaderId: string;        // sessionId of the first player to join
+  leaderInLobby: boolean;  // true while leader.currentMapId === "lobby"
+  createdAt: number;       // debug timestamp
+}
+
+const entries = new Map<string, LobbyRegistryEntry>();  // code  → entry
+const byRoom  = new Map<string, string>();               // roomId → code (inverse index)
+```
+
+| Export | Contract |
+|---|---|
+| `generateLobbyCode()` | 6 chars from `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ` via `crypto.getRandomValues` (falls back to `Math.random`). Lowercase is excluded so codes are easy to read aloud. 36⁶ ≈ 2.2 B combinations → collision probability for 1 000 concurrent lobbies ≈ 5e-7 |
+| `registerLobby(code, roomId, leaderId)` | O(1) insert; returns `false` if the code is taken (the caller retries) |
+| `setLobbyLeader(roomId, leaderId)` | Stamps the leader once; idempotent (a reconnecting leader does not reset their own id) |
+| `setLeaderInLobby(roomId, inLobby)` | Mirror of the leader's `currentMapId`; drives the join gate |
+| `lookupLobby(code)` | `entry | null` — used by the HTTP join route |
+| `unregisterLobby(roomId)` | Removes both map entries; idempotent; called from `onLeave` (leader) and `onDispose` |
+| `debugDump()` | Snapshot of all lobbies (debugging aid) |
+
+The inverse `byRoom` map exists so `onDispose` can unregister by room id without scanning every code. Because Colyseus runs on a single Node event loop, a plain `Map` is safe — no locking needed.
+
+### 13.6 The leader model
+
+The **leader** is simply "the first player to join a code-lobby room". It has three jobs:
+
+1. **Gatekeeper** — the HTTP join route only accepts new joiners while `leaderInLobby === true` (the leader is standing in the lobby, i.e. not mid-run).
+2. **Room identity** — if the leader disconnects, the room is destroyed: `unregisterLobby()` + `disconnect()`. Anyone else still connected is dropped and the code becomes a 404.
+3. **Run authority** — `startRun()` flips `leaderInLobby` to `false`; `sendPlayerToLobby()` flips it back to `true`.
+
+```ts
+// GameRoom.onJoin
+if (this.lobbyCode && this.leaderId === "") {
+  this.leaderId = client.sessionId;
+  this.leaderInLobby = true;
+  setLobbyLeader(this.roomId, this.leaderId);
+}
+
+// GameRoom.onLeave
+if (this.lobbyCode && client.sessionId === this.leaderId) {
+  unregisterLobby(this.roomId);
+  this.disconnect();       // kills the room for everyone
+  return;
+}
+```
+
+### 13.7 Client: LobbyScene
+
+`client/src/scenes/LobbyScene.ts` (~1,330 lines). It is registered first in `client/src/index.ts` (`scene: [LobbyScene, new GameScene({key:"game"})]`), so it is the entry scene — it is both the "main menu lobby" and the in-run safe zone.
+
+**Scene states**
+
+| State | Meaning |
+|---|---|
+| Ghost | `this.room === null` — no server connection yet. A local "ghost" sprite (`spawnGhostPlayer()`) is rendered so the lobby still feels alive; WASD moves it locally with client-side collision. Clicking MULTIPLYER or PLAY creates the real room and disposes the ghost |
+| In-room | `this.room !== null` — real Colyseus connection; local + remote lobby players are rendered from `state.players` |
+
+**Two clickable polygons** (both are invisible `Rectangle` hit areas placed over tilesheet art):
+
+| Polygon | Source | Action |
+|---|---|---|
+| Play | `LOBBY_PLAY_POLYGON` (property `"Play"`) | `requestPlay()` → `room.send(22, {})` — or, in ghost state, `requestSoloPlay()` |
+| MULTIPLYER | `LOBBY_MULTIPLAYER_POLYGON` (property `"multiplayer"`) | `openMultiplayerDialog()` → the lobby-code modal |
+
+`requestPlay()` deliberately does **not** gate on `runInProgress` client-side (an earlier version did, and it swallowed the dead-loner's press). The server is the only authority on what a press means.
+
+**State listeners** (`bindRoomStateListeners`)
+
+| Listener | Purpose |
+|---|---|
+| `cb.listen("runInProgress")` | Mirrors the room flag → drives the status text |
+| `room.onMessage("playRejected")` | The server refused (group press during a run) → status text switches to "wait" |
+| `room.onMessage("playRedirected")` | The server created a solo room for us → `swapToRoom(newRoomId)` |
+| `cb.onAdd("players")` | New lobby player → `createLocalPlayer` / `createRemotePlayer`; also registers `cb.onChange` → `handlePlayerMapChange` |
+| `cb.onRemove("players")` | Remote left → destroy sprite + name HUD |
+
+**Scene handoff** — the lobby is the hub of a two-scene loop:
+
+```
+LobbyScene  ── local player currentMapId → "map1"/"map2" ──▶  scene.start("game", {room, client})
+GameScene   ── local player currentMapId → "lobby" (death) ──▶  scene.start("lobby", {room, client})
+```
+
+`handlePlayerMapChange` is the gate. `lastLocalMapId` is only mutated on the **local** branch — a remote player's map change must never poison the transition.
+
+**`swapToRoom(roomId)` — the 5-step room swap** (used by Create / Join / Solo / solo-redirect):
+
+1. `teardownLobbyState()` — destroy the local sprite, every remote sprite and every name HUD, and clear the bookkeeping maps *before* leaving (so the dying connection's `onRemove` can't touch half-cleared state).
+2. `await oldRoom.leave(true)`.
+3. `this.room = await this.client.joinById(roomId, defaultJoinOptions())` — `defaultJoinOptions()` carries the sticky `clientPlayerId` from `localStorage` so the server re-binds the same display name in the new room.
+4. `bindRoomStateListeners()` on the new room + `partyHud.bindRoom(...)`.
+5. **Race-safe manual sweep** — if `cb.onAdd` fired before the listener was bound, the local player has no sprite and, worse, no `onChange` handler, so the solo room's auto-`startRun()` would never trigger `scene.start("game")`. The sweep calls `createLocalPlayer(localPlayer)` manually if needed.
+
+**Status line contract** (`updateLobbyStatus()`), re-rendered on every lobby-affecting change:
+
+| Condition | Text |
+|---|---|
+| No room / no local player | "In lobby - click MULTIPLYER to create/join a code lobby, or PLAY to go solo" |
+| Run in progress + alone in the lobby | "Press PLAY to start your solo run (`sessionId`)" |
+| Run in progress + others in the lobby | "Run in progress - wait for the group to finish" |
+| No run in progress | "In code lobby `CODE` - click PLAY to start" / "In lobby - click PLAY to begin" |
+
+The lobby code is also surfaced in a top-centre bar (`LOBBY CODE: XXXXXX`) whenever `state.lobbyCode` is non-empty, so anyone in the room can re-share it.
+
+### 13.8 Client: multiplayerDialog.ts
+
+`client/src/ui/multiplayerDialog.ts` (~690 lines) is the modal opened by the MULTIPLYER polygon. It has three views inside one panel:
+
+| View | Contents |
+|---|---|
+| `main` | `[ CREATE LOBBY ]`, `[ JOIN LOBBY ]`, plus `LEAVE LOBBY` and the current code when the caller reports the player is already in a code lobby |
+| `created` | The freshly minted 6-char code in large monospace + `COPY CODE` + `ENTER LOBBY` |
+| `joining` | Single-line input + `JOIN` + an inline error slot + `BACK` |
+
+The callback contract (`MultiplayerDialogCallbacks`):
+
+| Callback | Owner | Contract |
+|---|---|---|
+| `onCreate(showCreated, showError)` | `LobbyScene.requestCreateLobby` | `POST /api/lobby/create` → `showCreated(code, roomId)` or `showError(msg)` |
+| `onCreateConfirmed(code, roomId)` | `LobbyScene.confirmCreateLobbyAndJoin` | The user clicked ENTER LOBBY → `swapToRoom(roomId)` |
+| `onJoin(code, showError)` | `LobbyScene.requestJoinLobby` | `GET /api/lobby/join?code=` → `swapToRoom(roomId)` or `showError(msg)` |
+| `onLeave()` | `LobbyScene.requestLeaveLobby` | Leave the room, tear down, spawn a ghost again |
+| `onSoloPlay()` | `LobbyScene.requestSoloPlay` | `POST /api/lobby/solo` → `swapToRoom(roomId)` |
+
+Two deliberate UX decisions:
+
+- **The create flow is split in two.** The room is created server-side, but the client does *not* join it yet — the dialog stays on the `created` view showing the code (auto-copied to the clipboard) until the user explicitly presses ENTER LOBBY. That way the code is visible and shareable before anyone commits to entering.
+- **Dismissal is only allowed on the main view.** Clicking outside the panel or pressing Escape hides the dialog on `main` only, so the `created` / `joining` views cannot be dismissed by accident.
+
+### 13.9 End-to-end flows
+
+**Flow A — create a code lobby and share it**
+
+```
+Browser A                          Server                              Browser B
+────────────────────────────────────────────────────────────────────────────────────────
+MULTIPLYER → CREATE LOBBY
+  POST /api/lobby/create ────────▶ generateLobbyCode()
+                                   createRoom("game_room",{lobbyCode})
+                                   registerLobby(code, roomId, "")   ← eager
+  ◀── 200 {code, roomId} ────────
+dialog: "created" view, code copied
+ENTER LOBBY
+  swapToRoom(roomId)
+    leave() old (none) ───────────▶
+    joinById(roomId) ─────────────▶ onJoin → leader stamped,
+                                    currentMapId="lobby"
+                                                            GET /api/lobby/join?code=XYZ
+                                                              ◀── 200 {roomId}
+                                                            joinById(roomId) → onJoin
+                                                            (leaderInLobby true → allowed)
+both press PLAY → room.send(22) ──▶ runInProgress=false → startRun()
+                                    → both teleport to map1
+```
+
+**Flow B — solo play from the menu (ghost → real room)**
+
+```
+MULTIPLYER → PLAY SOLO  (or PLAY while in ghost state)
+  POST /api/lobby/solo ───────────▶ createRoom("game_room",{soloRun:true})
+  ◀── 200 {roomId}
+  swapToRoom(roomId) → joinById
+                                     onJoin → soloRun → setTimeout(100ms)
+                                                → startRun() → currentMapId="map1"
+  onChange(currentMapId) ──────────▶ scene.start("game")
+```
+
+**Flow C — death → lobby → dead-loner solo redirect**
+
+```
+Player dies on map1
+  server fixedTick → sendPlayerToLobby(p) → currentMapId="lobby"
+  client onChange ─────────────────▶ scene.start("lobby", {room, client})
+lone player presses PLAY → room.send(22)
+  runInProgress=true, lobbyCount=1, onMapCount=0
+  server → spawnSoloRunFor(client)
+           createRoom("game_room",{soloRun:true})
+           client.send("playRedirected",{reason:"solo_run",roomId})
+  ◀── playRedirected ────────────── swapToRoom(roomId) → joinById
+                                     new room auto-starts the run
+```
+
+**Flow D — trying to join while the group is mid-run**
+
+```
+Browser B: GET /api/lobby/join?code=XYZ
+  server: entry found, but entry.leaderInLobby === false
+  ◀── 409 {error:"lobby_in_run",
+           message:"The lobby leader is mid-run. Wait for them to return to the lobby."}
+  dialog: inline error, player stays in the lobby
+```
+
+**Flow E — late join into a running map (allowed, no new room)**
+
+```
+One player is on map1 (runInProgress = true).
+A second player is alone in the lobby and presses PLAY:
+  lobbyCount = 1, onMapCount = 1  →  joinExistingRun(player)
+  → the player is dropped onto the ACTIVE map, runPartySize++ (their exit
+    picker offers match the party), no solo room is created.
+```
+
+### 13.10 Lobby state & message reference
+
+**Synced state (Colyseus Schema)**
+
+| Field | Type | Where | Meaning |
+|---|---|---|---|
+| `RoomState.runInProgress` | `@type("boolean")` | `server/src/schema/RoomState.ts` | true while anybody is on a gameplay map |
+| `RoomState.lobbyCode` | `@type("string")` | `server/src/schema/RoomState.ts` | the room's join code, `""` for private rooms — clients display it in the top bar |
+| `Player.currentMapId` | `@type("string")` | `server/src/schema/Player.ts` | `"lobby"` / `"map1"` / `"map2"` — decides which scene renders the player and which `PlayerSystem` moves them |
+
+**Messages**
+
+| Direction | Type / name | Payload | Effect |
+|---|---|---|---|
+| client → server | `22` | `{}` | "Play" — start / join / redirect |
+| server → client | `playRedirected` | `{reason:"solo_run", roomId}` | leave this room, join `roomId` |
+| server → client | `playRejected` | `{reason:"run_in_progress" \| "spawn_failed"}` | the press was refused; show the status text |
+
+### 13.11 Lobby gaps & smells
+
+| # | Issue | Where | Why it matters |
+|---|---|---|---|
+| 1 | **Cross-origin HTTP is not enabled.** `cors` is in `server/package.json` but never applied in `app.config.ts`, and `client/vite.config.ts` has no `/api` proxy — the dev client runs on `:1234` while the server runs on `:2567`. | `app.config.ts`, `vite.config.ts` | The browser blocks the lobby HTTP calls unless CORS is enabled or a proxy is added. The fix is one line (`app.use(cors())`) or a Vite `server.proxy` entry |
+| 2 | **The registry is process-local and in-memory.** | `lobbyRegistry.ts` | A server restart drops every code (players already in a room keep playing, but nobody can join them). It also prevents running more than one Colyseus process behind a load balancer |
+| 3 | **No brute-force protection on `/api/lobby/join`.** | `app.config.ts` | 36⁶ is large, but the endpoint has no attempt limiting or per-IP throttle — codes can be sprayed at will. A small in-memory attempt counter would close it |
+| 4 | **Leader disconnect destroys the room**, even mid-run. | `GameRoom.onLeave` | One player closing their tab kills the run for everyone. Transferring leadership (or only destroying when the leader is still in the lobby) would be kinder |
+| 5 | **Two sources of truth for "is the leader in the lobby"**: `Player.currentMapId` and `registry.leaderInLobby`. | `GameRoom` + `lobbyRegistry.ts` | They are updated together by hand (`setLeaderInLobby`). A missed call (e.g. a new code path that moves the leader) silently breaks the join gate. Deriving the flag on read would remove the mirror |
+| 6 | **The lobby collision grid is duplicated** between `lobbyMap.ts` and `lobbyMapData.ts`. | server + client | Client prediction and server authority drift if one file is updated without the other. A shared generator (or a test comparing the two grids) would prevent it |
+| 7 | **`runPartySize` grows with late joiners** and is only reset in `endRunIfNeeded()`. | `GameRoom` | Party size scales the enemy count (`getTargetEnemyCount`) and the exit-offer count. A joiner that leaves mid-run inflates the scaling for everyone else |
+| 8 | **The lobby is a full map load for a menu.** | client | The lobby tilesheet + all shared sprite sheets are downloaded before the player has even decided to play. A menu-only preloader would cut first paint noticeably |
+
+---
+
 ## Appendix A: Lobby-Era Architecture (Added 2026)
+
+> **Current implementation (2026-10).** The lobby-map / scene / state-machine design described below still holds, but the **room-creation plumbing has since changed**: lobbies are now created over HTTP (`POST /api/lobby/create`, `POST /api/lobby/solo`) and indexed in `server/src/lobbyRegistry.ts`, instead of `joinOrCreate` with room options. See [§13 — Lobby System](#13-lobby-system-end-to-end-breakdown) for the current breakdown.
 
 This appendix documents the lobby-era architecture added after the original architecture pass. It describes the new LobbyScene, the `currentMapId` state field, the solo-run redirect, and the ghost-player bug fix.
 
@@ -1504,7 +1915,7 @@ After the fix, only one sprite per `(sessionId, local/remote)` slot is ever crea
 
 ```
                                     room.send(22)
-   joinOrCreate                       (click Play)
+   create/join room                    (click Play)
        |                                  |
        v                                  v
 [ LOBBY scene ]  death     [   GAME scene          ]
