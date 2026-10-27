@@ -54,7 +54,7 @@ import { MapSystem } from "../systems/MapSystem";
 import { PlayerSystem } from "../systems/PlayerSystem";
 import { EnemySystem } from "../systems/EnemySystem";
 import type { Enemy } from "../schema/Enemy";
-import { ProjectileSystem } from "../systems/ProjectileSystem";
+import { ProjectileSystem } from "../systems/ProjectileSystem" // basically bolter system 
 import { ClawSystem } from "../systems/ClawSystem";
 import { SlamSystem } from "../systems/SlamSystem";
 import { HealSystem } from "../systems/HealSystem";
