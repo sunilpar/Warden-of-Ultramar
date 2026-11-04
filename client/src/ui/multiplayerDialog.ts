@@ -11,13 +11,13 @@
  *   2. CREATED   - The freshly minted 6-char code in giant monospace,
  *                  with explicit COPY CODE + ENTER LOBBY buttons.
  *                  The code stays visible until the user clicks
- *                  ENTER LOBBY (overlay-click is disabled here so
- *                  they cant accidentally dismiss it).
+ *                  ENTER LOBBY (or dismisses the panel with ESC /
+ *                  a click outside of it).
  *   3. JOINING   - Single-line input + JOIN + error slot + BACK.
  *
  * Out-of-band dismissal:
- *   - Click anywhere outside the panel -> hide() (main view only).
- *   - Press Escape -> hide() (main view only).
+ *   - Click anywhere outside the panel -> hide().
+ *   - Press Escape -> hide().
  */
 import Phaser from "phaser";
 import { BACKEND_HTTP_URL } from "../backend";
@@ -90,6 +90,28 @@ export function createMultiplayerDialog(
   panelBg.fillRoundedRect(panelX, panelY, PANEL_W, PANEL_H, 12);
   panelBg.lineStyle(2, 0x4a6a8a, 0.9);
   panelBg.strokeRoundedRect(panelX, panelY, PANEL_W, PANEL_H, 12);
+
+  // CLICK BLOCKER - absorbs clicks INSIDE the panel so they never reach
+  // the overlay. The overlay covers the whole screen, so without this
+  // blocker a click on the panel background (the lobby code text, a
+  // label, the empty space) would be treated as an "outside click" and
+  // dismiss the dialog - losing the lobby code or the code the user
+  // just typed. Same pattern as the character / inventory screens.
+  // It is added to the container right after the overlay, so it sits
+  // ABOVE the overlay but BELOW every button (buttons therefore still
+  // receive their own clicks).
+  const panelBlocker = scene.add
+    .rectangle(
+      panelX + PANEL_W / 2,
+      panelY + PANEL_H / 2,
+      PANEL_W,
+      PANEL_H,
+      0x000000,
+      0,
+    )
+    .setOrigin(0.5, 0.5)
+    .setScrollFactor(0)
+    .setInteractive({ useHandCursor: false });
 
   const titleText = scene.add
     .text(W / 2, panelY + 22, "MULTIPLYER", {
@@ -361,6 +383,7 @@ export function createMultiplayerDialog(
 
   root.add([
     overlay,
+    panelBlocker,
     panelBg,
     titleText,
     createBtn,
@@ -509,12 +532,11 @@ export function createMultiplayerDialog(
       /* ignore */
     }
   }
-  // Overlay click closes the dialog ONLY in the "main" view. In
-  // "created" we disable overlay-click so the code stays visible
-  // until the user explicitly clicks ENTER LOBBY (no accidental
-  // dismissals that lose the code).
+  // Clicking outside the panel dismisses the dialog in EVERY view,
+  // exactly like ESC does. The rule is "outside click == ESC", so the
+  // created/joining views must not behave differently from the main view.
   overlay.on("pointerdown", () => {
-    if (activeView === "main") hide();
+    hide();
   });
 
   copyCodeBtn.on("pointerdown", () => {

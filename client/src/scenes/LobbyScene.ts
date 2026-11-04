@@ -63,6 +63,9 @@ const MSG_PLAY = 22;
  *  on the server so client prediction matches server authority). */
 const PLAYER_COLLISION_RADIUS = 10;
 
+/** Key of the local player's HUD entry while no room is joined yet. */
+const GHOST_HUD_KEY = "__ghost__";
+
 export class LobbyScene extends Phaser.Scene {
   client!: Client;
   /** May be null on first create (SceneSelector-style flow). When
@@ -351,26 +354,23 @@ export class LobbyScene extends Phaser.Scene {
       if (!this.scale.isFullscreen) this.scale.startFullscreen();
     }
 
+    // The party HUD is created in every case: a player who joins a
+    // lobby later (from the "ghost" state) needs it bound to that room,
+    // and setForceShow() needs it to exist.
+    this.partyHud = createPartyHud(this);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.partyHud?.destroy();
+    });
+
     if (this.room) {
       this.bindRoomStateListeners();
-      // Create + bind the party HUD once the room is ready. The HUD
-      // only renders players currently in the lobby (GameScene owns
-      // gameplay-map players). `setForceShow(true)` is applied later
-      // in the create-room success path for code lobbies; for the
-      // default init-data case (GameScene handoff) the threshold
-      // remains the standard 2+.
-      this.partyHud = createPartyHud(this);
+      // The HUD only renders players currently in the lobby (GameScene
+      // owns gameplay-map players).
       this.partyHud.bindRoom(this.room, {
         includePlayer: (p: any) => p.currentMapId === "lobby",
       });
-      this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-        this.partyHud?.destroy();
-      });
-      this.bindCameraToLocalPlayer();
-    } else {
-      // No room: ghost sprite was spawned. Camera follows it.
-      this.bindCameraToLocalPlayer();
     }
+    this.bindCameraToLocalPlayer();
   }
 
   // ============================================================
@@ -646,7 +646,9 @@ export class LobbyScene extends Phaser.Scene {
       );
       if (!res.ok) {
         const text = await safeReadText(res);
-        showError((text || "Server returned " + res.status).slice(0, 200));
+        showError(
+          extractApiErrorMessage(text, "Server returned " + res.status),
+        );
         return;
       }
       const data = (await res.json()) as { roomId?: string; code?: string };
@@ -655,6 +657,9 @@ export class LobbyScene extends Phaser.Scene {
         return;
       }
       await this.swapToRoom(data.roomId);
+      // The join worked - dismiss the dialog. Its overlay covers the
+      // whole screen and would otherwise swallow every click.
+      this.multiplayerDialog.hide();
       this.partyHud?.setForceShow?.(true);
       this.updateLobbyStatus();
     } catch (e: any) {
@@ -749,7 +754,7 @@ export class LobbyScene extends Phaser.Scene {
     );
     // Floating name + "[GHOST]" suffix so the player understands the
     // sprite isn't yet connected to a real session.
-    this.playerHuds["__ghost__"] = attachPlayerHud(
+    this.playerHuds[GHOST_HUD_KEY] = attachPlayerHud(
       this,
       sprite,
       "GHOST (no lobby yet)",
@@ -871,13 +876,9 @@ export class LobbyScene extends Phaser.Scene {
 
     // 2) Leave the old room. wrap:true means if the connection is
     // already dead we don't throw a confusing error.
-    if (oldRoom) {
-      try {
-        await oldRoom.leave(true);
-      } catch (e) {
-        console.warn("[LOBBY] Old room leave failed (likely already closed):", e);
-      }
-    }
+    // The SDK only resolves leave() once the socket actually closes, so
+    // an already-dead connection would hang the join forever.
+    await leaveRoomSafely(oldRoom);
 
     // 3) Join the new room with our sticky clientPlayerId so the
     // server re-binds us to our existing display name in the new
@@ -891,7 +892,7 @@ export class LobbyScene extends Phaser.Scene {
     }
 
     this.statusText.setText(
-      `In solo run — entering map1... (${this.room.sessionId.slice(0, 6)})`,
+      `Connected to room (${this.room.sessionId.slice(0, 6)})`,
     );
 
     // 4) Re-bind state on the NEW room. Its onAdd("players") will fire
@@ -1239,13 +1240,18 @@ export class LobbyScene extends Phaser.Scene {
   private fixedTick(): void {
     this.currentTick++;
     this.debugFPS.setText("FPS: " + Math.round(this.game.loop.actualFps));
-    if (!this.currentPlayer || !this.room) return;
+    if (!this.currentPlayer) return;
     this.inputPayload.left = this.wasdKeys.left.isDown;
     this.inputPayload.right = this.wasdKeys.right.isDown;
     this.inputPayload.up = this.wasdKeys.up.isDown;
     this.inputPayload.down = this.wasdKeys.down.isDown;
     this.inputPayload.tick = this.currentTick;
-    this.room.send(0, this.inputPayload);
+    // Only stream the input to a server once a room is connected. In the
+    // "ghost" state (no lobby joined yet) the sprite still walks around
+    // the lobby, just locally.
+    if (this.room) {
+      this.room.send(0, this.inputPayload);
+    }
     this.updatePlayerAnimation(this.currentPlayer);
 
     // ---- Local prediction (mirrors server's PlayerSystem.update) ----
@@ -1299,8 +1305,11 @@ export class LobbyScene extends Phaser.Scene {
         updatePlayerHud(hud, sprite, hud.lastName, 0, 1, 0, 0, false);
     }
     // Local HUD tracks the local sprite (we move it directly above).
-    if (this.currentPlayer && this.playerHuds[this.room.sessionId]) {
-      const localHud = this.playerHuds[this.room.sessionId];
+    // Before joining a room the local sprite has no session id, so its
+    // HUD lives under the "__ghost__" key instead.
+    const localHudKey = this.room ? this.room.sessionId : GHOST_HUD_KEY;
+    if (this.currentPlayer && this.playerHuds[localHudKey]) {
+      const localHud = this.playerHuds[localHudKey];
       updatePlayerHud(localHud, this.currentPlayer, localHud.lastName, 0, 1, 0, 0, false);
     }
   }
@@ -1331,4 +1340,49 @@ async function safeReadText(res: Response): Promise<string> {
   } catch {
     return "";
   }
+}
+
+/**
+ * Leave a room without hanging the caller.
+ *
+ * The SDK resolves room.leave() only once the websocket actually
+ * closes. If the socket is already dead (server dropped us, network
+ * blip) that promise never settles and the caller freezes forever -
+ * which is what used to hang the "join lobby" flow. We cap the wait
+ * and then force the connection closed so the flow can continue.
+ */
+async function leaveRoomSafely(room: any): Promise<void> {
+  if (!room) return;
+  try {
+    await Promise.race([
+      room.leave(true),
+      new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+    ]);
+  } catch (e) {
+    console.warn("[LOBBY] Old room leave failed (likely already closed):", e);
+  }
+  try {
+    room.connection?.close();
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Turn an API error body into a short human-readable message.
+ * The lobby endpoints answer with { error, message } JSON; showing the
+ * raw JSON (or an HTML error page) in the dialog is unreadable.
+ */
+function extractApiErrorMessage(body: string, fallback: string): string {
+  const raw = (body || "").trim();
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.message === "string" && parsed.message) {
+      return parsed.message.slice(0, 200);
+    }
+  } catch {
+    /* not JSON - fall back to the raw text below */
+  }
+  return raw.slice(0, 200);
 }
