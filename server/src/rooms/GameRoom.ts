@@ -68,7 +68,7 @@ import {
   type MapId,
   type GameMapId,
 } from "../config/mapRegistry";
-import { LOBBY_SPAWN_POINT } from "../config/lobbyMap";
+import { LOBBY_SPAWN_POINT, LOBBY_SPAWN_SLOTS } from "../config/lobbyMap";
 import {
   SKILL_DEFS,
   MAX_SKILL_LEVEL,
@@ -123,6 +123,13 @@ export interface SerializedMapStatOffer {
  * player the same display name across rooms (within one process).
  */
 const CLIENT_PLAYER_ID_KEY = "clientPlayerId";
+
+/**
+ * Minimum distance (in pixels) between two lobby players standing on
+ * their own spawn slot. One tile is 32px, so this keeps two players
+ * from sharing a tile.
+ */
+const LOBBY_SPAWN_MIN_GAP = 32;
 
 /** Starter cards handed to FRESH players (all 5 slots filled). */
 const STARTER_CARDS: { skill: SkillId; level: number }[] = [
@@ -1665,8 +1672,7 @@ export class GameRoom extends Room {
     // Every player joins in the lobby (safe zone). They have to click
     // the "Play" polygon to join the room's main gameplay map.
     player.currentMapId = "lobby";
-    player.x = LOBBY_SPAWN_POINT.x;
-    player.y = LOBBY_SPAWN_POINT.y;
+    this.assignLobbySpawn(player);
 
     this.state.players.set(client.sessionId, player);
 
@@ -1715,6 +1721,42 @@ export class GameRoom extends Room {
   }
 
   /**
+   * Place a player on their OWN walkable lobby tile.
+   *
+   * Everybody used to land on the single spawn pixel, which made a
+   * late joiner render exactly underneath the host - present in the
+   * room but impossible to see or move independently. We now walk the
+   * pre-computed list of walkable slots (nearest the centre first)
+   * and take the first one that no other lobby player occupies.
+   */
+  private assignLobbySpawn(player: Player): void {
+    let fallback: { x: number; y: number } | null = null;
+    for (const slot of LOBBY_SPAWN_SLOTS) {
+      if (!fallback) fallback = slot;
+      let free = true;
+      this.state.players.forEach((other) => {
+        if (other === player) return;
+        if (other.currentMapId !== "lobby") return;
+        if (
+          Math.abs(other.x - slot.x) < LOBBY_SPAWN_MIN_GAP &&
+          Math.abs(other.y - slot.y) < LOBBY_SPAWN_MIN_GAP
+        ) {
+          free = false;
+        }
+      });
+      if (free) {
+        player.x = slot.x;
+        player.y = slot.y;
+        return;
+      }
+    }
+    // Every slot taken (very crowded lobby) - fall back to the
+    // original spawn point so the player is still placed legally.
+    player.x = fallback ? fallback.x : LOBBY_SPAWN_POINT.x;
+    player.y = fallback ? fallback.y : LOBBY_SPAWN_POINT.y;
+  }
+
+  /**
    * TELEPORT a player to the lobby with a fresh loadout.
    * Used by both the auto-death flow (server-authoritative) and the
    * "respawn" handler (message 4, defensive). Player must currently
@@ -1741,8 +1783,7 @@ export class GameRoom extends Room {
       this.mapStatPickersOpen = Math.max(0, this.mapStatPickersOpen - 1);
     }
     player.currentMapId = "lobby";
-    player.x = LOBBY_SPAWN_POINT.x;
-    player.y = LOBBY_SPAWN_POINT.y;
+    this.assignLobbySpawn(player);
     // Leader just returned to lobby -> flip registry flag so new
     // joiners can be accepted again.
     if (player.sessionId === this.leaderId && this.lobbyCode) {

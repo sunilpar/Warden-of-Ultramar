@@ -86,6 +86,8 @@ function buildLobbyMap(): LayeredMapData {
   // ---- No spawn/exit tiles in the lobby tileset - hard-code to the
   //      center of the map so arriving players spawn mid-lobby. ----
   const spawnPoint = { x: (cols * tileSize) / 2, y: (rows * tileSize) / 2 };
+
+
   const exitPoint = { x: 0, y: 0, width: 0, height: 0 };
 
   return {
@@ -114,3 +116,44 @@ export const LOBBY_MAP: LayeredMapData = buildLobbyMap();
  * without instantiating a MapSystem just to read the spawn.
  */
 export const LOBBY_SPAWN_POINT = LOBBY_MAP.spawnPoint;
+
+/**
+ * Walkable lobby tiles ordered by distance from the map centre.
+ *
+ * Every player used to spawn on the EXACT same pixel (the map
+ * centre), so a player joining an existing lobby was rendered
+ * perfectly on top of the host - present in the room but completely
+ * invisible. We now hand out distinct walkable tiles so players
+ * spread out and each one can be seen and moved independently.
+ */
+const lobbySpawnSlots: ReadonlyArray<{ x: number; y: number }> = (() => {
+  const { cols, rows, tileSize, collisionGrid } = LOBBY_MAP;
+  const slots: Array<{ x: number; y: number }> = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (collisionGrid[r * cols + c]) continue; // solid tile
+      slots.push({
+        x: c * tileSize + tileSize / 2,
+        y: r * tileSize + tileSize / 2,
+      });
+    }
+  }
+  // Nearest to the map centre first, so the first players still
+  // spawn right next to the Play polygon.
+  const centreX = LOBBY_MAP.spawnPoint.x;
+  const centreY = LOBBY_MAP.spawnPoint.y;
+  slots.sort((a, b) => {
+    const da = (a.x - centreX) ** 2 + (a.y - centreY) ** 2;
+    const db = (b.x - centreX) ** 2 + (b.y - centreY) ** 2;
+    return da - db;
+  });
+  return slots;
+})();
+
+/**
+ * Walkable lobby tiles ordered by distance from the map centre.
+ * Used to give each joining player their own spot instead of
+ * stacking everybody on the single spawn pixel.
+ */
+export const LOBBY_SPAWN_SLOTS: ReadonlyArray<{ x: number; y: number }> =
+  lobbySpawnSlots;
