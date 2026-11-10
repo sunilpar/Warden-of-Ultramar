@@ -216,10 +216,15 @@ export function showExitLockedToast(
   return null;
 }
 
-export function announce(scene: Phaser.Scene, msg: string, color: string): void {
+export function announce(
+  scene: Phaser.Scene,
+  msg: string,
+  color: string,
+  y: number = 60,
+): void {
   const x = scene.cameras.main.width / 2;
   const txt = scene.add
-    .text(x, 60, msg, {
+    .text(x, y, msg, {
       color,
       fontSize: "18px",
       fontFamily: "monospace",

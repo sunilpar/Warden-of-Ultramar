@@ -51,10 +51,8 @@ import {
   destroyPlayerHud,
   type PlayerHud,
 } from "../systems/nameLabel";
-import {
-  createPartyHud,
-  type PartyHudRefs,
-} from "../ui/hud/partyHud";
+import { createPartyHud, type PartyHudRefs } from "../ui/hud/partyHud";
+import { announce } from "../ui/toasts";
 
 /** Message type that matches server/src/rooms/GameRoom.ts (lobby -> play). */
 const MSG_PLAY = 22;
@@ -522,7 +520,9 @@ export class LobbyScene extends Phaser.Scene {
       .setStrokeStyle(0)
       .setDepth(5)
       .setInteractive({ useHandCursor: true });
-    this.multiplayerButton.on("pointerdown", () => this.openMultiplayerDialog());
+    this.multiplayerButton.on("pointerdown", () =>
+      this.openMultiplayerDialog(),
+    );
   }
 
   /**
@@ -538,11 +538,13 @@ export class LobbyScene extends Phaser.Scene {
     this.multiplayerDialog.show({
       inCodeLobby,
       currentCode,
-      // Create: caller fetches the room, dialog shows the code. The
-      // dialog stays open with the code visible until the user clicks
-      // ENTER LOBBY, which fires onCreateConfirmed below.
-      onCreate: (showCreated, showError) =>
-        this.requestCreateLobby(showCreated, showError),
+      // Create: the caller fetches the lobby, then hands the code +
+      // roomId back to the dialog, which closes itself and fires
+      // onCreateConfirmed -> us -> `confirmCreateLobbyAndJoin`. The
+      // creator ends up INSIDE the lobby they just made - there is no
+      // separate "ENTER LOBBY" step.
+      onCreate: (onCreated, showError) =>
+        this.requestCreateLobby(onCreated, showError),
       onCreateConfirmed: (code, roomId) =>
         this.confirmCreateLobbyAndJoin(code, roomId),
       onJoin: (code, showError) => this.requestJoinLobby(code, showError),
@@ -564,21 +566,21 @@ export class LobbyScene extends Phaser.Scene {
 
   /**
    * POST /api/lobby/create -> { code, roomId } -> joinById(roomId).
-   * On success flips the dialog into the "created" view with the
-   * freshly-minted code (which the dialog auto-copies to clipboard).
+   * On success the dialog copies the code, closes itself and fires
+   * onCreateConfirmed -> us -> `confirmCreateLobbyAndJoin`, which puts
+   * the creator straight into the new lobby.
    * On failure flips back to main + surfaces the error in the hint.
    */
   /**
-   * Create a fresh code-lobby GameRoom on the server. We DO NOT join
-   * it yet - the dialog stays open in the "created" view showing the
-   * code + COPY CODE + ENTER LOBBY buttons. When the user clicks
-   * ENTER LOBBY the dialog calls onCreateConfirmed -> us ->
-   * `confirmCreateLobbyAndJoin`, which is what actually performs the
-   * `swapToRoom` (and re-binds state). This split keeps the code
-   * visible until the user explicitly commits.
+   * Create a fresh code-lobby GameRoom on the server. The lobby now
+   * exists, so the creator goes straight in: the dialog copies the
+   * 6-char code to the clipboard, closes itself and calls
+   * onCreateConfirmed -> us -> `confirmCreateLobbyAndJoin`, which does
+   * the `swapToRoom` (and re-binds state). No "ENTER LOBBY" click is
+   * involved - creating a lobby IS joining it.
    */
   private async requestCreateLobby(
-    showCreated: (code: string, roomId: string) => void,
+    onCreated: (code: string, roomId: string) => void,
     showError: (msg: string) => void,
   ): Promise<void> {
     try {
@@ -598,9 +600,9 @@ export class LobbyScene extends Phaser.Scene {
         showError("Server response missing code/roomId");
         return;
       }
-      // Hand the code + roomId to the dialog. It will display the
-      // code, auto-copy, and stay open until the user clicks ENTER.
-      showCreated(data.code, data.roomId);
+      // Hand the code + roomId to the dialog: it copies the code,
+      // closes and asks us to join the room.
+      onCreated(data.code, data.roomId);
     } catch (e: any) {
       console.error("[LOBBY] requestCreateLobby failed:", e);
       showError("Network error: " + (e?.message || String(e)));
@@ -608,12 +610,9 @@ export class LobbyScene extends Phaser.Scene {
   }
 
   /**
-   * Second half of the create-lobby flow. Fired by the dialog's
-   * ENTER LOBBY button - by this point the dialog is hidden and we
-   * are committed to joining the code-lobby room. Mirrors the
-   * join-lobby path (HTTP lookup already happened, we have the
-   * roomId) so the user can re-create a lobby, walk away to share
-   * the code, then come back and ENTER without re-fetching.
+   * Join the lobby that was just created. The dialog has already
+   * closed itself and copied the code, so we go straight in: the
+   * creator lands in the lobby with the code shown in the top bar.
    */
   private async confirmCreateLobbyAndJoin(
     code: string,
@@ -624,6 +623,12 @@ export class LobbyScene extends Phaser.Scene {
       await this.swapToRoom(roomId);
       this.partyHud?.setForceShow?.(true);
       this.updateLobbyStatus();
+      announce(
+        this,
+        "LOBBY " + code + " CREATED - CODE COPIED TO CLIPBOARD",
+        "#66bb6a",
+        100,
+      );
     } catch (e: any) {
       console.error("[LOBBY] confirmCreateLobbyAndJoin failed:", e);
       this.statusText.setText(
@@ -662,6 +667,7 @@ export class LobbyScene extends Phaser.Scene {
       this.multiplayerDialog.hide();
       this.partyHud?.setForceShow?.(true);
       this.updateLobbyStatus();
+      announce(this, "JOINED LOBBY " + code, "#4fc3f7", 100);
     } catch (e: any) {
       console.error("[LOBBY] requestJoinLobby failed:", e);
       showError("Network error: " + (e?.message || String(e)));
@@ -744,6 +750,14 @@ export class LobbyScene extends Phaser.Scene {
         0,
       )
       .setDepth(4);
+    // A Phaser GameObject's DataManager is null until the first
+    // setData/getData call. The ghost sprite is created WITHOUT one, so
+    // any `sprite.data.get(...)` on it throws a TypeError on the very
+    // first frame - which kills the render loop (no input, no update,
+    // frozen screen). Seed the same keys the server-backed sprite gets.
+    sprite.setData("serverX", LOBBY_MAP_DATA.spawnPoint.x);
+    sprite.setData("serverY", LOBBY_MAP_DATA.spawnPoint.y);
+    sprite.setData("lastDirection", "left");
     this.currentPlayer = sprite;
     this.cameras.main.startFollow(sprite);
     this.cameras.main.setBounds(
@@ -784,6 +798,15 @@ export class LobbyScene extends Phaser.Scene {
     // could solo-start now vs have to wait for the group.
     cb.listen("runInProgress", (v: boolean) => {
       this.runInProgress = !!v;
+      this.updateLobbyStatus();
+    });
+
+    // ---- Lobby code watch ----
+    // The code arrives with the room's state patch, which can land
+    // AFTER we joined (the creator auto-joins a room that was minted
+    // over HTTP). Re-render the status/top bar so "LOBBY CODE: XXXXXX"
+    // shows up as soon as the state does.
+    cb.listen("lobbyCode", () => {
       this.updateLobbyStatus();
     });
 
@@ -900,11 +923,11 @@ export class LobbyScene extends Phaser.Scene {
     // createLocalPlayer is called for it.
     this.bindRoomStateListeners();
 
-        // Re-bind the party HUD against the new (solo) room.
+    // Re-bind the party HUD against the new (solo) room.
     this.partyHud?.bindRoom(this.room, {
       includePlayer: (p: any) => p.currentMapId === "lobby",
     });
-// 5) RACE-SAFE local-player setup: by the time we get here, the
+    // 5) RACE-SAFE local-player setup: by the time we get here, the
     // solo room's onJoin already added our Player to state. If the
     //    cb.onAdd fired BEFORE we called bindRoomStateListeners, our
     //    createLocalPlayer never ran - meaning no onChange handler
@@ -1085,7 +1108,17 @@ export class LobbyScene extends Phaser.Scene {
       sprite.setData("serverY", player.y);
       // Refresh the local HUD text in case the name was reassigned.
       const hud = this.playerHuds[this.room.sessionId];
-      if (hud) updatePlayerHud(hud, sprite, player.displayName ?? "", 0, 1, 0, 0, false);
+      if (hud)
+        updatePlayerHud(
+          hud,
+          sprite,
+          player.displayName ?? "",
+          0,
+          1,
+          0,
+          0,
+          false,
+        );
       this.handlePlayerMapChange(this.room.sessionId, player);
     });
   }
@@ -1134,7 +1167,17 @@ export class LobbyScene extends Phaser.Scene {
       }
       // Refresh the HUD text in case the display name was reassigned.
       const hud = this.playerHuds[sessionId];
-      if (hud) updatePlayerHud(hud, sprite, player.displayName ?? "", 0, 1, 0, 0, false);
+      if (hud)
+        updatePlayerHud(
+          hud,
+          sprite,
+          player.displayName ?? "",
+          0,
+          1,
+          0,
+          0,
+          false,
+        );
     });
   }
 
@@ -1162,7 +1205,7 @@ export class LobbyScene extends Phaser.Scene {
         // Leaving the lobby -> handoff the room + client so GameScene
         // doesn't reconnect, then start it.
         this.lastLocalMapId = mapId;
-        this.scene.start("game", { room: this.room, client: this.client });     
+        this.scene.start("game", { room: this.room, client: this.client });
         return;
       }
       this.lastLocalMapId = mapId;
@@ -1205,8 +1248,10 @@ export class LobbyScene extends Phaser.Scene {
 
   private updatePlayerAnimation(sprite: Phaser.GameObjects.Sprite): void {
     let moving = false;
+    // getData/setData auto-create the DataManager when it is missing, so
+    // this can never throw on a sprite that never had setData() called.
     let direction: "left" | "right" =
-      (sprite.data.get("lastDirection") as "left" | "right") || "left";
+      (sprite.getData("lastDirection") as "left" | "right") || "left";
     if (this.inputPayload.left) {
       direction = "left";
       moving = true;
@@ -1216,7 +1261,7 @@ export class LobbyScene extends Phaser.Scene {
       moving = true;
     }
     if (this.inputPayload.up || this.inputPayload.down) moving = true;
-    sprite.data.set("lastDirection", direction);
+    sprite.setData("lastDirection", direction);
     const targetKey = moving
       ? direction === "right"
         ? "player_walk_right"
@@ -1296,13 +1341,12 @@ export class LobbyScene extends Phaser.Scene {
     for (const id in this.playerEntities) {
       const sprite = this.playerEntities[id];
       if (!sprite?.active) continue;
-      const sx = sprite.data.get("serverX") as number;
-      const sy = sprite.data.get("serverY") as number;
+      const sx = sprite.getData("serverX") as number;
+      const sy = sprite.getData("serverY") as number;
       sprite.x += (sx - sprite.x) * 0.4;
       sprite.y += (sy - sprite.y) * 0.4;
       const hud = this.playerHuds[id];
-      if (hud)
-        updatePlayerHud(hud, sprite, hud.lastName, 0, 1, 0, 0, false);
+      if (hud) updatePlayerHud(hud, sprite, hud.lastName, 0, 1, 0, 0, false);
     }
     // Local HUD tracks the local sprite (we move it directly above).
     // Before joining a room the local sprite has no session id, so its
@@ -1310,7 +1354,16 @@ export class LobbyScene extends Phaser.Scene {
     const localHudKey = this.room ? this.room.sessionId : GHOST_HUD_KEY;
     if (this.currentPlayer && this.playerHuds[localHudKey]) {
       const localHud = this.playerHuds[localHudKey];
-      updatePlayerHud(localHud, this.currentPlayer, localHud.lastName, 0, 1, 0, 0, false);
+      updatePlayerHud(
+        localHud,
+        this.currentPlayer,
+        localHud.lastName,
+        0,
+        1,
+        0,
+        0,
+        false,
+      );
     }
   }
 

@@ -54,7 +54,7 @@ import { MapSystem } from "../systems/MapSystem";
 import { PlayerSystem } from "../systems/PlayerSystem";
 import { EnemySystem } from "../systems/EnemySystem";
 import type { Enemy } from "../schema/Enemy";
-import { ProjectileSystem } from "../systems/ProjectileSystem" // basically bolter system 
+import { ProjectileSystem } from "../systems/ProjectileSystem"; // basically bolter system
 import { ClawSystem } from "../systems/ClawSystem";
 import { SlamSystem } from "../systems/SlamSystem";
 import { HealSystem } from "../systems/HealSystem";
@@ -130,6 +130,23 @@ const CLIENT_PLAYER_ID_KEY = "clientPlayerId";
  * from sharing a tile.
  */
 const LOBBY_SPAWN_MIN_GAP = 32;
+
+/**
+ * How long (ms) a code-lobby room may sit EMPTY before it is thrown
+ * away.
+ *
+ * A code lobby is minted over HTTP (`POST /api/lobby/create`) and the
+ * creator joins it a moment later. Colyseus arms a 15s auto-dispose
+ * timer on every new room (its `seatReservationTimeout`), so a lobby
+ * that nobody had joined yet was silently destroyed 15 seconds after
+ * it was created - the code then resolved to a dead room and joiners
+ * got "No lobby with that code".
+ *
+ * Code lobbies therefore turn the auto-dispose off and expire
+ * themselves (see onCreate). Once somebody joins, the room lives on
+ * until the leader leaves, which disposes it for real.
+ */
+const LOBBY_EMPTY_GRACE_MS = 5 * 60 * 1000;
 
 /** Starter cards handed to FRESH players (all 5 slots filled). */
 const STARTER_CARDS: { skill: SkillId; level: number }[] = [
@@ -226,6 +243,11 @@ export class GameRoom extends Room {
    */
   private lobbyCode: string = "";
   /**
+   * Expiry timer for a code-lobby that nobody joined yet (see
+   * LOBBY_EMPTY_GRACE_MS). Cleared as soon as the first player joins.
+   */
+  private lobbyExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
    * sessionId of the FIRST player to join the room. The leader is
    * the gatekeeper for new joiners (only they being in the lobby
    * state allows HTTP join calls to succeed). On leader disconnect
@@ -268,6 +290,21 @@ export class GameRoom extends Room {
     ) {
       this.lobbyCode = options.lobbyCode;
       this.state.lobbyCode = this.lobbyCode;
+      // Keep the (still empty) lobby alive until somebody joins it.
+      // Colyseus would otherwise dispose the room 15s after creation
+      // (seatReservationTimeout) - see LOBBY_EMPTY_GRACE_MS.
+      this.autoDispose = false;
+      this.lobbyExpiryTimer = setTimeout(() => {
+        this.lobbyExpiryTimer = null;
+        // Somebody joined in the meantime -> the room is alive and
+        // will be disposed when its last player leaves.
+        if (this.clients.length > 0) return;
+        console.log(
+          "[ROOM] Code-lobby " + this.lobbyCode + " expired - nobody joined",
+        );
+        unregisterLobby(this.roomId);
+        void this.disconnect();
+      }, LOBBY_EMPTY_GRACE_MS);
       console.log("[ROOM] Code-lobby room created with code " + this.lobbyCode);
     }
   }
@@ -1617,6 +1654,13 @@ export class GameRoom extends Room {
   onJoin(client: Client, options?: any) {
     console.log("Player joined GameRoom:", client.sessionId);
 
+    // The lobby has its first player - it no longer needs the
+    // "nobody joined yet" expiry timer.
+    if (this.lobbyExpiryTimer) {
+      clearTimeout(this.lobbyExpiryTimer);
+      this.lobbyExpiryTimer = null;
+    }
+
     const player = new Player();
     // Bind the owning client's session id so server-side code can do
     // this.clients.get(player.sessionId) lookups (per-player messages
@@ -2016,6 +2060,10 @@ export class GameRoom extends Room {
 
   onDispose() {
     console.log("GameRoom disposed:", this.roomId);
+    if (this.lobbyExpiryTimer) {
+      clearTimeout(this.lobbyExpiryTimer);
+      this.lobbyExpiryTimer = null;
+    }
     // Clear the lobby code registry too (the leader-leave path
     // unregisters synchronously above; this is the catch-all for
     // every other dispose route). Idempotent.

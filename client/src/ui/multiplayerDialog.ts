@@ -2,48 +2,48 @@
  * Multiplayer Lobby Code Dialog
  * =============================
  * Modal that opens when the player clicks the "MULTIPLYER" polygon in
- * the lobby. Three views inside one panel:
+ * the lobby. Two views inside one panel:
  *
- *   1. MAIN      - Two big buttons: "CREATE LOBBY" / "JOIN LOBBY".
- *                  Also shows a "LEAVE LOBBY" button + the current
- *                  code when the caller reports they are already in
- *                  a code lobby.
- *   2. CREATED   - The freshly minted 6-char code in giant monospace,
- *                  with explicit COPY CODE + ENTER LOBBY buttons.
- *                  The code stays visible until the user clicks
- *                  ENTER LOBBY (or dismisses the panel with ESC /
- *                  a click outside of it).
- *   3. JOINING   - Single-line input + JOIN + error slot + BACK.
+ *   1. MAIN      - Three big buttons: "CREATE LOBBY" / "JOIN LOBBY" /
+ *                  "PLAY SOLO". Plus "LEAVE LOBBY" + the current code
+ *                  when the caller reports they are already in a code
+ *                  lobby.
+ *   2. JOINING   - Single-line input + JOIN + error slot + BACK.
+ *
+ * BOTH flows are automatic - there is no second "confirm" step:
+ *   - CREATE LOBBY -> the server mints the lobby, the dialog copies the
+ *                     6-char code to the clipboard, closes itself and
+ *                     the caller joins the brand-new lobby straight
+ *                     away. The creator never has to "enter" their own
+ *                     lobby.
+ *   - JOIN LOBBY   -> the moment the 6-character code is complete the
+ *                     lookup + join fire on their own. The JOIN button
+ *                     stays on screen as a manual retry.
  *
  * Out-of-band dismissal:
  *   - Click anywhere outside the panel -> hide().
  *   - Press Escape -> hide().
  */
 import Phaser from "phaser";
-import { BACKEND_HTTP_URL } from "../backend";
 
-export type LobbyDialogView = "main" | "created" | "joining";
+export type LobbyDialogView = "main" | "joining";
 
 export interface MultiplayerDialogCallbacks {
   /**
    * Called when the player picks CREATE LOBBY. The caller should
-   * POST /api/lobby/create and on success call
-   * showCreated(code, roomId) to flip the panel to the success view
-   * (with the code + roomId for later use). On failure call
-   * showError(msg) to surface the failure.
-   *
-   * The caller should NOT join the room yet - the panel stays open
-   * in the "created" view until the user explicitly clicks
-   * ENTER LOBBY, which fires onCreateConfirmed.
+   * POST /api/lobby/create and on success call `onCreated(code, roomId)`
+   * - the dialog then puts the creator straight into that lobby (it
+   * copies the code, closes itself and fires onCreateConfirmed).
+   * On failure call showError(msg) to surface the failure.
    */
   onCreate: (
-    showCreated: (code: string, roomId: string) => void,
+    onCreated: (code: string, roomId: string) => void,
     showError: (msg: string) => void,
   ) => void;
   /**
-   * Called when the player clicks ENTER LOBBY in the created view.
-   * The dialog has already been hidden; the caller is responsible
-   * for actually joining the room (typically via swapToRoom(roomId)).
+   * Called with the freshly created lobby's code + roomId. The dialog
+   * has already closed itself by then; the caller is responsible for
+   * actually joining the room.
    */
   onCreateConfirmed: (code: string, roomId: string) => void;
   onJoin: (code: string, showError: (msg: string) => void) => void;
@@ -58,8 +58,6 @@ export interface MultiplayerDialogRefs {
   show: (callbacks: MultiplayerDialogCallbacks) => void;
   hide: () => void;
   isVisible: () => boolean;
-  showCreated: (code: string, roomId: string) => void;
-  setError: (msg: string | null) => void;
 }
 
 const PANEL_W = 480;
@@ -195,84 +193,6 @@ export function createMultiplayerDialog(
     .setScrollFactor(0)
     .setInteractive({ useHandCursor: true });
 
-  const createdLabel = scene.add
-    .text(W / 2, panelY + 64, "YOUR LOBBY CODE", {
-      color: "#cccccc",
-      fontSize: "12px",
-      fontFamily: "monospace",
-      stroke: "#000000",
-      strokeThickness: 2,
-    })
-    .setOrigin(0.5)
-    .setScrollFactor(0);
-  // The code itself - big, no quotes, easy to read.
-  const createdCode = scene.add
-    .text(W / 2, panelY + 100, "------", {
-      color: "#66bb6a",
-      fontSize: "36px",
-      fontFamily: "monospace",
-      fontStyle: "bold",
-      stroke: "#000000",
-      strokeThickness: 4,
-    })
-    .setOrigin(0.5)
-    .setScrollFactor(0);
-  // Status text - flashes "COPIED" / "COPY FAILED" briefly.
-  const createdCopiedHint = scene.add
-    .text(W / 2, panelY + 150, "", {
-      color: "#66bb6a",
-      fontSize: "12px",
-      fontFamily: "monospace",
-      fontStyle: "bold",
-      stroke: "#000000",
-      strokeThickness: 3,
-    })
-    .setOrigin(0.5)
-    .setScrollFactor(0);
-  // Explicit COPY CODE button.
-  const copyCodeBtn = scene.add
-    .text(W / 2, panelY + 180, "[ COPY CODE ]", {
-      color: "#4fc3f7",
-      fontSize: "14px",
-      fontFamily: "monospace",
-      fontStyle: "bold",
-      stroke: "#000000",
-      strokeThickness: 3,
-    })
-    .setOrigin(0.5)
-    .setScrollFactor(0)
-    .setInteractive({ useHandCursor: true });
-  const createdShareHint = scene.add
-    .text(
-      W / 2,
-      panelY + 210,
-      "Share it with a friend, then click ENTER LOBBY.",
-      {
-        color: "#cccccc",
-        fontSize: "11px",
-        fontFamily: "monospace",
-        stroke: "#000000",
-        strokeThickness: 2,
-        wordWrap: { width: PANEL_W - 40 },
-        align: "center",
-      },
-    )
-    .setOrigin(0.5)
-    .setScrollFactor(0);
-  // ENTER LOBBY - the explicit commit. Replaces the old CLOSE.
-  const createdCloseBtn = scene.add
-    .text(W / 2, panelY + 260, "[ ENTER LOBBY ]", {
-      color: "#66bb6a",
-      fontSize: "16px",
-      fontFamily: "monospace",
-      fontStyle: "bold",
-      stroke: "#000000",
-      strokeThickness: 3,
-    })
-    .setOrigin(0.5)
-    .setScrollFactor(0)
-    .setInteractive({ useHandCursor: true });
-
   const joinLabel = scene.add
     .text(W / 2, panelY + 64, "ENTER 6-CHARACTER CODE", {
       color: "#cccccc",
@@ -318,15 +238,6 @@ export function createMultiplayerDialog(
   domInput.style.pointerEvents = "none";
   domInput.value = "";
   document.body.appendChild(domInput);
-
-  const syncFromDom = () => {
-    const v = domInput.value.toUpperCase().replace(/[^0-9A-Z]/g, "");
-    if (v !== domInput.value) domInput.value = v;
-    inputDisplay.setText(v);
-  };
-  domInput.addEventListener("input", syncFromDom);
-  domInput.addEventListener("focus", () => drawInputBox(true));
-  domInput.addEventListener("blur", () => drawInputBox(false));
 
   const joinErrorText = scene.add
     .text(W / 2, panelY + 144, "", {
@@ -392,12 +303,6 @@ export function createMultiplayerDialog(
     currentCodeLabel,
     currentCodeValue,
     leaveBtn,
-    createdLabel,
-    createdCode,
-    createdCopiedHint,
-    copyCodeBtn,
-    createdShareHint,
-    createdCloseBtn,
     joinLabel,
     inputBox,
     inputDisplay,
@@ -409,25 +314,46 @@ export function createMultiplayerDialog(
 
   let activeView: LobbyDialogView = "main";
   let activeCallbacks: MultiplayerDialogCallbacks | null = null;
-  // Code + roomId stashed when the caller hands them in via
-  // showCreated(). ENTER LOBBY uses these to call onCreateConfirmed.
-  let pendingCode: string = "";
-  let pendingRoomId: string = "";
+  /**
+   * The code we already auto-submitted for. Guards against firing the
+   * join twice for the same value (the DOM input fires an `input`
+   * event per character, and a paste fires it once with everything).
+   * Cleared on failure so the same code can be retried.
+   */
+  let autoJoinCode = "";
 
-  // Briefly show a status text under the COPY CODE button. Used by
-  // the auto-copy on view open AND by explicit [COPY CODE] clicks.
-  let copyStatusTimer: Phaser.Time.TimerEvent | null = null;
-  function flashCopyStatus(msg: string, ok: boolean = true) {
-    createdCopiedHint.setText(msg);
-    createdCopiedHint.setColor(ok ? "#66bb6a" : "#ff5555");
-    createdCopiedHint.setVisible(true);
-    if (copyStatusTimer) {
-      copyStatusTimer.remove(false);
-      copyStatusTimer = null;
+  const syncFromDom = () => {
+    const v = domInput.value.toUpperCase().replace(/[^0-9A-Z]/g, "");
+    if (v !== domInput.value) domInput.value = v;
+    inputDisplay.setText(v);
+    // AUTO-JOIN: a complete 6-character code is all the player has to
+    // type - the lookup + join fire the moment the last character
+    // lands. No extra button press, no second step.
+    if (/^[0-9A-Z]{6}$/.test(v) && v !== autoJoinCode) {
+      autoJoinCode = v;
+      submitJoin(v, true);
     }
-    copyStatusTimer = scene.time.delayedCall(1500, () => {
-      createdCopiedHint.setText("COPIED TO CLIPBOARD");
-      createdCopiedHint.setColor("#66bb6a");
+  };
+  domInput.addEventListener("input", syncFromDom);
+  domInput.addEventListener("focus", () => drawInputBox(true));
+  domInput.addEventListener("blur", () => drawInputBox(false));
+
+  /**
+   * Run the lobby lookup + join for a code. `automatic` marks the
+   * auto-submitted path (different status wording only).
+   */
+  function submitJoin(code: string, automatic: boolean): void {
+    if (!activeCallbacks) return;
+    joinErrorText.setText(
+      automatic ? "Joining lobby..." : "Looking up lobby...",
+    );
+    joinErrorText.setColor("#cccccc");
+    activeCallbacks.onJoin(code, (msg) => {
+      joinErrorText.setText(msg);
+      joinErrorText.setColor("#ff5555");
+      // Let the same code be tried again (the next input event fires
+      // the auto-join once more).
+      autoJoinCode = "";
     });
   }
 
@@ -442,12 +368,6 @@ export function createMultiplayerDialog(
       currentCodeLabel.setText("CURRENT LOBBY CODE");
       currentCodeValue.setText(currentCode || "------");
     }
-    createdLabel.setVisible(false);
-    createdCode.setVisible(false);
-    createdCopiedHint.setVisible(false);
-    copyCodeBtn.setVisible(false);
-    createdShareHint.setVisible(false);
-    createdCloseBtn.setVisible(false);
     joinLabel.setVisible(false);
     inputBox.setVisible(false);
     inputDisplay.setVisible(false);
@@ -461,38 +381,6 @@ export function createMultiplayerDialog(
     }
   }
 
-  function setCreatedView(code: string, roomId: string) {
-    createBtn.setVisible(false);
-    joinBtn.setVisible(false);
-    soloBtn.setVisible(false);
-    currentCodeLabel.setVisible(false);
-    currentCodeValue.setVisible(false);
-    leaveBtn.setVisible(false);
-    createdLabel.setVisible(true);
-    createdCode.setVisible(true);
-    // No quotes - the code IS alphanumeric, no need to surround it.
-    createdCode.setText(code);
-    createdCode.setFontSize(36);
-    createdCopiedHint.setText("COPIED TO CLIPBOARD");
-    createdCopiedHint.setVisible(true);
-    copyCodeBtn.setVisible(true);
-    createdShareHint.setVisible(true);
-    createdCloseBtn.setVisible(true);
-    joinLabel.setVisible(false);
-    inputBox.setVisible(false);
-    inputDisplay.setVisible(false);
-    joinErrorText.setVisible(false);
-    joinConfirmBtn.setVisible(false);
-    joinBackBtn.setVisible(false);
-    // Stash for ENTER LOBBY click.
-    pendingCode = code;
-    pendingRoomId = roomId;
-    // Auto-copy on view open. The user can still click [COPY CODE]
-    // to re-copy if the auto-copy failed (clipboard permission denied).
-    flashCopyStatus("COPIED TO CLIPBOARD");
-    copyToClipboard(code);
-  }
-
   function setJoiningView() {
     createBtn.setVisible(false);
     joinBtn.setVisible(false);
@@ -500,12 +388,6 @@ export function createMultiplayerDialog(
     currentCodeLabel.setVisible(false);
     currentCodeValue.setVisible(false);
     leaveBtn.setVisible(false);
-    createdLabel.setVisible(false);
-    createdCode.setVisible(false);
-    createdCopiedHint.setVisible(false);
-    copyCodeBtn.setVisible(false);
-    createdShareHint.setVisible(false);
-    createdCloseBtn.setVisible(false);
     joinLabel.setVisible(true);
     inputBox.setVisible(true);
     inputDisplay.setVisible(true);
@@ -515,6 +397,8 @@ export function createMultiplayerDialog(
     joinConfirmBtn.setVisible(true);
     joinBackBtn.setVisible(true);
     domInput.value = "";
+    // A fresh attempt - the next complete code auto-joins again.
+    autoJoinCode = "";
     scene.time.delayedCall(10, () => {
       try {
         domInput.focus({ preventScroll: true } as any);
@@ -533,39 +417,30 @@ export function createMultiplayerDialog(
     }
   }
   // Clicking outside the panel dismisses the dialog in EVERY view,
-  // exactly like ESC does. The rule is "outside click == ESC", so the
-  // created/joining views must not behave differently from the main view.
+  // exactly like ESC does. The rule is "outside click == ESC".
   overlay.on("pointerdown", () => {
     hide();
   });
 
-  copyCodeBtn.on("pointerdown", () => {
-    if (!pendingCode) return;
-    try {
-      copyToClipboard(pendingCode);
-      flashCopyStatus("COPIED TO CLIPBOARD");
-    } catch (e) {
-      flashCopyStatus("COPY FAILED", false);
-    }
-  });
-
   createBtn.on("pointerdown", () => {
     if (!activeCallbacks) return;
-    activeView = "created";
-    // Flip to a placeholder so the panel layout is right while we
-    // wait for the server. The real code + roomId are passed in
-    // via showCreated() when the fetch resolves.
-    setMainViewForLobby(false);
-    createdLabel.setVisible(true);
-    createdCode.setVisible(true);
-    createdCode.setText("------");
-    createdCopiedHint.setVisible(false);
-    copyCodeBtn.setVisible(false);
-    createdShareHint.setVisible(false);
-    createdCloseBtn.setVisible(false);
+    hintText.setText("Creating lobby...");
+    hintText.setColor("#cccccc");
     activeCallbacks.onCreate(
       (code, roomId) => {
-        setCreatedView(code, roomId);
+        // The lobby now exists on the server - put the creator
+        // STRAIGHT into it. The code is copied to the clipboard so it
+        // can be shared immediately (it also shows in the lobby's top
+        // bar), and the dialog closes itself: there is no separate
+        // "ENTER LOBBY" step.
+        copyToClipboard(code);
+        hide();
+        activeView = "main";
+        try {
+          activeCallbacks?.onCreateConfirmed(code, roomId);
+        } catch (e) {
+          console.error("[multiplayerDialog] onCreateConfirmed threw:", e);
+        }
       },
       (msg) => {
         activeView = "main";
@@ -581,24 +456,6 @@ export function createMultiplayerDialog(
         });
       },
     );
-  });
-
-  createdCloseBtn.on("pointerdown", () => {
-    // ENTER LOBBY - hide the dialog and ask the caller to actually
-    // join the room. Doing it in two steps (dialog first, then
-    // join) means the code stays visible until the user explicitly
-    // confirms, instead of vanishing mid-click.
-    if (!activeCallbacks) return;
-    const code = pendingCode;
-    const roomId = pendingRoomId;
-    hide();
-    if (code && roomId) {
-      try {
-        activeCallbacks.onCreateConfirmed(code, roomId);
-      } catch (e) {
-        console.error("[multiplayerDialog] onCreateConfirmed threw:", e);
-      }
-    }
   });
 
   joinBtn.on("pointerdown", () => {
@@ -630,12 +487,7 @@ export function createMultiplayerDialog(
       joinErrorText.setColor("#ff5555");
       return;
     }
-    joinErrorText.setText("Looking up lobby...");
-    joinErrorText.setColor("#cccccc");
-    activeCallbacks.onJoin(code, (msg) => {
-      joinErrorText.setText(msg);
-      joinErrorText.setColor("#ff5555");
-    });
+    submitJoin(code, false);
   });
 
   domInput.addEventListener("keydown", (ev) => {
@@ -652,22 +504,11 @@ export function createMultiplayerDialog(
   function show(callbacks: MultiplayerDialogCallbacks) {
     activeCallbacks = callbacks;
     activeView = "main";
-    pendingCode = "";
-    pendingRoomId = "";
+    autoJoinCode = "";
     setMainViewForLobby(callbacks.inCodeLobby, callbacks.currentCode);
     hintText.setText("[ESC] or click outside to close");
     hintText.setColor("#888888");
     root.setVisible(true);
-  }
-
-  function showCreated(code: string, roomId: string) {
-    activeView = "created";
-    setCreatedView(code, roomId);
-  }
-
-  function setError(msg: string | null) {
-    joinErrorText.setText(msg || "");
-    joinErrorText.setColor(msg ? "#ff5555" : "#cccccc");
   }
 
   return {
@@ -675,8 +516,6 @@ export function createMultiplayerDialog(
     show,
     hide,
     isVisible: () => root.visible,
-    showCreated,
-    setError,
   };
 }
 
