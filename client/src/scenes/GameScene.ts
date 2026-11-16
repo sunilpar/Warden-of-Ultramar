@@ -412,19 +412,27 @@ export class GameScene extends Phaser.Scene {
       () => (this.room?.metadata?.modifiers as any[]) ?? [],
       () => this.pullActiveMapStats(),
     );
+    // Elite indicator: a yellow "<" pointer aiming at the elite while it
+    // is off-screen. Frame 0 of the "indicators_sheet" sheet is the skull.
     this.eliteIndicator = createEliteIndicator(
       this,
       () => !!(this.room as any)?.state?.eliteAlive,
       () => this.getEliteWorldPos(),
+      { label: "Elite", labelColor: "#ffd700", pointerColor: "#ffd700" },
     );
-    // Exit indicator: green arrow toward the map exit, active once the
-    // elite is dead and the exit unlocks (server-synced flag). Uses
-    // frame 1 of the "indicators_sheet" sprite sheet (elite uses 0).
+    // Exit indicator: a green "<" pointer aiming at the map exit, active
+    // once the elite is dead and the exit unlocks (server-synced flag).
+    // Frame 1 of the "indicators_sheet" sheet is the exit icon.
     this.exitIndicator = createEliteIndicator(
       this,
       () => !!(this.room as any)?.state?.exitUnlocked,
       () => this.getExitWorldPos(),
-      { spriteFrame: 1, labelColor: "#66ff66", label: "Exit" },
+      {
+        spriteFrame: 1,
+        label: "Exit",
+        labelColor: "#66ff66",
+        pointerColor: "#66ff66",
+      },
     );
     const confirmPopup = createConfirmPopup(this);
     this.mapStatPicker = createMapStatPicker(this);
