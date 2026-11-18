@@ -8,8 +8,27 @@ export const GAME_CONFIG = {
   /** Server simulation tick rate (60 ticks per second) */
   FIXED_TIME_STEP_MS: 1000 / 60,
 
-  /** Max inputs processed per player per tick (prevents lag exploit) */
-  MAX_INPUTS_PER_TICK: 5,
+  /**
+   * Max inputs processed per player per server tick.
+   *
+   * The primary speed-hack guard is the REAL-TIME bound in PlayerSystem
+   * (a player can never advance further than real time has elapsed).
+   * This cap only limits how large a single catch-up burst may be, so a
+   * client that stalled (tab in the background / long GC) can catch up
+   * over a few ticks instead of teleporting.
+   */
+  MAX_INPUTS_PER_TICK: 15,
+
+  /**
+   * Max number of unprocessed input packets kept per player.
+   *
+   * Packets are normally consumed 1:1 with server ticks (both sides run
+   * at 60 Hz), so the queue only holds a few packets of network jitter.
+   * The cap only matters for a malicious client flooding packets: the
+   * OLDEST packets are dropped because they are the least valuable
+   * (stale intent).
+   */
+  MAX_QUEUED_INPUTS: 60,
 
   /** Player settings */
   PLAYER: {

@@ -41,7 +41,11 @@ import {
   LOBBY_PLAY_POLYGON,
   LOBBY_MULTIPLAYER_POLYGON,
 } from "../maps/lobbyMapData";
-import { resolveTileCollision } from "../maps/layeredMapData";
+import {
+  moveCircleWithCollision,
+  type CircleGrid,
+} from "../maps/movement";
+import { MovementPredictor, nextInputTick } from "../systems/prediction";
 import { createCharacterAnimations } from "../vfx/animations";
 import { bindKeyboard } from "../systems/input";
 import { defaultJoinOptions } from "../clientIdentity";
@@ -63,6 +67,16 @@ const PLAYER_COLLISION_RADIUS = 10;
 
 /** Key of the local player's HUD entry while no room is joined yet. */
 const GHOST_HUD_KEY = "__ghost__";
+
+/**
+ * Maximum frame delta we simulate in one frame (ms). Clamped so a stall
+ * (tab in the background, a long GC pause) cannot spiral the catch-up.
+ */
+const MAX_FRAME_DELTA_MS = 250;
+/**
+ * Maximum number of simulation ticks per frame. Bounds the catch-up burst.
+ */
+const MAX_CATCH_UP_TICKS = 5;
 
 export class LobbyScene extends Phaser.Scene {
   client!: Client;
@@ -107,6 +121,12 @@ export class LobbyScene extends Phaser.Scene {
   private fixedTimeStep = 1000 / 60;
   private currentTick = 0;
   private moveSpeed = 120;
+  /**
+   * Reconciles the locally predicted position against the authoritative
+   * server position. Removes the network-latency component so the client
+   * never rubber-bands (the old 32px snap-back).
+   */
+  private readonly predictor = new MovementPredictor();
   /** Last `currentMapId` we saw for the local player (used to detect
    *  transitions out of the lobby). */
   private lastLocalMapId: string | null = null;
@@ -262,6 +282,10 @@ export class LobbyScene extends Phaser.Scene {
   }
 
   async create() {
+    // A Phaser scene instance is REUSED when the scene is started again
+    // (scene.start), so the prediction history from the previous visit
+    // must be dropped here.
+    this.predictor.reset();
     createCharacterAnimations(this);
 
     // ---- Render the lobby baselayer exactly like GameScene does ----
@@ -1096,14 +1120,20 @@ export class LobbyScene extends Phaser.Scene {
     const cb = Callbacks.get(this.room as any) as any;
     cb.onChange(player, () => {
       this.currentPlayerState = player;
-      // Server-authoritative position (snap if desync > 32 px, otherwise
-      // we just predict locally).
-      const dx = Math.abs(sprite.x - player.x);
-      const dy = Math.abs(sprite.y - player.y);
-      if (dx > 32 || dy > 32) {
-        sprite.x = player.x;
-        sprite.y = player.y;
-      }
+      // Reconcile the local prediction against the authoritative server
+      // position. The server echoes back the tick of the last input it
+      // consumed (`player.tick`), so comparing against OUR prediction for
+      // that same tick removes the network-latency component - which is
+      // what used to cause the 32px rubber band at higher speeds.
+      const reconciled = this.predictor.reconcile(
+        player.x,
+        player.y,
+        player.tick ?? -1,
+        sprite.x,
+        sprite.y,
+      );
+      sprite.x = reconciled.x;
+      sprite.y = reconciled.y;
       sprite.setData("serverX", player.x);
       sprite.setData("serverY", player.y);
       // Refresh the local HUD text in case the name was reassigned.
@@ -1282,6 +1312,20 @@ export class LobbyScene extends Phaser.Scene {
     else sprite.setFlipX(direction === "right");
   }
 
+  /**
+   * The lobby's collision grid in the shape the shared movement module
+   * expects. Kept in one place so the client and the server always
+   * collide against the SAME data with the SAME code.
+   */
+  private lobbyCollisionWorld(): CircleGrid {
+    return {
+      grid: LOBBY_MAP_DATA.collisionGrid,
+      cols: LOBBY_MAP_DATA.cols,
+      rows: LOBBY_MAP_DATA.rows,
+      tileSize: LOBBY_MAP_DATA.tileSize,
+    };
+  }
+
   private fixedTick(): void {
     this.currentTick++;
     this.debugFPS.setText("FPS: " + Math.round(this.game.loop.actualFps));
@@ -1312,30 +1356,43 @@ export class LobbyScene extends Phaser.Scene {
       dirX /= length;
       dirY /= length;
     }
-    const speed = this.moveSpeed;
-    this.currentPlayer.x += dirX * speed * dt;
-    this.currentPlayer.y += dirY * speed * dt;
-    this.currentPlayer.x = Phaser.Math.Clamp(
+    // Use the server-synced effective speed so local prediction matches
+    // the server (the old code used a hardcoded 120, which diverged
+    // whenever the server applied a speed buff/debuff).
+    const speed =
+      this.currentPlayerState?.moveSpeed > 0
+        ? this.currentPlayerState.moveSpeed
+        : this.moveSpeed;
+    // Shared swept collision (identical maths to the server): sub-stepped
+    // so a fast player can never tunnel through a wall, and axis-separated
+    // so the player slides along walls instead of sticking to them.
+    const moved = moveCircleWithCollision(
       this.currentPlayer.x,
+      this.currentPlayer.y,
+      dirX * speed * dt,
+      dirY * speed * dt,
+      PLAYER_COLLISION_RADIUS,
+      this.lobbyCollisionWorld(),
+    );
+    this.currentPlayer.x = Phaser.Math.Clamp(
+      moved.x,
       0,
       LOBBY_MAP_DATA.widthPx,
     );
     this.currentPlayer.y = Phaser.Math.Clamp(
-      this.currentPlayer.y,
+      moved.y,
       0,
       LOBBY_MAP_DATA.heightPx,
     );
-    const resolved = resolveTileCollision(
+
+    // Record the predicted position for this input tick so the server's
+    // acknowledgement can be matched against OUR prediction (latency
+    // removed) instead of the raw position.
+    this.predictor.record(
+      this.currentTick,
       this.currentPlayer.x,
       this.currentPlayer.y,
-      PLAYER_COLLISION_RADIUS,
-      LOBBY_MAP_DATA.collisionGrid,
-      LOBBY_MAP_DATA.cols,
-      LOBBY_MAP_DATA.rows,
-      LOBBY_MAP_DATA.tileSize,
     );
-    this.currentPlayer.x = resolved.x;
-    this.currentPlayer.y = resolved.y;
 
     // ---- Remotes: smooth toward server-synced position ----
     for (const id in this.playerEntities) {
@@ -1368,15 +1425,23 @@ export class LobbyScene extends Phaser.Scene {
   }
 
   update(_t: number, delta: number): void {
-    this.elapsedTime += delta;
+    // Industry standard catch-up handling: clamp the frame delta (so a
+    // stall cannot spiral) but NEVER discard the accumulated time - the
+    // old `this.elapsedTime = 0` permanently threw away simulated time,
+    // which made the client send fewer inputs/sec than the server
+    // expected and was a permanent source of desync / rubber banding.
+    this.elapsedTime += Math.min(delta, MAX_FRAME_DELTA_MS);
     let catchUpTicks = 0;
-    while (this.elapsedTime >= this.fixedTimeStep) {
+    while (
+      this.elapsedTime >= this.fixedTimeStep &&
+      catchUpTicks < MAX_CATCH_UP_TICKS
+    ) {
       this.elapsedTime -= this.fixedTimeStep;
       this.fixedTick();
-      if (++catchUpTicks >= 5) {
-        this.elapsedTime = 0;
-        break;
-      }
+      catchUpTicks++;
+    }
+    if (this.elapsedTime > this.fixedTimeStep) {
+      this.elapsedTime = this.fixedTimeStep;
     }
   }
 }

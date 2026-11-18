@@ -88,6 +88,8 @@ export class Enemy extends Schema {
         this.lastHitDamage = 0;
         /** Whether the last hit was a critical hit. */
         this.lastHitCrit = false;
+        /** Whether the last hit was fully absorbed by the shield (blue flash on client). */
+        this.lastHitShielded = false;
         /** Monotonic counter — increments every time damage is taken (so client can detect new hits). */
         this.hitSeq = 0;
         /** True while the enemy is playing its attack animation. */
@@ -261,11 +263,23 @@ export class Enemy extends Schema {
             return 0;
         return 1 + this.sumModValues("inc_atk_damage", 0.03);
     }
-    /** Radius multiplier (unique: wide_sweep -> 2x radius / 0.5x damage). */
+    /**
+     * Radius multiplier (inc_aoe rolled values * unique wide_sweep 2x).
+     * Mirrors Player.slotRadiusMult so enemy cast radii scale the same way.
+     */
     cardRadiusMult(skill) {
         if (!this.hasCardFor(skill))
             return 1;
-        return this.card.modIds.includes("wide_sweep") ? 2.0 : 1;
+        let mult = 1 + this.sumModValues("inc_aoe", 0);
+        if (this.card.modIds.includes("wide_sweep"))
+            mult *= 2.0;
+        return mult;
+    }
+    /** Additive defence bonus from this enemy's card (sums inc_defence). */
+    cardDefenceBonus(skill) {
+        if (!this.hasCardFor(skill))
+            return 0;
+        return this.sumModValues("inc_defence", 0);
     }
     /** Damage multiplier from the unique wide_sweep (0.5 when present). */
     cardUniqueDamageMult(skill) {
@@ -367,9 +381,11 @@ export class Enemy extends Schema {
             return 0;
         // Defence reduces incoming damage. Crits bypass only 50% of defence.
         // Shock reduces defence by 20% (can go negative = bonus damage).
+        // Card bonus (inc_defence) adds on top, capped at 0.95.
         const isShocked = Date.now() < this.shockUntil;
         const shockMod = isShocked ? -0.2 : 0.0;
-        const effectiveDefence = (isCrit ? this.defence * 0.5 : this.defence) + shockMod;
+        const baseDefence = Math.min(0.95, this.defence + this.cardDefenceBonus(sourceSkillId));
+        const effectiveDefence = (isCrit ? baseDefence * 0.5 : baseDefence) + shockMod;
         const mitigated = rawDamage * (1.0 - effectiveDefence);
         let dmg = mitigated * this.incomingDamageMultiplier;
         let shieldAbsorbed = 0;
@@ -402,6 +418,7 @@ export class Enemy extends Schema {
         const totalDmg = mitigated * this.incomingDamageMultiplier;
         this.lastHitDamage = Math.round(totalDmg);
         this.lastHitCrit = isCrit;
+        this.lastHitShielded = shieldAbsorbed > 0 && totalDmg - shieldAbsorbed <= 0;
         this.lastShieldDamage = shieldAbsorbed;
         this.lastHpDamage = totalDmg - shieldAbsorbed;
         this.hitSeq += 1;
@@ -451,6 +468,7 @@ export class Enemy extends Schema {
             this.lastHitDamage = this.bleedTickDamage;
             this.hitSeq += 1;
             this.hitFlashUntil = Math.max(this.hitFlashUntil, Date.now() + 100);
+            this.lastHitShielded = false;
             return this.isDead;
         }
         return false;
@@ -567,6 +585,9 @@ __decorate([
 __decorate([
     type("boolean")
 ], Enemy.prototype, "lastHitCrit", void 0);
+__decorate([
+    type("boolean")
+], Enemy.prototype, "lastHitShielded", void 0);
 __decorate([
     type("number")
 ], Enemy.prototype, "hitSeq", void 0);

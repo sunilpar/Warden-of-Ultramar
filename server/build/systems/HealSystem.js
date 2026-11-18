@@ -18,7 +18,9 @@ export class HealSystem {
             return false;
         const def = SKILL_DEFS.heal;
         const pct = healPercent(level);
-        const radius = healRadius(level);
+        // Card AoE bonus from the equipped card in this slot (inc_aoe mods).
+        const radiusMult = player.slotRadiusMult(slot);
+        const radius = healRadius(level) * radiusMult;
         if (level >= def.aoeUnlockLevel) {
             // AoE heal: heal all players + enemies in radius
             this.state.players.forEach((p) => {
@@ -55,7 +57,9 @@ export class HealSystem {
     castEnemyHeal(enemy, level = 1) {
         const def = SKILL_DEFS.heal;
         const pct = healPercent(level);
-        const radius = healRadius(level);
+        // Enemy may carry a card with inc_aoe; mirror the player logic.
+        const radiusMult = enemy.cardRadiusMult("heal");
+        const radius = healRadius(level) * radiusMult;
         if (level >= def.aoeUnlockLevel) {
             this.state.players.forEach((p) => {
                 if (p.isDead)

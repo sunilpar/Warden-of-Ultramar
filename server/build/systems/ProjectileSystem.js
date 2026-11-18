@@ -59,7 +59,9 @@ export class ProjectileSystem {
      */
     castBolter(ownerId, faction, x, y, angle, attack, skillLevel, damageMultiplier, critRate = 0, critDamage = 1.5) {
         const def = BOLTER_DEF;
-        const speed = typeof def.projectileSpeed === "function" ? def.projectileSpeed(skillLevel) : def.projectileSpeed;
+        const speed = typeof def.projectileSpeed === "function"
+            ? def.projectileSpeed(skillLevel)
+            : def.projectileSpeed;
         const vx = Math.cos(angle) * speed;
         const vy = Math.sin(angle) * speed;
         if (Math.hypot(vx, vy) < 0.0001)
@@ -168,7 +170,6 @@ export class ProjectileSystem {
      * (ax,ay) center with half (aw,ah); (bx,by) center with half (bw,bh).
      */
     rectOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
-        return (Math.abs(ax - bx) <= aw + bw &&
-            Math.abs(ay - by) <= ah + bh);
+        return Math.abs(ax - bx) <= aw + bw && Math.abs(ay - by) <= ah + bh;
     }
 }

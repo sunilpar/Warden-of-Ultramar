@@ -34,6 +34,13 @@ export class CardInstance extends Schema {
          * sync so the client tooltip can show the real rolled value.
          */
         this.modValues = new ArraySchema();
+        /**
+         * Roll mode for this card (advantage / disadvantage / normal). See
+         * CARD_DROP docs in config/loot.ts. Stored now so the UI can surface
+         * "rolls with advantage / rolls with disadvantage"; the actual numeric
+         * effect on mod values is wired later (currently informational).
+         */
+        this.rollsWith = "normal";
     }
 }
 __decorate([
@@ -51,3 +58,6 @@ __decorate([
 __decorate([
     type(["number"])
 ], CardInstance.prototype, "modValues", void 0);
+__decorate([
+    type("string")
+], CardInstance.prototype, "rollsWith", void 0);

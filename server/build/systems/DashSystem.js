@@ -1,11 +1,57 @@
+/**
+ * Dash System
+ * ===========
+ * Evasion skill: instantly moves the caster toward a target position (mouse),
+ * granting brief invincibility during the dash. At L6+, an ice blast AoE
+ * triggers at the landing position, dealing ice damage in a small radius.
+ *
+ * The dash is INSTANT (no travel time) — the caster is teleported to the
+ * destination, made invincible for a brief window, and a VFX SkillCast is
+ * spawned for the client to render the dash trail + emerge effect.
+ *
+ * WALL-AWARE DASH (clipping fix)
+ * -------------------------------
+ * The dash used to teleport the caster to the raw destination, straight
+ * THROUGH walls — a confirmed clipping bug (you could dash out of the map
+ * or through a wall and end up inside a solid tile). The destination is
+ * now swept against the collision grid: the dash stops at the first
+ * solid tile along the path, exactly like a swept-circle move.
+ */
+import { GAME_CONFIG } from "../config/game";
 import { SkillCast } from "../schema/SkillCast";
 import { applyCrit, dashRange, dashHasIceBlast, dashIceBlastDamage, dashIceBlastRadius, } from "../config/skillDefs";
 /** Duration of invincibility after a dash (ms). Covers the dash + brief recovery. */
 const DASH_INVINCIBLE_MS = 300;
 export class DashSystem {
-    constructor(state) {
+    constructor(state, mapSystem) {
         this.state = state;
         this.nextId = 1;
+        /** Optional map system used to stop dashes at walls. */
+        this.mapSystem = null;
+        if (mapSystem)
+            this.mapSystem = mapSystem;
+    }
+    /** Inject the map system (used when the dash system is created first
+     *  and the map system afterwards). */
+    setMapSystem(mapSystem) {
+        this.mapSystem = mapSystem;
+    }
+    /**
+     * Clamp a dash destination so it never ends up inside a wall.
+     * Sweeps the straight line from the start to the raw destination and
+     * stops at the first solid tile.
+     */
+    resolveDashDestination(startX, startY, rawX, rawY, radius) {
+        if (!this.mapSystem) {
+            return { x: rawX, y: rawY };
+        }
+        const coverage = this.mapSystem.sweepCoverage(startX, startY, rawX, rawY, radius);
+        const x = startX + (rawX - startX) * coverage;
+        const y = startY + (rawY - startY) * coverage;
+        return {
+            x: Math.max(0, Math.min(this.mapSystem.width, x)),
+            y: Math.max(0, Math.min(this.mapSystem.height, y)),
+        };
     }
     // ============================================================
     // PLAYER DASH
@@ -25,8 +71,12 @@ export class DashSystem {
         const startX = player.x;
         const startY = player.y;
         // Calculate destination (clamped by range toward the aim angle)
-        const destX = player.x + Math.cos(angle) * range;
-        const destY = player.y + Math.sin(angle) * range;
+        const rawX = player.x + Math.cos(angle) * range;
+        const rawY = player.y + Math.sin(angle) * range;
+        // Stop the dash at the first wall along the path (clipping fix).
+        const dest = this.resolveDashDestination(player.x, player.y, rawX, rawY, GAME_CONFIG.PLAYER.COLLISION_RADIUS);
+        const destX = dest.x;
+        const destY = dest.y;
         // Move the player instantly
         player.x = destX;
         player.y = destY;
@@ -54,8 +104,12 @@ export class DashSystem {
         const now = Date.now();
         const startX = enemy.x;
         const startY = enemy.y;
-        const destX = enemy.x + Math.cos(angle) * range;
-        const destY = enemy.y + Math.sin(angle) * range;
+        const rawX = enemy.x + Math.cos(angle) * range;
+        const rawY = enemy.y + Math.sin(angle) * range;
+        // Stop the dash at the first wall along the path (clipping fix).
+        const dest = this.resolveDashDestination(enemy.x, enemy.y, rawX, rawY, enemy.collisionRadius);
+        const destX = dest.x;
+        const destY = dest.y;
         enemy.x = destX;
         enemy.y = destY;
         enemy.invincibleUntil = now + DASH_INVINCIBLE_MS;

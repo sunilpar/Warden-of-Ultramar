@@ -16,8 +16,13 @@ import { Client } from "@colyseus/sdk";
 import { Callbacks } from "@colyseus/schema";
 import { BACKEND_URL } from "../backend";
 
-import { LAYERED_MAP, resolveTileCollision } from "../maps/layeredMapData";
+import { LAYERED_MAP } from "../maps/layeredMapData";
 import type { LayeredMapData } from "../maps/layeredMapData";
+import {
+  moveCircleWithCollision,
+  type CircleGrid,
+} from "../maps/movement";
+import { MovementPredictor, nextInputTick } from "../systems/prediction";
 import { LAYERED_MAP_2 } from "../maps/layeredMap2Data";
 import {
   type SkillId,
@@ -128,6 +133,18 @@ import {
 import { defaultJoinOptions } from "../clientIdentity";
 import { getSkillTargeting } from "../config/targeting";
 
+/**
+ * Maximum frame delta we are willing to simulate in one frame (ms).
+ * Anything longer (tab in the background, a long GC pause, a breakpoint)
+ * is clamped so the client cannot spiral trying to catch up.
+ */
+const MAX_FRAME_DELTA_MS = 250;
+/**
+ * Maximum number of simulation ticks we will run in a single frame.
+ * Bounds the catch-up burst so a stall cannot lock up the browser.
+ */
+const MAX_CATCH_UP_TICKS = 5;
+
 export class GameScene extends Phaser.Scene {
   /** Optional pre-existing room handed in from LobbyScene (so we don't
    *  open a duplicate Colyseus connection on every scene swap). */
@@ -232,6 +249,12 @@ export class GameScene extends Phaser.Scene {
   private currentTick = 0;
   private moveSpeed = 120;
   private readonly PLAYER_COLLISION_RADIUS = 10;
+  /**
+   * Reconciles the locally predicted position against the authoritative
+   * server position. Small errors are bled off smoothly (no rubber
+   * banding); large errors (respawn / teleport / map change) snap.
+   */
+  private readonly predictor = new MovementPredictor();
 
   private readonly VFX_GAPS = {
     bolter: 28,
@@ -270,6 +293,10 @@ export class GameScene extends Phaser.Scene {
   async create() {
     this.currentPlayer = null as any;
     this.currentPlayerState = null;
+    // A Phaser scene instance is REUSED when the scene is started again
+    // (scene.start), so the prediction history from the previous visit
+    // must be dropped here.
+    this.predictor.reset();
     this.transitioning = false;
     this.wasDead = false;
     this.room = null;
@@ -1169,12 +1196,21 @@ export class GameScene extends Phaser.Scene {
     cb.onChange(player, () => {
       this.handlePlayerMapChange(this.room.sessionId, player);
       this.currentPlayerState = player;
-      const dx = Math.abs(sprite.x - player.x);
-      const dy = Math.abs(sprite.y - player.y);
-      if (dx > 32 || dy > 32) {
-        sprite.x = player.x;
-        sprite.y = player.y;
-      }
+      // ---- Reconcile the local prediction with the server truth ----
+      // The server echoes back the tick of the last input it consumed
+      // (`player.tick`), so its position corresponds to a KNOWN point
+      // on our prediction timeline. Comparing against OUR prediction
+      // for that same tick removes the network-latency component, which
+      // is what used to cause rubber banding at higher movement speeds.
+      const reconciled = this.predictor.reconcile(
+        player.x,
+        player.y,
+        player.tick ?? -1,
+        sprite.x,
+        sprite.y,
+      );
+      sprite.x = reconciled.x;
+      sprite.y = reconciled.y;
       updateStatsHud(this.statsHud, player);
       updateXpBar(this.xpBar, player, {
         onLevelUp: (level) => {
@@ -1326,7 +1362,17 @@ export class GameScene extends Phaser.Scene {
       this.scene.start("lobby", { room: this.room, client: this.client });
       return;
     }
-    if (isLocal) this.lastLocalMapId = mapId;
+    if (isLocal) {
+      // Only act when the map ACTUALLY changed. This handler runs on
+      // every server patch, so an unconditional reset here would wipe
+      // the prediction history every single frame.
+      if (this.lastLocalMapId !== mapId) {
+        this.lastLocalMapId = mapId;
+        // New map => new collision grid => the prediction history refers
+        // to a different world. Drop it so reconciliation starts clean.
+        this.predictor.reset();
+      }
+    }
 
     // ---- Remote player returned to the lobby -> remove sprite ----
     if (!isLocal && mapId === "lobby" && this.playerEntities[sessionId]) {
@@ -2219,6 +2265,20 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ---- Fixed-timestep tick ----
+  /**
+   * The current map's collision grid in the shape the shared movement
+   * module expects. Kept in one place so the client and the server
+   * always collide against the SAME data with the SAME code.
+   */
+  private collisionWorld(): CircleGrid {
+    return {
+      grid: this.mapData.collisionGrid,
+      cols: this.mapData.cols,
+      rows: this.mapData.rows,
+      tileSize: this.mapData.tileSize,
+    };
+  }
+
   fixedTick(): void {
     this.currentTick++;
     const now = Date.now();
@@ -2254,29 +2314,37 @@ export class GameScene extends Phaser.Scene {
       this.currentPlayerState?.moveSpeed > 0
         ? this.currentPlayerState.moveSpeed
         : this.moveSpeed;
-    this.currentPlayer.x += dirX * speed * dt;
-    this.currentPlayer.y += dirY * speed * dt;
-    this.currentPlayer.x = Phaser.Math.Clamp(
+    // Shared swept collision (identical maths to the server's
+    // MapSystem.moveWithCollision): sub-stepped so a fast player can
+    // never tunnel through a wall, and axis-separated so the player
+    // slides along walls instead of sticking to them.
+    const moved = moveCircleWithCollision(
       this.currentPlayer.x,
+      this.currentPlayer.y,
+      dirX * speed * dt,
+      dirY * speed * dt,
+      this.PLAYER_COLLISION_RADIUS,
+      this.collisionWorld(),
+    );
+    this.currentPlayer.x = Phaser.Math.Clamp(
+      moved.x,
       0,
       this.mapData.widthPx,
     );
     this.currentPlayer.y = Phaser.Math.Clamp(
-      this.currentPlayer.y,
+      moved.y,
       0,
       this.mapData.heightPx,
     );
-    const resolved = resolveTileCollision(
+
+    // Record the predicted position for this input tick so the server
+    // can later acknowledge exactly this tick and we can measure the
+    // TRUE divergence (latency removed) instead of guessing.
+    this.predictor.record(
+      this.currentTick,
       this.currentPlayer.x,
       this.currentPlayer.y,
-      this.PLAYER_COLLISION_RADIUS,
-      this.mapData.collisionGrid,
-      this.mapData.cols,
-      this.mapData.rows,
-      this.mapData.tileSize,
     );
-    this.currentPlayer.x = resolved.x;
-    this.currentPlayer.y = resolved.y;
 
     // ---- Exit-locked toast while standing on the exit before elite death ----
     const onExit =
@@ -2406,15 +2474,31 @@ export class GameScene extends Phaser.Scene {
 
   update(_t: number, delta: number): void {
     if (!this.room) return;
-    this.elapsedTime += delta;
+    // Industry standard catch-up handling:
+    //  - clamp the frame delta so a stall (tab in the background, a GC
+    //    pause, a long GC) can never produce an unbounded burst of
+    //    catch-up ticks (the "spiral of death"), and
+    //  - NEVER discard the accumulated time. The old code did
+    //    `this.elapsedTime = 0` after 5 catch-up ticks, which
+    //    permanently threw away simulated time; the client then sent
+    //    fewer inputs per second than the server expected and the two
+    //    simulations drifted apart - a permanent source of the
+    //    rubber banding / skipping.
+    this.elapsedTime += Math.min(delta, MAX_FRAME_DELTA_MS);
     let catchUpTicks = 0;
-    while (this.elapsedTime >= this.fixedTimeStep) {
+    while (
+      this.elapsedTime >= this.fixedTimeStep &&
+      catchUpTicks < MAX_CATCH_UP_TICKS
+    ) {
       this.elapsedTime -= this.fixedTimeStep;
       this.fixedTick();
-      if (++catchUpTicks >= 5) {
-        this.elapsedTime = 0;
-        break;
-      }
+      catchUpTicks++;
+    }
+    // Keep at most one tick of debt. Anything more is a backlog we
+    // cannot simulate, but dropping it entirely would desynchronise
+    // the input stream again.
+    if (this.elapsedTime > this.fixedTimeStep) {
+      this.elapsedTime = this.fixedTimeStep;
     }
   }
 }

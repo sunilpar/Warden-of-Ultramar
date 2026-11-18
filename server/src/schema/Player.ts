@@ -154,6 +154,30 @@ export class Player extends Schema {
   // ---- Input queue (local — never synced) ----
   inputQueue: InputData[] = [];
 
+  /**
+   * Timestamp (ms) of the last server tick in which this player's input
+   * queue was processed (local — never synced).
+   *
+   * Used to bound how many input packets the server may consume per tick
+   * by REAL elapsed time: a player can never advance further than the
+   * wall-clock time that actually passed. This is the primary anti
+   * speed-hack guard and, at the same time, it lets a client that
+   * legitimately stalled catch up smoothly instead of losing movement.
+   */
+  lastInputAt: number = 0;
+
+  /**
+   * Fractional "input debt" (in client ticks) — how much wall-clock
+   * time has passed that the server has not yet consumed input for.
+   *
+   * The server accumulates the elapsed time here and spends it as it
+   * consumes packets. Without this accumulator a jittery tick (e.g. the
+   * simulation loop running two ticks in one frame and none in the
+   * next) would consume a whole extra tick of movement, making the
+   * player move faster than real time.
+   */
+  inputDebt: number = 0;
+
   // ---- Skill levels (synced) — DERIVED from the equipped slots.
   //      Level of a skill = highest level among that skill's cards in the
   //      HUD slots. 0 / absent = not equipped anywhere. ----

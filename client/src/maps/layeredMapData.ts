@@ -218,66 +218,9 @@ export const LAYERED_MAP: LayeredMapData = {
 };
 
 // ============================================================
-// O(1) GRID COLLISION RESOLUTION
+// GRID COLLISION RESOLUTION
 // ============================================================
-// MUST MATCH server's resolveTileCollision() exactly.
-// The player is a circle (radius < tileSize/2). At 32px tiles the
-// radius must be < 16, so we use 10 for the player. A 3×3 neighborhood
-// is sufficient because radius < tileSize/2 means the circle overlaps
-// at most 4 grid cells.
-
-export function resolveTileCollision(
-  x: number,
-  y: number,
-  radius: number,
-  grid: Uint8Array,
-  cols: number,
-  rows: number,
-  tileSize: number,
-): { x: number; y: number } {
-  const col = Math.floor(x / tileSize);
-  const row = Math.floor(y / tileSize);
-
-  for (let dr = -1; dr <= 1; dr++) {
-    for (let dc = -1; dc <= 1; dc++) {
-      const r = row + dr;
-      const c = col + dc;
-      if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
-      if (!grid[r * cols + c]) continue;
-
-      // Cell rect bounds
-      const cellX = c * tileSize;
-      const cellY = r * tileSize;
-
-      // Closest point on the cell rect to the circle center
-      const closestX = Math.max(cellX, Math.min(x, cellX + tileSize));
-      const closestY = Math.max(cellY, Math.min(y, cellY + tileSize));
-      const dx = x - closestX;
-      const dy = y - closestY;
-      const distSq = dx * dx + dy * dy;
-
-      if (distSq < radius * radius) {
-        const dist = Math.sqrt(distSq);
-        if (dist > 0.0001) {
-          // Push circle out along the penetration vector
-          const push = radius - dist;
-          x += (dx / dist) * push;
-          y += (dy / dist) * push;
-        } else {
-          // Center is inside the cell - push out along nearest edge
-          const dLeft = x - cellX;
-          const dRight = cellX + tileSize - x;
-          const dTop = y - cellY;
-          const dBottom = cellY + tileSize - y;
-          const minD = Math.min(dLeft, dRight, dTop, dBottom);
-          if (minD === dLeft) x = cellX - radius;
-          else if (minD === dRight) x = cellX + tileSize + radius;
-          else if (minD === dTop) y = cellY - radius;
-          else y = cellY + tileSize + radius;
-        }
-      }
-    }
-  }
-
-  return { x, y };
-}
+// The collision maths now lives in ./movement.ts, which is a
+// byte-identical copy of the server's server/src/systems/movement.ts.
+// Both sides MUST run the same code or their positions diverge and
+// the client rubber-bands. Use moveCircleWithCollision() there.

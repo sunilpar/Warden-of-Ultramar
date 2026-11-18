@@ -34,6 +34,18 @@ export interface CollisionResolver {
     y: number,
     radius: number,
   ): { x: number; y: number };
+  /**
+   * Move by (dx, dy) with continuous collision detection.
+   * Sub-stepped so a fast enemy can never tunnel through a wall, and
+   * axis-separated so it slides along walls instead of sticking.
+   */
+  moveWithCollision(
+    x: number,
+    y: number,
+    dx: number,
+    dy: number,
+    radius: number,
+  ): { x: number; y: number };
   readonly width: number;
   readonly height: number;
 }
@@ -546,17 +558,18 @@ export class EnemySystem {
     }
     enemy.recalcDerivedStats();
     const speed = enemy.moveSpeed;
-    enemy.x += dx * speed * dt;
-    enemy.y += dy * speed * dt;
-    enemy.x = Math.max(0, Math.min(this.mapSystem.width, enemy.x));
-    enemy.y = Math.max(0, Math.min(this.mapSystem.height, enemy.y));
-    const resolved = this.mapSystem.resolveTileCollision(
+    // Swept collision (same maths as the player): sub-stepped so a fast
+    // enemy can never tunnel through a wall, and axis-separated so it
+    // slides along walls instead of sticking to them.
+    const moved = this.mapSystem.moveWithCollision(
       enemy.x,
       enemy.y,
+      dx * speed * dt,
+      dy * speed * dt,
       enemy.collisionRadius,
     );
-    enemy.x = resolved.x;
-    enemy.y = resolved.y;
+    enemy.x = Math.max(0, Math.min(this.mapSystem.width, moved.x));
+    enemy.y = Math.max(0, Math.min(this.mapSystem.height, moved.y));
   }
 
   /**

@@ -48,13 +48,32 @@ import { CardInstance } from "./CardInstance";
 import { getSkillHitFeedback, SKILL_DEFS, } from "../config/skillDefs";
 /** Number of HUD card slots (input bindings: LMB, RMB, SPC, 1, 2). */
 export const NUM_CARD_SLOTS = 5;
+/** Number of backpack inventory slots (the I-tab shelf: 5 cols x 4 rows). */
+export const NUM_INVENTORY_SLOTS = 20;
 export class Player extends Schema {
     constructor() {
         super();
+        // ---- Identity (NOT synced — server-only) ----
+        /**
+         * The owning client's Colyseus session id. Set once in GameRoom.onJoin
+         * right after the Player is created. Needed for server-side lookups
+         * (e.g. this.clients.get(player.sessionId) to send per-player
+         * messages like the map-stat picker offer). Never synced to clients.
+         */
+        this.sessionId = "";
         // ---- Position (synced) ----
         this.x = 0;
         this.y = 0;
         this.tick = 0;
+        /**
+         * Persistent display name assigned by the server on first join.
+         * Survives `initBaseStats()` and `freshLoadout()` (death/lobby trip)
+         * because the GameRoom only sets it once per `clientPlayerId`.
+         * Synced so every client can render it above the player's sprite
+         * in the lobby and in the gameplay maps. The client never edits
+         * this field directly — the server is the source of truth.
+         */
+        this.displayName = "";
         // ---- Health (synced) ----
         this.maxHealth = PLAYER_STATS.BASE.MAX_HEALTH;
         this.currentHealth = PLAYER_STATS.BASE.MAX_HEALTH;
@@ -82,6 +101,15 @@ export class Player extends Schema {
         this.critDamage = PLAYER_STATS.BASE.CRIT_DAMAGE;
         /** Defence, fraction 0..1 (0.2 = take 20% less damage). Ignored on crits. */
         this.defence = PLAYER_STATS.BASE.DEFENCE;
+        /**
+         * Increased drop rate (0 = baseline, 0.5 = +50% cards). Sourced from
+         * gear/skills and read by GameRoom to set the room's LootSystem drop
+         * context (room uses the HIGHEST player's dropRate).
+         */
+        this.dropRate = 0;
+        /** Transient flat cooldown reduction (0..0.6) added by active map stats.
+         *  Cleared every map transition; read by slotCooldownReduction(). */
+        this.mapCooldownReduction = 0;
         // ---- Shock status (synced) ----
         /** Server timestamp (ms) until which the player is shocked (takes more damage, slowed). */
         this.shockUntil = 0;
@@ -106,6 +134,28 @@ export class Player extends Schema {
         this.incomingDamageMultiplier = 1.0;
         // ---- Input queue (local — never synced) ----
         this.inputQueue = [];
+        /**
+         * Timestamp (ms) of the last server tick in which this player's input
+         * queue was processed (local — never synced).
+         *
+         * Used to bound how many input packets the server may consume per tick
+         * by REAL elapsed time: a player can never advance further than the
+         * wall-clock time that actually passed. This is the primary anti
+         * speed-hack guard and, at the same time, it lets a client that
+         * legitimately stalled catch up smoothly instead of losing movement.
+         */
+        this.lastInputAt = 0;
+        /**
+         * Fractional "input debt" (in client ticks) — how much wall-clock
+         * time has passed that the server has not yet consumed input for.
+         *
+         * The server accumulates the elapsed time here and spends it as it
+         * consumes packets. Without this accumulator a jittery tick (e.g. the
+         * simulation loop running two ticks in one frame and none in the
+         * next) would consume a whole extra tick of movement, making the
+         * player move faster than real time.
+         */
+        this.inputDebt = 0;
         // ---- Skill levels (synced) — DERIVED from the equipped slots.
         //      Level of a skill = highest level among that skill's cards in the
         //      HUD slots. 0 / absent = not equipped anywhere. ----
@@ -158,6 +208,13 @@ export class Player extends Schema {
          * allowed; each slot is independent.
          */
         this.equippedSlots = new ArraySchema();
+        /**
+         * THE INVENTORY (I-tab). Synced array of exactly NUM_INVENTORY_SLOTS
+         * entries. Same sentinel convention as equippedSlots: an EMPTY entry
+         * is a CardInstance with skill === "". Pure storage - cards here are
+         * never cast; drag them to a HUD slot to equip.
+         */
+        this.inventorySlots = new ArraySchema();
         /** Shield CARD/SLOT level (controls recovery delay). Lower delay per level.
          *  Upgraded via the C-tab / message 6 (stat === "shield"). */
         this.shieldCardLevel = 1;
@@ -167,6 +224,23 @@ export class Player extends Schema {
          * while at 0. While Date.now() < this value, no recharge happens.
          */
         this.shieldRechargeAt = 0;
+        /**
+         * WHICH map this player is currently on. Synced so the client can
+         * decide which scene to render (LobbyScene vs GameScene) and so the
+         * server can scope enemy systems to the room's gameplay map only.
+         *
+         *   "lobby" = safe zone (no enemies, no spawning, free movement).
+         *             Set on join, on death, and on entering the lobby from
+         *             any other map. The local player can click the "Play"
+         *             polygon to leave the lobby.
+         *   "map1" / "map2" = gameplay maps. The room's enemy systems only
+         *             operate on players whose currentMapId is the room's
+         *             main gameplay map.
+         *
+         * When this changes, the client tears down its current scene and
+         * renders the new one (no in-place swap like map<->map).
+         */
+        this.currentMapId = "lobby";
         // Fixed-size HUD: 5 entries, all empty sentinels to start.
         // (ArraySchema cannot hold nulls — an empty slot is a CardInstance
         // with skill === ""; only access slots through the helpers below.)
@@ -174,6 +248,9 @@ export class Player extends Schema {
             this.equippedSlots.push(new CardInstance());
             this.slotCooldownEndsAt.push(0);
             this.slotHealKills.push(0);
+        }
+        for (let i = 0; i < NUM_INVENTORY_SLOTS; i++) {
+            this.inventorySlots.push(new CardInstance());
         }
     }
     // ============================================================
@@ -295,9 +372,11 @@ export class Player extends Schema {
             return 0;
         // Defence reduces incoming damage. Crits bypass only 50% of defence.
         // Shock reduces defence by 20% (can go negative = bonus damage).
+        // Card bonus (inc_defence) adds on top of the base defence, capped at 0.95.
         const isShocked = Date.now() < this.shockUntil;
         const shockMod = isShocked ? -0.2 : 0.0;
-        const effectiveDefence = (isCrit ? this.defence * 0.5 : this.defence) + shockMod;
+        const baseDefence = Math.min(0.95, this.defence + this.cardDefenceBonus());
+        const effectiveDefence = (isCrit ? baseDefence * 0.5 : baseDefence) + shockMod;
         const mitigated = rawDamage * (1.0 - effectiveDefence);
         let dmg = mitigated * this.incomingDamageMultiplier;
         let shielded = false;
@@ -416,6 +495,22 @@ export class Player extends Schema {
         this.bleedUntil = 0;
         this.bleedDps = 0;
         this.invincibleUntil = 0;
+    }
+    /**
+     * FRESH-LOADOUT RESET (lobby arrival).
+     * Like `respawn()` but ALSO wipes the inventory (no carried cards into
+     * the lobby). Used by the GameRoom when a player dies or presses
+     * "Quit to Lobby" - the user explicitly asked for "fresh loadout each
+     * visit", so we discard any loot the player had banked.
+     */
+    freshLoadout() {
+        this.respawn();
+        // Empty inventory (same sentinel pattern as clearSlots()).
+        for (let i = 0; i < NUM_INVENTORY_SLOTS; i++) {
+            const c = this.inventorySlots[i];
+            if (c && c.skill)
+                this.emptyCardInPlace(c);
+        }
     }
     // ============================================================
     // SKILLS (levels derived from equipped slots)
@@ -585,16 +680,34 @@ export class Player extends Schema {
      */
     slotCooldownReduction(i) {
         const c = this.slotCard(i);
-        if (!c)
-            return 0;
-        return Math.min(0.6, this.sumModValues(c, "inc_cooldown", 0));
+        const cardCD = c ? this.sumModValues(c, "inc_cooldown", 0) : 0;
+        // Map stats (Rejuvinated) add a flat room-wide reduction on top of
+        // any card-sourced inc_cooldown. Total capped at 60% reduction.
+        return Math.min(0.6, cardCD + this.mapCooldownReduction);
     }
-    /** Radius multiplier from the card in slot i (unique wide_sweep -> 2x). */
+    /**
+     * Radius multiplier from the card in slot i.
+     * Combines: inc_aoe rolled values (multiplicative) + unique wide_sweep (2x).
+     * A card with inc_aoe v=0.20 AND wide_sweep returns 1.20 * 2.0 = 2.4x.
+     */
     slotRadiusMult(i) {
         const c = this.slotCard(i);
         if (!c)
             return 1;
-        return c.modIds.includes("wide_sweep") ? 2.0 : 1;
+        let mult = 1 + this.sumModValues(c, "inc_aoe", 0);
+        if (c.modIds.includes("wide_sweep"))
+            mult *= 2.0;
+        return mult;
+    }
+    /** Additive defence bonus from ALL equipped cards (sums inc_defence). */
+    cardDefenceBonus() {
+        let bonus = 0;
+        for (const card of this.equippedSlots) {
+            if (!card || !card.skill)
+                continue;
+            bonus += this.sumModValues(card, "inc_defence", 0);
+        }
+        return bonus;
     }
     /** Damage multiplier from the unique wide_sweep in slot i (0.5 when present). */
     slotUniqueDamageMult(i) {
@@ -680,6 +793,85 @@ export class Player extends Schema {
         this.onSlotsChanged();
         return true;
     }
+    // ============================================================
+    // INVENTORY (I-tab backpack, 20 slots)
+    // ============================================================
+    /** The card stored in inventory slot i (null when empty). */
+    inventoryCard(i) {
+        const c = this.inventorySlots[i];
+        return c && c.skill ? c : null;
+    }
+    /** True if inventory slot i holds a card. */
+    hasInventoryCard(i) {
+        return this.inventoryCard(i) !== null;
+    }
+    /** First empty inventory index (-1 when the backpack is full). */
+    firstEmptyInventory() {
+        for (let i = 0; i < NUM_INVENTORY_SLOTS; i++) {
+            if (!this.hasInventoryCard(i))
+                return i;
+        }
+        return -1;
+    }
+    /**
+     * Place a card into inventory slot i. Any card already there is
+     * OVERWRITTEN and returned (caller decides what happens to it).
+     * On an invalid index the card is returned unchanged.
+     */
+    setInventoryCard(i, card) {
+        if (i < 0 || i >= NUM_INVENTORY_SLOTS)
+            return card;
+        const old = this.inventoryCard(i);
+        this.inventorySlots[i] = card;
+        return old;
+    }
+    /** Remove + return the card in inventory slot i (null when empty). */
+    clearInventoryCard(i) {
+        if (i < 0 || i >= NUM_INVENTORY_SLOTS)
+            return null;
+        const old = this.inventoryCard(i);
+        if (!old)
+            return null;
+        this.inventorySlots[i] = new CardInstance();
+        return old;
+    }
+    /** Move a stored card from inventory slot from -> to (insert-shift
+     *  semantics, mirroring moveSlotCard for HUD reordering). */
+    moveInventoryCard(from, to) {
+        if (from === to)
+            return false;
+        if (from < 0 || from >= NUM_INVENTORY_SLOTS)
+            return false;
+        if (to < 0 || to >= NUM_INVENTORY_SLOTS)
+            return false;
+        const card = this.inventoryCard(from);
+        if (!card)
+            return false;
+        if (from < to) {
+            for (let i = from; i < to; i++) {
+                this.inventorySlots[i] = this.inventorySlots[i + 1];
+            }
+        }
+        else {
+            for (let i = from; i > to; i--) {
+                this.inventorySlots[i] = this.inventorySlots[i - 1];
+            }
+        }
+        this.inventorySlots[to] = card;
+        return true;
+    }
+    /** Swap two inventory slots (used when both hold cards and the
+     *  player drags one onto the other). */
+    swapInventoryCards(a, b) {
+        if (a === b || a < 0 || b < 0)
+            return false;
+        if (a >= NUM_INVENTORY_SLOTS || b >= NUM_INVENTORY_SLOTS)
+            return false;
+        const tmp = this.inventorySlots[a];
+        this.inventorySlots[a] = this.inventorySlots[b];
+        this.inventorySlots[b] = tmp;
+        return true;
+    }
     /** Advance ALL equipped skills by 1 (debug key). */
     upgradeAllSkills() {
         for (const c of this.equippedSlots) {
@@ -705,9 +897,7 @@ export class Player extends Schema {
         if ((this.slotCooldownRemaining[i] ?? 0) > 0)
             return false;
         const c = this.equippedSlots[i];
-        if (c &&
-            c.skill === "heal" &&
-            c.level < SKILL_DEFS.heal.aoeUnlockLevel) {
+        if (c && c.skill === "heal" && c.level < SKILL_DEFS.heal.aoeUnlockLevel) {
             return (this.slotHealKills[i] ?? 0) >= this.healKillThreshold(c.level);
         }
         return true;
@@ -813,6 +1003,9 @@ __decorate([
     type("number")
 ], Player.prototype, "tick", void 0);
 __decorate([
+    type("string")
+], Player.prototype, "displayName", void 0);
+__decorate([
     type("number")
 ], Player.prototype, "maxHealth", void 0);
 __decorate([
@@ -842,6 +1035,9 @@ __decorate([
 __decorate([
     type("number")
 ], Player.prototype, "defence", void 0);
+__decorate([
+    type("number")
+], Player.prototype, "dropRate", void 0);
 __decorate([
     type("number")
 ], Player.prototype, "shockUntil", void 0);
@@ -900,5 +1096,11 @@ __decorate([
     type([CardInstance])
 ], Player.prototype, "equippedSlots", void 0);
 __decorate([
+    type([CardInstance])
+], Player.prototype, "inventorySlots", void 0);
+__decorate([
     type("number")
 ], Player.prototype, "shieldCardLevel", void 0);
+__decorate([
+    type("string")
+], Player.prototype, "currentMapId", void 0);

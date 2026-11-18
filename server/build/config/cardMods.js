@@ -1,0 +1,15 @@
+export const CARD_MOD_DISPLAY = {
+    inc_crit_rate: { id: "inc_crit_rate", label: "Crit Rate", color: "#66ff66", kind: "percent", fallbackValue: 0.03 },
+    inc_crit_damage: { id: "inc_crit_damage", label: "Crit Damage", color: "#ffd700", kind: "percent", fallbackValue: 0.3 },
+    inc_atk_damage: { id: "inc_atk_damage", label: "Damage", color: "#ff9955", kind: "percent", fallbackValue: 0.03 },
+    inc_cooldown: { id: "inc_cooldown", label: "Cooldown Reduction", color: "#4da6ff", kind: "percent", fallbackValue: 0.03 },
+    inc_shield_amount: { id: "inc_shield_amount", label: "Shield", color: "#33b5ff", kind: "flat", fallbackValue: 60 },
+    wide_sweep: { id: "wide_sweep", label: "2x Radius, 1/2 Damage", color: "#b266ff", kind: "composite", fallbackValue: 0 },
+    inc_aoe: { id: "inc_aoe", label: "Area of Effect", color: "#88ddff", kind: "percent", fallbackValue: 0.03 },
+    inc_defence: { id: "inc_defence", label: "Defence", color: "#88aaff", kind: "percent", fallbackValue: 0.02 },
+};
+export function cardModMetadata() {
+    return Object.values(CARD_MOD_DISPLAY).map((m) => ({
+        id: m.id, label: m.label, color: m.color, kind: m.kind, fallbackValue: m.fallbackValue,
+    }));
+}

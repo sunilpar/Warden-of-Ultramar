@@ -342,7 +342,7 @@ export class GameRoom extends Room {
     this.healSystem = new HealSystem(this.state);
     this.pulseSystem = new PulseSystem(this.state);
     this.shockSystem = new ShockSystem(this.state, this.mapSystem);
-    this.dashSystem = new DashSystem(this.state);
+    this.dashSystem = new DashSystem(this.state, this.mapSystem);
     this.vortexSystem = new VortexSystem(this.state, this.mapSystem);
     // Cross-link: enemies can fire projectiles + claws.
     this.enemySystem.setProjectileSystem(this.projectileSystem);

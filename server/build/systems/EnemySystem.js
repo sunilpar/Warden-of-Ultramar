@@ -55,7 +55,10 @@ export class EnemySystem {
         this.pendingSlams = this.pendingSlams.filter((s) => s.castAt > now);
         for (const s of ready) {
             if (this.slamSystem) {
-                this.slamSystem.castSlam(s.ownerId, "enemy", s.x, s.y, s.angle, s.level, s.attack, s.damageMultiplier, s.critRate, s.critDamage);
+                const enemy = this.state.enemies.get(s.ownerId);
+                // Enemies with no card / no slam card get radiusMult=1.
+                const radiusMult = enemy ? enemy.cardRadiusMult("slam") : 1;
+                this.slamSystem.castSlam(s.ownerId, "enemy", s.x, s.y, s.angle, s.level, s.attack, s.damageMultiplier, s.critRate, s.critDamage, radiusMult);
             }
         }
         this.state.enemies.forEach((enemy) => {
@@ -414,13 +417,12 @@ export class EnemySystem {
         }
         enemy.recalcDerivedStats();
         const speed = enemy.moveSpeed;
-        enemy.x += dx * speed * dt;
-        enemy.y += dy * speed * dt;
-        enemy.x = Math.max(0, Math.min(this.mapSystem.width, enemy.x));
-        enemy.y = Math.max(0, Math.min(this.mapSystem.height, enemy.y));
-        const resolved = this.mapSystem.resolveTileCollision(enemy.x, enemy.y, enemy.collisionRadius);
-        enemy.x = resolved.x;
-        enemy.y = resolved.y;
+        // Swept collision (same maths as the player): sub-stepped so a fast
+        // enemy can never tunnel through a wall, and axis-separated so it
+        // slides along walls instead of sticking to them.
+        const moved = this.mapSystem.moveWithCollision(enemy.x, enemy.y, dx * speed * dt, dy * speed * dt, enemy.collisionRadius);
+        enemy.x = Math.max(0, Math.min(this.mapSystem.width, moved.x));
+        enemy.y = Math.max(0, Math.min(this.mapSystem.height, moved.y));
     }
     /**
      * Attempt to use a skill this tick. Random roll; on success pick a random

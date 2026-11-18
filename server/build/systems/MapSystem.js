@@ -1,117 +1,92 @@
-/**
- * Map System (Layered / Grid-Based)
- * ==================================
- * Authoritative collision against the layered Tiled map.
- *
- * Collision is O(1): the player circle (radius < tileSize/2) overlaps at most
- * 4 grid cells, so we check a 3×3 neighborhood around the player's cell.
- *
- * MUST match the client's resolveTileCollision() exactly.
- */
-import { LAYERED_MAP } from "../config/layeredMap";
+import { moveCircleWithCollision, resolveCircleTileCollision, } from "./movement";
 export class MapSystem {
-    constructor() {
-        this.tileSize = LAYERED_MAP.tileSize;
-        this.cols = LAYERED_MAP.cols;
-        this.rows = LAYERED_MAP.rows;
-        this.grid = LAYERED_MAP.collisionGrid;
+    constructor(data) {
+        this.data = data;
+        this.tileSize = data.tileSize;
+        this.cols = data.cols;
+        this.rows = data.rows;
+        this.grid = data.collisionGrid;
     }
     get width() {
-        return LAYERED_MAP.widthPx;
+        return this.data.widthPx;
     }
     get height() {
-        return LAYERED_MAP.heightPx;
+        return this.data.heightPx;
     }
     getSpawnPoint() {
-        return { ...LAYERED_MAP.spawnPoint };
+        return { ...this.data.spawnPoint };
+    }
+    getExitPoint() {
+        return { ...this.data.exitPoint };
+    }
+    /**
+     * The collision grid in the shape the shared movement module expects.
+     */
+    get world() {
+        return {
+            grid: this.grid,
+            cols: this.cols,
+            rows: this.rows,
+            tileSize: this.tileSize,
+        };
     }
     /**
      * Resolve the player circle out of any solid tiles it overlaps.
      * Returns the corrected position. O(1).
+     *
+     * Uses ITERATIVE depenetration (multiple passes) so that pushing out
+     * of one wall cannot push the player into an adjacent wall - which
+     * was the source of the corner-clipping artefact.
      */
     resolveTileCollision(x, y, radius) {
-        const col = Math.floor(x / this.tileSize);
-        const row = Math.floor(y / this.tileSize);
-        for (let dr = -1; dr <= 1; dr++) {
-            for (let dc = -1; dc <= 1; dc++) {
-                const r = row + dr;
-                const c = col + dc;
-                if (r < 0 || r >= this.rows || c < 0 || c >= this.cols)
-                    continue;
-                if (!this.grid[r * this.cols + c])
-                    continue;
-                const cellX = c * this.tileSize;
-                const cellY = r * this.tileSize;
-                const closestX = Math.max(cellX, Math.min(x, cellX + this.tileSize));
-                const closestY = Math.max(cellY, Math.min(y, cellY + this.tileSize));
-                const dx = x - closestX;
-                const dy = y - closestY;
-                const distSq = dx * dx + dy * dy;
-                if (distSq < radius * radius) {
-                    const dist = Math.sqrt(distSq);
-                    if (dist > 0.0001) {
-                        const push = radius - dist;
-                        x += (dx / dist) * push;
-                        y += (dy / dist) * push;
-                    }
-                    else {
-                        // Center inside the cell — push out along nearest edge
-                        const dLeft = x - cellX;
-                        const dRight = cellX + this.tileSize - x;
-                        const dTop = y - cellY;
-                        const dBottom = cellY + this.tileSize - y;
-                        const minD = Math.min(dLeft, dRight, dTop, dBottom);
-                        if (minD === dLeft)
-                            x = cellX - radius;
-                        else if (minD === dRight)
-                            x = cellX + this.tileSize + radius;
-                        else if (minD === dTop)
-                            y = cellY - radius;
-                        else
-                            y = cellY + this.tileSize + radius;
-                    }
-                }
-            }
-        }
-        return { x, y };
+        return resolveCircleTileCollision(x, y, radius, this.world);
     }
     /**
-     * Resolve a rectangle (AABB) out of any solid tiles it overlaps.
-     * hw = half-width, hh = half-height. Returns corrected position.
+     * Move a circle by (dx, dy) with CONTINUOUS COLLISION DETECTION.
+     *
+     * This is the fix for high-speed movement clipping through walls:
+     * the move is split into sub-steps small enough that a wall can never
+     * be skipped, and each sub-step is resolved against the grid.
+     * Movement is axis-separated so the player slides along walls.
      */
-    resolveRectTileCollision(x, y, hw, hh) {
-        // Check tiles overlapping the rectangle bounds
-        const minCol = Math.floor((x - hw) / this.tileSize);
-        const maxCol = Math.floor((x + hw) / this.tileSize);
-        const minRow = Math.floor((y - hh) / this.tileSize);
-        const maxRow = Math.floor((y + hh) / this.tileSize);
-        for (let r = minRow; r <= maxRow; r++) {
-            for (let c = minCol; c <= maxCol; c++) {
-                if (r < 0 || r >= this.rows || c < 0 || c >= this.cols)
-                    continue;
-                if (!this.grid[r * this.cols + c])
-                    continue;
-                const cellX = c * this.tileSize;
-                const cellY = r * this.tileSize;
-                // AABB overlap test
-                const overlapLeft = (x + hw) - cellX; // how far rect penetrates from left
-                const overlapRight = (cellX + this.tileSize) - (x - hw);
-                const overlapTop = (y + hh) - cellY;
-                const overlapBottom = (cellY + this.tileSize) - (y - hh);
-                if (overlapLeft > 0 && overlapRight > 0 && overlapTop > 0 && overlapBottom > 0) {
-                    // Push out along axis of least penetration
-                    const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
-                    if (minOverlap === overlapLeft)
-                        x -= overlapLeft;
-                    else if (minOverlap === overlapRight)
-                        x += overlapRight;
-                    else if (minOverlap === overlapTop)
-                        y -= overlapTop;
-                    else
-                        y += overlapBottom;
-                }
+    moveWithCollision(x, y, dx, dy, radius) {
+        return moveCircleWithCollision(x, y, dx, dy, radius, this.world);
+    }
+    /**
+     * True if the given point is inside a solid tile. Used for line-of-
+     * sight / dash wall checks.
+     */
+    isSolidAt(x, y) {
+        const col = Math.floor(x / this.tileSize);
+        const row = Math.floor(y / this.tileSize);
+        if (row < 0 || row >= this.rows || col < 0 || col >= this.cols) {
+            return false;
+        }
+        return this.grid[row * this.cols + col] === 1;
+    }
+    /**
+     * Sweep a segment from (x1,y1) to (x2,y2) and return the fraction of
+     * the segment that is clear of solid tiles (0..1).
+     *
+     * Used for dashes and line-of-sight: a dash stops where the wall
+     * starts instead of teleporting through it.
+     */
+    sweepCoverage(x1, y1, x2, y2) {
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 1)
+            return 1;
+        // Sample finely enough that a wall (>= 1 tile = 32px) is always
+        // detected between two samples.
+        const stepSize = 4;
+        const steps = Math.ceil(dist / stepSize);
+        for (let i = 1; i < steps; i++) {
+            const t = i / steps;
+            if (this.isSolidAt(x1 + dx * t, y1 + dy * t)) {
+                return (i - 1) / steps;
             }
         }
-        return { x, y };
+        return 1;
     }
 }

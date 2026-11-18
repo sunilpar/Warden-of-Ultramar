@@ -1,5 +1,5 @@
 import { Slam } from "../schema/Slam";
-import { SLAM_DEF, applyCrit, computeSkillDamage } from "../config/skillDefs";
+import { SLAM_DEF, applyCrit, computeSkillDamage, getSlamHalfWidth, getSlamHalfHeight, } from "../config/skillDefs";
 export class SlamSystem {
     constructor(state, mapSystem) {
         this.state = state;
@@ -35,7 +35,7 @@ export class SlamSystem {
     // ============================================================
     // CASTING
     // ============================================================
-    castSlam(ownerId, faction, x, y, angle, skillLevel, casterAttack = 100, casterDamageMultiplier = 1.0, critRate = 0, critDamage = 1.5) {
+    castSlam(ownerId, faction, x, y, angle, skillLevel, casterAttack = 100, casterDamageMultiplier = 1.0, critRate = 0, critDamage = 1.5, cardRadiusMult = 1) {
         const range = SLAM_DEF.range(skillLevel);
         const vx = Math.cos(angle) * SLAM_DEF.speed;
         const vy = Math.sin(angle) * SLAM_DEF.speed;
@@ -47,6 +47,9 @@ export class SlamSystem {
         slam.vy = vy;
         slam.angle = angle;
         slam.level = skillLevel;
+        // inc_aoe scales the rectangular hitbox multiplicatively.
+        slam.halfWidth = Math.round(getSlamHalfWidth(skillLevel) * cardRadiusMult);
+        slam.halfHeight = Math.round(getSlamHalfHeight(skillLevel) * cardRadiusMult);
         slam.faction = faction;
         slam.ownerId = ownerId;
         slam.remainingRange = range;

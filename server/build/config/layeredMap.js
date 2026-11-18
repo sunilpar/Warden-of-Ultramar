@@ -82,6 +82,37 @@ function buildLayeredMap() {
     const spawnPoint = found
         ? { x: (minX + maxX) / 2, y: (minY + maxY) / 2 }
         : { x: tileSize, y: tileSize };
+    // ---- Find exit tiles ("exit point" property, 2x2 block in baselayer) ----
+    const exitTileIds = new Set();
+    for (const tile of tilesetJson.tiles) {
+        const globalId = tile.id + firstGid;
+        for (const prop of tile.properties) {
+            if (prop.name === "exit point" && prop.value === true) {
+                exitTileIds.add(globalId);
+            }
+        }
+    }
+    let exMinX = Infinity, exMinY = Infinity, exMaxX = -Infinity, exMaxY = -Infinity;
+    let exitFound = false;
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            if (exitTileIds.has(baselayerData[r * cols + c])) {
+                exitFound = true;
+                exMinX = Math.min(exMinX, c * tileSize);
+                exMinY = Math.min(exMinY, r * tileSize);
+                exMaxX = Math.max(exMaxX, c * tileSize + tileSize);
+                exMaxY = Math.max(exMaxY, r * tileSize + tileSize);
+            }
+        }
+    }
+    const exitPoint = exitFound
+        ? {
+            x: exMinX,
+            y: exMinY,
+            width: exMaxX - exMinX,
+            height: exMaxY - exMinY,
+        }
+        : { x: 0, y: 0, width: 0, height: 0 };
     // ---- Extract enemy spawn zones from the "enemy spawn" object layer ----
     const enemySpawnZones = [];
     const enemySpawnLayer = layers.find((l) => l.name === "enemy spawn");
@@ -104,6 +135,7 @@ function buildLayeredMap() {
         heightPx: rows * tileSize,
         collisionGrid,
         spawnPoint,
+        exitPoint,
         enemySpawnZones,
     };
 }
